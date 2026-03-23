@@ -3065,7 +3065,21 @@ function isAnchorBasedInsertSuggestion(mark: Mark, existingText: string): boolea
   if (mark.kind !== 'insert') return false;
   const data = mark.data as InsertData | undefined;
   const content = typeof data?.content === 'string' ? data.content : '';
-  return content.length > 0 && existingText !== content;
+  if (content.length === 0) return false;
+
+  const normalizedExisting = normalizeQuote(existingText);
+  if (normalizedExisting.length === 0) return true;
+
+  const normalizedQuote = normalizeQuote(mark.quote);
+  const normalizedContent = normalizeQuote(content);
+  // Anchor-based remote inserts are attached to the anchor quote text itself.
+  // Split live inserts can span multiple disjoint segments, so a per-range
+  // `existingText !== metadata.content` check falsely classifies them as anchor-only
+  // and duplicates the accepted content. Only treat the suggestion as anchor-based
+  // when the live marked text matches the anchor quote rather than the insert content.
+  return normalizedQuote.length > 0
+    && normalizedExisting === normalizedQuote
+    && normalizedExisting !== normalizedContent;
 }
 
 export function accept(view: EditorView, markId: string, parser?: MarkdownParser): boolean {

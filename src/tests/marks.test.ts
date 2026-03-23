@@ -3453,6 +3453,104 @@ test('metadata-only insert suggestions with collapsed ranges rehydrate at the in
   );
 });
 
+test('accept does not duplicate split insert suggestions that already exist in the document', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'inline*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'insert' },
+          by: { default: 'unknown' },
+          status: { default: 'pending' },
+          content: { default: null },
+          createdAt: { default: null },
+          updatedAt: { default: null },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      proofAuthored: {
+        attrs: {
+          by: { default: 'unknown' },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+    },
+  });
+
+  const markId = 'm-split-insert-accept';
+  const suggestionMark = schema.marks.proofSuggestion.create({
+    id: markId,
+    kind: 'insert',
+    by: 'ai:test',
+  });
+
+  let state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Baseline '),
+        schema.text('TRACE ', [suggestionMark]),
+        schema.text('FIX '),
+        schema.text('TEST', [suggestionMark]),
+      ]),
+    ]),
+    plugins: [new Plugin({
+      key: marksPluginKey,
+      state: {
+        init: () => ({
+          metadata: {
+            [markId]: {
+              kind: 'insert',
+              by: 'ai:test',
+              createdAt: new Date('2026-03-24T00:00:00.000Z').toISOString(),
+              content: 'TRACE FIX TEST',
+              status: 'pending',
+              quote: 'TRACE FIX TEST',
+            },
+          },
+          activeMarkId: null,
+        }),
+        apply: (tr, value) => {
+          const meta = tr.getMeta(marksPluginKey);
+          if (meta?.type === 'SET_METADATA') {
+            return { ...value, metadata: meta.metadata };
+          }
+          if (meta?.type === 'SET_ACTIVE') {
+            return { ...value, activeMarkId: meta.markId ?? null };
+          }
+          return value;
+        },
+      },
+    })],
+  });
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  const accepted = acceptMark(view, markId);
+  assert(accepted, 'Accept should succeed for split insert suggestions');
+  assertEqual(
+    state.doc.textBetween(0, state.doc.content.size, '\n', '\n'),
+    'Baseline TRACE FIX TEST',
+    'Accept should preserve the existing inserted text once instead of materializing a duplicate copy',
+  );
+  const remaining = getMarks(state).find((mark) => mark.id === markId);
+  assert(!remaining, 'Accept should remove the split insert suggestion mark');
+});
+
 test('accept preserves heading style for non-structural full-block replacements', () => {
   const schema = new Schema({
     nodes: {

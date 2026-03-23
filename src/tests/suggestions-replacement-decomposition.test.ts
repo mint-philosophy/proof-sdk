@@ -209,6 +209,32 @@ function run(): void {
     );
 
     state = createState({ from: 18, to: 18 });
+    let composedText = '';
+    for (const nextText of ['t', 'th', 'thi', 'this', 'this ', 'this i', 'this is']) {
+      const compositionTr = state.tr.insertText(nextText, 18, 18 + composedText.length);
+      state = state.apply(wrapTransactionForSuggestions(compositionTr, state, true));
+      composedText = nextText;
+      now += 100;
+    }
+
+    const compositionInsertMarks = getMarks(state).filter((mark) => mark.kind === 'insert');
+    assertEqual(
+      compositionInsertMarks.length,
+      1,
+      'Composition-style replacement updates should remain a single insert suggestion',
+    );
+    assertEqual(
+      state.doc.textContent,
+      'Alpha beta gamma.this is',
+      'Composition-style replacement updates should converge on the final committed text without duplicates',
+    );
+    assertEqual(
+      (compositionInsertMarks[0]?.data as InsertData | undefined)?.content,
+      'this is',
+      'Composition-style replacement updates should keep insert metadata aligned with the latest committed text',
+    );
+
+    state = createState({ from: 18, to: 18 });
     for (const char of ' This is the problem') {
       const pos = state.selection.from;
       state = state.apply(wrapTransactionForSuggestions(state.tr.insertText(char, pos, pos), state, true));

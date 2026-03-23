@@ -8,6 +8,7 @@
 import { $ctx, $prose } from '@milkdown/kit/utils';
 import { Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from '@milkdown/kit/prose/state';
 import type { MarkType, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
+import type { EditorView } from '@milkdown/kit/prose/view';
 
 import { marksPluginKey, getMarkMetadata, buildSuggestionMetadata, syncSuggestionMetadataTransaction } from './marks';
 import { isYjsChangeOriginTransaction } from './transaction-origins';
@@ -39,8 +40,11 @@ type SliceNode = {
 const COALESCE_WINDOW_MS = 5000;
 
 type InsertCoalesceState = { id: string; from: number; to: number; by: string; updatedAt: number };
+type TrackedDeleteIntent = { key: 'Backspace' | 'Delete'; modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean } };
 
 const lastInsertByActor = new Map<string, InsertCoalesceState>();
+const pendingModifiedDeleteIntents = new WeakMap<EditorView, { intent: TrackedDeleteIntent; at: number }>();
+const PENDING_DELETE_INTENT_TTL_MS = 1500;
 
 function normalizeSuggestionKind(kind: unknown): SuggestionKind {
   if (kind === 'insert' || kind === 'delete' || kind === 'replace') return kind;
@@ -563,7 +567,7 @@ function resolveForwardWordOffset(text: string): number {
 
 export function __debugResolveTrackedDeleteIntentFromBeforeInput(
   inputType: string
-): { key: 'Backspace' | 'Delete'; modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean } } | null {
+): TrackedDeleteIntent | null {
   switch (inputType) {
     case 'deleteContentBackward':
       return { key: 'Backspace' };
@@ -584,8 +588,45 @@ export function __debugResolveTrackedDeleteIntentFromBeforeInput(
   }
 }
 
+function rememberModifiedDeleteIntent(
+  view: EditorView,
+  event: Pick<KeyboardEvent, 'key' | 'altKey' | 'metaKey' | 'ctrlKey'>,
+): void {
+  if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+  if (!event.altKey && !event.metaKey && !event.ctrlKey) return;
+  pendingModifiedDeleteIntents.set(view, {
+    intent: {
+      key: event.key,
+      modifiers: {
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+      },
+    },
+    at: Date.now(),
+  });
+}
+
+function takePendingModifiedDeleteIntent(view: EditorView): TrackedDeleteIntent | null {
+  const entry = pendingModifiedDeleteIntents.get(view);
+  if (!entry) return null;
+  pendingModifiedDeleteIntents.delete(view);
+  if (Date.now() - entry.at > PENDING_DELETE_INTENT_TTL_MS) return null;
+  return entry.intent;
+}
+
+export function __debugResolveTrackedDeleteIntentForBeforeInput(
+  inputType: string,
+  pendingIntent: TrackedDeleteIntent | null,
+): TrackedDeleteIntent | null {
+  const mappedIntent = __debugResolveTrackedDeleteIntentFromBeforeInput(inputType);
+  if (!pendingIntent) return mappedIntent;
+  if (mappedIntent && mappedIntent.key !== pendingIntent.key) return mappedIntent;
+  return pendingIntent;
+}
+
 function shouldIgnoreTrackedDeleteIntent(
-  intent: { key: 'Backspace' | 'Delete'; modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean } } | null,
+  intent: TrackedDeleteIntent | null,
 ): boolean {
   return Boolean(
     intent
@@ -1320,10 +1361,14 @@ export const suggestionsPlugin = $prose(() => {
           if (!isSuggestionsEnabled(view.state)) return false;
           if (view.composing) return false;
           const inputEvent = event as InputEvent;
-          const intent = __debugResolveTrackedDeleteIntentFromBeforeInput(inputEvent.inputType ?? '');
+          const intent = __debugResolveTrackedDeleteIntentForBeforeInput(
+            inputEvent.inputType ?? '',
+            takePendingModifiedDeleteIntent(view),
+          );
           if (!intent) return false;
           if (shouldIgnoreTrackedDeleteIntent(intent)) {
             event.preventDefault();
+            event.stopPropagation();
             return true;
           }
 
@@ -1347,8 +1392,10 @@ export const suggestionsPlugin = $prose(() => {
         if (!isSuggestionsEnabled(view.state)) return false;
         if (event.defaultPrevented || event.isComposing || view.composing) return false;
         if (event.key !== 'Backspace' && event.key !== 'Delete') return false;
+        rememberModifiedDeleteIntent(view, event);
         if (event.key === 'Backspace' && event.metaKey && !event.altKey && !event.ctrlKey) {
           event.preventDefault();
+          event.stopPropagation();
           return true;
         }
         if (event.altKey || event.metaKey || event.ctrlKey) return false;

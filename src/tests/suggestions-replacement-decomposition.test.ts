@@ -4,6 +4,7 @@ import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 import { marksPluginKey, getMarks } from '../editor/plugins/marks.js';
 import {
   __debugResolveTrackedDeleteIntentFromBeforeInput,
+  __debugResolveTrackedDeleteIntentForBeforeInput,
   __debugResolveTrackedDeleteRange,
   wrapTransactionForSuggestions,
 } from '../editor/plugins/suggestions.js';
@@ -315,6 +316,15 @@ function run(): void {
     const lineDeleteIntent = __debugResolveTrackedDeleteIntentFromBeforeInput('deleteSoftLineBackward');
     assertEqual(lineDeleteIntent?.key, 'Backspace', 'deleteSoftLineBackward should map to backward tracked deletion');
     assertEqual(lineDeleteIntent?.modifiers?.metaKey, true, 'deleteSoftLineBackward should preserve line-delete semantics');
+    const fallbackLineDeleteIntent = __debugResolveTrackedDeleteIntentForBeforeInput('deleteContentBackward', {
+      key: 'Backspace',
+      modifiers: { metaKey: true },
+    });
+    assertEqual(
+      fallbackLineDeleteIntent?.modifiers?.metaKey,
+      true,
+      'Generic deleteContentBackward should reuse the pending modifier intent so Cmd+Delete can still be ignored',
+    );
     state = state.apply(wrapTransactionForSuggestions(state.tr.delete(lineDeleteRange!.from, lineDeleteRange!.to), state, true));
     const lineDeleteMarks = getMarks(state).filter((mark) => mark.kind === 'delete');
     assertEqual(lineDeleteMarks.length, 1, 'Cmd+Delete should become one delete suggestion');

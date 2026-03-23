@@ -237,6 +237,29 @@ function buildMissingRequiredMarkIds(requiredIds: string[], hydratedIds: string[
   return requiredIds.filter((id) => !hydrated.has(id));
 }
 
+function isPendingSuggestionMark(mark: StoredMark | undefined): boolean {
+  if (!mark) return false;
+  if (mark.kind !== 'insert' && mark.kind !== 'delete' && mark.kind !== 'replace') return false;
+  return mark.status !== 'accepted' && mark.status !== 'rejected';
+}
+
+function filterBlockingStructuredMutationMissingMarkIds(
+  missingRequiredIds: string[],
+  marks: Record<string, StoredMark>,
+  targetMarkId: string,
+): string[] {
+  return missingRequiredIds.filter((id) => {
+    if (id === targetMarkId) return true;
+    if (id.startsWith('serialized-authored:') || id.startsWith('authored:')) return false;
+
+    const mark = marks[id];
+    if (!mark) return true;
+    if (mark.kind === 'authored') return false;
+    if (isPendingSuggestionMark(mark)) return false;
+    return true;
+  });
+}
+
 async function buildRehydratedState(markdown: string, marks: Record<string, StoredMark>): Promise<{
   strippedMarkdown: string;
   state: EditorState;
@@ -372,13 +395,18 @@ export async function finalizeSuggestionThroughRehydration(args: {
       rehydrated.missingRequiredIds,
     );
   }
-  if (rehydrated.missingRequiredIds.length > 0) {
+  const blockingMissingRequiredIds = filterBlockingStructuredMutationMissingMarkIds(
+    rehydrated.missingRequiredIds,
+    canonicalMarks,
+    args.markId,
+  );
+  if (blockingMissingRequiredIds.length > 0) {
     return missingMarkFailure(
       'REQUIRED_MARKS_MISSING',
       'One or more stored Proof marks could not be rehydrated safely',
       rehydrated.strippedMarkdown,
       rehydrated.hydratedIds,
-      rehydrated.missingRequiredIds,
+      blockingMissingRequiredIds,
     );
   }
 

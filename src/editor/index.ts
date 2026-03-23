@@ -1026,6 +1026,7 @@ class ProofEditorImpl implements ProofEditor {
   private reviewInFlight: Promise<unknown> | null = null;
   private lastMarkdown: string = '';
   private suppressMarksSync: boolean = false;
+  private suppressTrackChangesSystemTransactionsDepth: number = 0;
   private collabEnabled: boolean = false;
   private collabCanComment: boolean = false;
   private collabCanEdit: boolean = false;
@@ -2030,46 +2031,48 @@ class ProofEditorImpl implements ProofEditor {
 
   private connectCollabService(resetEditorDoc = false): void {
     if (!this.editor) return;
-    this.editor.action((ctx) => {
-      const collabService = ctx.get(collabServiceCtx);
-      const ydoc = collabClient.getYDoc();
-      if (!ydoc) {
-        collabService.disconnect();
-        return;
-      }
-      const view = ctx.get(editorViewCtx);
-      collabService.mergeOptions({
-        yCursorOpts: {
-          cursorBuilder: collabCursorBuilder,
-          selectionBuilder: collabSelectionBuilder,
-        },
-      });
-      collabService.disconnect();
-      // Important: do not connect with awareness attached yet. The yCursor plugin can
-      // evaluate awareness states before y-sync has built its mapping, which can throw
-      // (nodeSize on undefined). We'll install the cursor plugin after y-sync is ready.
-      try {
-        (collabService as any).setAwareness(null);
-      } catch {
-        // ignore
-      }
-      if (resetEditorDoc) {
-        try {
-          const parser = ctx.get(parserCtx);
-          const emptyDoc = parser('');
-          const resetTr = view.state.tr
-            .replaceWith(0, view.state.doc.content.size, emptyDoc.content)
-            .setMeta('document-load', true)
-            .setMeta(SHARE_CONTENT_FILTER_ALLOW_META, true);
-          view.dispatch(resetTr);
-        } catch (error) {
-          const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-          console.warn('[share] failed to reset editor before collab connect', details);
+    this.runWithTrackChangesSystemTransactionsSuppressed(() => {
+      this.editor?.action((ctx) => {
+        const collabService = ctx.get(collabServiceCtx);
+        const ydoc = collabClient.getYDoc();
+        if (!ydoc) {
+          collabService.disconnect();
+          return;
         }
-      }
-      collabService.bindDoc(ydoc);
-      collabService.connect();
-      this.installCollabCursorsWhenReady(view, ctx, collabService);
+        const view = ctx.get(editorViewCtx);
+        collabService.mergeOptions({
+          yCursorOpts: {
+            cursorBuilder: collabCursorBuilder,
+            selectionBuilder: collabSelectionBuilder,
+          },
+        });
+        collabService.disconnect();
+        // Important: do not connect with awareness attached yet. The yCursor plugin can
+        // evaluate awareness states before y-sync has built its mapping, which can throw
+        // (nodeSize on undefined). We'll install the cursor plugin after y-sync is ready.
+        try {
+          (collabService as any).setAwareness(null);
+        } catch {
+          // ignore
+        }
+        if (resetEditorDoc) {
+          try {
+            const parser = ctx.get(parserCtx);
+            const emptyDoc = parser('');
+            const resetTr = view.state.tr
+              .replaceWith(0, view.state.doc.content.size, emptyDoc.content)
+              .setMeta('document-load', true)
+              .setMeta(SHARE_CONTENT_FILTER_ALLOW_META, true);
+            view.dispatch(resetTr);
+          } catch (error) {
+            const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+            console.warn('[share] failed to reset editor before collab connect', details);
+          }
+        }
+        collabService.bindDoc(ydoc);
+        collabService.connect();
+        this.installCollabCursorsWhenReady(view, ctx, collabService);
+      });
     });
   }
 
@@ -2217,20 +2220,22 @@ class ProofEditorImpl implements ProofEditor {
         return;
       }
 
-      this.editor.action((ctx) => {
-        try {
-          const collabService = ctx.get(collabServiceCtx);
-          collabService.applyTemplate(latestTemplate, (yDocNode) => {
-            if (yDocNode.childCount === 0) return true;
-            if (yDocNode.childCount !== 1) return false;
-            const firstChild = yDocNode.firstChild;
-            if (!firstChild) return true;
-            return firstChild.type.name === 'paragraph' && firstChild.textContent.length === 0;
-          });
-        } catch (error) {
-          const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-          console.warn('[share] failed to apply pending collab template', details);
-        }
+      this.runWithTrackChangesSystemTransactionsSuppressed(() => {
+        this.editor?.action((ctx) => {
+          try {
+            const collabService = ctx.get(collabServiceCtx);
+            collabService.applyTemplate(latestTemplate, (yDocNode) => {
+              if (yDocNode.childCount === 0) return true;
+              if (yDocNode.childCount !== 1) return false;
+              const firstChild = yDocNode.firstChild;
+              if (!firstChild) return true;
+              return firstChild.type.name === 'paragraph' && firstChild.textContent.length === 0;
+            });
+          } catch (error) {
+            const details = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+            console.warn('[share] failed to apply pending collab template', details);
+          }
+        });
       });
 
       if (!this.isEditorDocStructurallyEmpty()) {
@@ -4805,6 +4810,15 @@ class ProofEditorImpl implements ProofEditor {
     }
   }
 
+  private runWithTrackChangesSystemTransactionsSuppressed<T>(run: () => T): T {
+    this.suppressTrackChangesSystemTransactionsDepth += 1;
+    try {
+      return run();
+    } finally {
+      this.suppressTrackChangesSystemTransactionsDepth = Math.max(0, this.suppressTrackChangesSystemTransactionsDepth - 1);
+    }
+  }
+
   private resetProjectionPublishState(): void {
     this.hasCompletedInitialCollabHydration = !this.isShareMode || !this.collabEnabled;
     this.hasLocalContentEditSinceHydration = false;
@@ -5333,12 +5347,14 @@ class ProofEditorImpl implements ProofEditor {
         const isRemoteContentChange = Boolean(tr?.docChanged) && yjsOrigin.isYjsOrigin;
         const isMarksOnlyChange = tr?.getMeta?.(marksPluginKey) !== undefined;
         const isDocumentLoad = tr?.getMeta?.('document-load') !== undefined;
+        const isSystemTrackChangesSuppressed = this.suppressTrackChangesSystemTransactionsDepth > 0 && Boolean(tr?.docChanged);
         const isSuggestionMetaChange = tr?.getMeta?.(suggestionsPluginKey) !== undefined;
         const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;
         const isLocalContentChange = Boolean(tr?.docChanged)
           && !isRemoteContentChange
           && !isMarksOnlyChange
-          && !isDocumentLoad;
+          && !isDocumentLoad
+          && !isSystemTrackChangesSuppressed;
 
         // Check if suggestions are enabled
         const pluginState = suggestionsPluginKey.getState(view.state);
@@ -5375,6 +5391,12 @@ class ProofEditorImpl implements ProofEditor {
 
           // Don't intercept document load transactions
           if (tr.getMeta('document-load') !== undefined) {
+            clearPendingDomSuggestionSelection();
+            dispatchWithRevision(tr);
+            return;
+          }
+
+          if (isSystemTrackChangesSuppressed) {
             clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr);
             return;

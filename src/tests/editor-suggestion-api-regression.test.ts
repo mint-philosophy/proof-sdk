@@ -57,6 +57,22 @@ function run(): void {
     'Expected share-mode mark updates to defer the share flush until after the dispatch cycle instead of pushing marks immediately during tracked typing',
   );
 
+  const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
+  assert(
+    setupSuggestionsInterceptorBlock.includes('const isSystemTrackChangesSuppressed = this.suppressTrackChangesSystemTransactionsDepth > 0 && Boolean(tr?.docChanged);')
+      && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
+      && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
+    'Expected the suggestions interceptor to pass through collab/template system transactions instead of wrapping them as tracked user edits',
+  );
+
+  const applyPendingCollabTemplateBlock = sliceBetween(editorSource, '  private applyPendingCollabTemplate(): void {', '\n  private disconnectCollabService(): void {');
+  assert(
+    editorSource.includes('private runWithTrackChangesSystemTransactionsSuppressed<T>(run: () => T): T {')
+      && applyPendingCollabTemplateBlock.includes('this.runWithTrackChangesSystemTransactionsSuppressed(() => {')
+      && applyPendingCollabTemplateBlock.includes('collabService.applyTemplate(latestTemplate'),
+    'Expected pending collab template application to suppress track-changes wrapping while it seeds canonical content back into Yjs',
+  );
+
   assert(
     shareClientSource.includes('async acceptSuggestion(')
       && shareClientSource.includes("path: 'accept' | 'reject';")

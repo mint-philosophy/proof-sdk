@@ -3495,12 +3495,24 @@ agentRoutes.post('/:slug/marks/accept', async (req: Request, res: Response) => {
   try {
     const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/accept', payload, mutationContext);
     maybeLogMarkHydrationMismatch(mutationRoute, slug, payload, mutationContext, result);
-    let responseStatus = result.status;
     if (result.status >= 200 && result.status < 300) {
       keepRewriteLockCooldown = true;
-      const collabStatus = await notifyCollabMutation(
+      if (isRecord(result.body)) {
+        result.body = {
+          ...result.body,
+          collab: {
+            status: 'pending',
+            reason: 'verification_deferred',
+            markdownConfirmed: null,
+            fragmentConfirmed: null,
+            canonicalConfirmed: null,
+          },
+        };
+      }
+      const participation = buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.accept' });
+      void notifyCollabMutation(
         slug,
-        buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.accept' }),
+        participation,
         {
           verify: true,
           source: 'marks.accept',
@@ -3509,33 +3521,28 @@ agentRoutes.post('/:slug/marks/accept', async (req: Request, res: Response) => {
           strictLiveDoc: true,
           apply: false,
         },
-      );
-      if (isRecord(result.body)) {
-        result.body = {
-          ...result.body,
-          collab: {
-            status: collabStatus.confirmed ? 'confirmed' : 'pending',
-            reason: collabStatus.reason ?? (collabStatus.confirmed ? 'confirmed' : 'sync_timeout'),
-            markdownConfirmed: collabStatus.markdownConfirmed ?? null,
-            fragmentConfirmed: collabStatus.fragmentConfirmed ?? null,
-            canonicalConfirmed: collabStatus.canonicalConfirmed ?? null,
-          },
-        };
-      }
-      if (!collabStatus.confirmed) {
-        responseStatus = 202;
+      ).then(async (collabStatus) => {
+        if (collabStatus.confirmed) return;
         try {
           await invalidateLoadedCollabDocumentAndWait(slug);
         } catch (error) {
-          console.warn('[agent-routes] failed to invalidate loaded collab room after pending accept verification', {
+          console.warn('[agent-routes] failed to invalidate loaded collab room after deferred accept verification', {
             slug,
             error,
           });
         }
-      }
+      }).catch((error) => {
+        console.warn('[agent-routes] deferred collab verification for accept failed', {
+          slug,
+          error,
+        });
+      });
+      storeIdempotentMutationResult(replay, mutationRoute, slug, 202, result.body);
+      sendMutationResponse(res, 202, result.body, { route: mutationRoute, slug });
+      return;
     }
-    storeIdempotentMutationResult(replay, mutationRoute, slug, responseStatus, result.body);
-    sendMutationResponse(res, responseStatus, result.body, { route: mutationRoute, slug });
+    storeIdempotentMutationResult(replay, mutationRoute, slug, result.status, result.body);
+    sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
   } finally {
     if (!keepRewriteLockCooldown) {
       releaseRewriteLockImmediately(slug);

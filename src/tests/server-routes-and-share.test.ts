@@ -1526,7 +1526,7 @@ async function runRoutePayloadValidationTests(): Promise<void> {
       }, {
         'x-share-token': editorToken,
       });
-      assert(acceptResponse.status === 200, `Expected accept status 200, got ${acceptResponse.status}`);
+      assert(acceptResponse.status === 202, `Expected accept status 202, got ${acceptResponse.status}`);
 
       const updatedDoc = await get(baseUrl, `/api/documents/${slug}`);
       assert(updatedDoc.status === 200, `Expected updated doc status 200, got ${updatedDoc.status}`);

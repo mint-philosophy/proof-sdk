@@ -1168,7 +1168,7 @@ class MarkPopoverController {
     if (
       event.pointerType === 'mouse'
       && event.button === 0
-      && mark?.kind === 'insert'
+      && isSuggestionKind(mark?.kind)
       && this.isTrackChangesEnabled()
     ) {
       return;
@@ -1192,7 +1192,7 @@ class MarkPopoverController {
     const markId = markEl.dataset.markId;
     if (!markId) return;
     const mark = getMarks(this.view.state).find((item) => item.id === markId);
-    if (event.button === 0 && mark?.kind === 'insert' && this.isTrackChangesEnabled()) {
+    if (event.button === 0 && isSuggestionKind(mark?.kind) && this.isTrackChangesEnabled()) {
       return;
     }
     event.stopPropagation();

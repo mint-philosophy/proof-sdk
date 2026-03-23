@@ -73,14 +73,16 @@ function run(): void {
     acceptRouteBlock.includes('acquireRewriteLock(slug);')
       && acceptRouteBlock.includes('if (!keepRewriteLockCooldown) {')
       && acceptRouteBlock.includes('releaseRewriteLockImmediately(slug);')
-      && acceptRouteBlock.includes('const collabStatus = await notifyCollabMutation(')
+      && acceptRouteBlock.includes('void notifyCollabMutation(')
       && acceptRouteBlock.includes('verify: true')
       && acceptRouteBlock.includes("source: 'marks.accept'")
       && acceptRouteBlock.includes('fallbackBarrier: true')
-      && acceptRouteBlock.includes('responseStatus = 202;')
+      && acceptRouteBlock.includes("status: 'pending'")
+      && acceptRouteBlock.includes('storeIdempotentMutationResult(replay, mutationRoute, slug, 202, result.body);')
+      && acceptRouteBlock.includes('sendMutationResponse(res, 202, result.body, { route: mutationRoute, slug });')
       && acceptRouteBlock.includes('await invalidateLoadedCollabDocumentAndWait(slug);')
       && !acceptRouteBlock.includes("code: 'COLLAB_SYNC_FAILED'"),
-    'Expected /marks/accept to hold the rewrite lock through share review persistence and return canonical success with pending collab status instead of hard-failing post-commit drift',
+    'Expected /marks/accept to return canonical success immediately with pending collab status, then verify/invalidate in the background instead of blocking on post-commit drift checks',
   );
 
   const rejectRouteBlock = sliceBetween(

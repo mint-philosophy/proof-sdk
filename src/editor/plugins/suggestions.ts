@@ -584,6 +584,18 @@ export function __debugResolveTrackedDeleteIntentFromBeforeInput(
   }
 }
 
+function shouldIgnoreTrackedDeleteIntent(
+  intent: { key: 'Backspace' | 'Delete'; modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean } } | null,
+): boolean {
+  return Boolean(
+    intent
+      && intent.key === 'Backspace'
+      && intent.modifiers?.metaKey
+      && !intent.modifiers?.altKey
+      && !intent.modifiers?.ctrlKey,
+  );
+}
+
 export function __debugResolveTrackedDeleteRange(
   state: EditorState,
   key: 'Backspace' | 'Delete',
@@ -1310,6 +1322,10 @@ export const suggestionsPlugin = $prose(() => {
           const inputEvent = event as InputEvent;
           const intent = __debugResolveTrackedDeleteIntentFromBeforeInput(inputEvent.inputType ?? '');
           if (!intent) return false;
+          if (shouldIgnoreTrackedDeleteIntent(intent)) {
+            event.preventDefault();
+            return true;
+          }
 
           const range = __debugResolveTrackedDeleteRange(view.state, intent.key, intent.modifiers);
           if (!range || range.to <= range.from) return false;
@@ -1331,6 +1347,10 @@ export const suggestionsPlugin = $prose(() => {
         if (!isSuggestionsEnabled(view.state)) return false;
         if (event.defaultPrevented || event.isComposing || view.composing) return false;
         if (event.key !== 'Backspace' && event.key !== 'Delete') return false;
+        if (event.key === 'Backspace' && event.metaKey && !event.altKey && !event.ctrlKey) {
+          event.preventDefault();
+          return true;
+        }
         if (event.altKey || event.metaKey || event.ctrlKey) return false;
 
         const range = __debugResolveTrackedDeleteRange(view.state, event.key, {

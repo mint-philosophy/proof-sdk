@@ -73,10 +73,11 @@ function run(): void {
   assert(
     acceptPersistedBlock.includes("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
       && acceptPersistedBlock.indexOf("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
-        < acceptPersistedBlock.indexOf('const success = await this.applyShareMutationDocumentResult(result);')
-      && acceptPersistedBlock.includes('const success = await this.applyShareMutationDocumentResult(result);')
+        < acceptPersistedBlock.indexOf("const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
+      && acceptPersistedBlock.includes("const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
+      && acceptPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(result);')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to tombstone the resolved suggestion before canonical reload so stale collab marks cannot resurrect it',
+    'Expected markAcceptPersisted to tombstone the resolved suggestion, then try the in-place local reconcile path before falling back to canonical reload',
   );
 
   const rejectPersistedBlock = sliceBetween(
@@ -87,10 +88,26 @@ function run(): void {
   assert(
     rejectPersistedBlock.includes("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
       && rejectPersistedBlock.indexOf("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
-        < rejectPersistedBlock.indexOf('const success = await this.applyShareMutationDocumentResult(result);')
-      && rejectPersistedBlock.includes('const success = await this.applyShareMutationDocumentResult(result);')
+        < rejectPersistedBlock.indexOf("const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")
+      && rejectPersistedBlock.includes("const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")
+      && rejectPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(result);')
       && !rejectPersistedBlock.includes('rejectMark(view, markId);'),
-    'Expected markRejectPersisted to tombstone the resolved suggestion before canonical reload so stale collab marks cannot resurrect it',
+    'Expected markRejectPersisted to tombstone the resolved suggestion, then try the in-place local reconcile path before falling back to canonical reload',
+  );
+
+  const localResolveBlock = sliceBetween(
+    editorSource,
+    '  private tryResolveShareReviewMutationLocally(',
+    '\n  private async runSerializedShareReviewMutation<T>(run: () => Promise<T>): Promise<T> {',
+  );
+  assert(
+    localResolveBlock.includes("if (markdown === null || collabStatus !== 'pending') return false;")
+      && localResolveBlock.includes("resolved = action === 'accept'")
+      && localResolveBlock.includes("acceptMark(view, markId, parser)")
+      && localResolveBlock.includes(': rejectMark(view, markId);')
+      && localResolveBlock.includes('const liveMarkdown = this.normalizeMarkdownForCollab(serializer(view.state.doc));')
+      && localResolveBlock.includes("matchedServerResult = liveMarkdown === expectedMarkdown && !Object.prototype.hasOwnProperty.call(liveMetadata, markId);"),
+    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response',
   );
 
   console.log('share-review-persisted-canonical-sync-regression.test.ts passed');

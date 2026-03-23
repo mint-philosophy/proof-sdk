@@ -8783,6 +8783,56 @@ class ProofEditorImpl implements ProofEditor {
     return true;
   }
 
+  private tryResolveShareReviewMutationLocally(
+    markId: string,
+    action: 'accept' | 'reject',
+    result: {
+      markdown?: string;
+      marks?: Record<string, unknown> | null;
+      collab?: { status?: string; reason?: string };
+    },
+  ): boolean {
+    if (!this.editor || !this.collabEnabled || !this.collabCanEdit) return false;
+
+    const markdown = typeof result?.markdown === 'string' ? result.markdown : null;
+    const collabStatus = typeof result?.collab?.status === 'string' ? result.collab.status : '';
+    if (markdown === null || collabStatus !== 'pending') return false;
+
+    const serverMarks = (result?.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
+      ? result.marks as Record<string, StoredMark>
+      : {};
+    const expectedMarkdown = this.normalizeMarkdownForCollab(markdown);
+
+    let matchedServerResult = false;
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const parser = ctx.get(parserCtx);
+      const serializer = ctx.get(serializerCtx);
+
+      let resolved = false;
+      const previousSuppressMarksSync = this.suppressMarksSync;
+      this.suppressMarksSync = true;
+      try {
+        resolved = action === 'accept'
+          ? acceptMark(view, markId, parser)
+          : rejectMark(view, markId);
+      } finally {
+        this.suppressMarksSync = previousSuppressMarksSync;
+      }
+      if (!resolved) return;
+
+      const liveMarkdown = this.normalizeMarkdownForCollab(serializer(view.state.doc));
+      const liveMetadata = getMarkMetadataWithQuotes(view.state);
+      matchedServerResult = liveMarkdown === expectedMarkdown && !Object.prototype.hasOwnProperty.call(liveMetadata, markId);
+      if (!matchedServerResult) return;
+
+      this.lastReceivedServerMarks = { ...serverMarks };
+      this.initialMarksSynced = true;
+    });
+
+    return matchedServerResult;
+  }
+
   private async runSerializedShareReviewMutation<T>(run: () => Promise<T>): Promise<T> {
     const previous = this.shareReviewMutationQueue;
     let release: (() => void) | null = null;
@@ -8921,7 +8971,8 @@ class ProofEditorImpl implements ProofEditor {
       }
 
       tombstoneResolvedMarkIds([markId], { reason: 'deleted' });
-      const success = await this.applyShareMutationDocumentResult(result);
+      const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)
+        || await this.applyShareMutationDocumentResult(result);
       if (success && this.editor) {
         captureEvent('suggestion_accepted', { count: 1 });
         this.editor.action((ctx) => {
@@ -8999,7 +9050,8 @@ class ProofEditorImpl implements ProofEditor {
       }
 
       tombstoneResolvedMarkIds([markId], { reason: 'deleted' });
-      const success = await this.applyShareMutationDocumentResult(result);
+      const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)
+        || await this.applyShareMutationDocumentResult(result);
       if (success && this.editor) {
         captureEvent('suggestion_rejected', { count: 1 });
         this.editor.action((ctx) => {

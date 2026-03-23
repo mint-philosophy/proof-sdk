@@ -2001,6 +2001,27 @@ test('mergePendingServerMarks skips tombstoned resolved suggestions after persis
   }
 });
 
+test('mergePendingServerMarks drops tombstoned local-only suggestions after persisted accept', () => {
+  const suggestionId = 's-local-stale-after-accept';
+  __resetResolvedMarkTombstones();
+  try {
+    tombstoneResolvedMarkIds([suggestionId], { reason: 'deleted' });
+
+    const merged = mergePendingServerMarks({
+      [suggestionId]: {
+        kind: 'insert' as const,
+        by: 'human:seth',
+        content: ' ACCEPT TEST',
+        status: 'pending' as const,
+      },
+    }, {});
+
+    assert(!merged[suggestionId], 'Tombstoned local-only suggestions should be dropped during server merge');
+  } finally {
+    __resetResolvedMarkTombstones();
+  }
+});
+
 test('comment anchors without metadata are not surfaced or flushed as empty comments', () => {
   const commentMark = marksSchema.marks.proofComment.create({ id: 'c1', by: 'human:dan' });
   const doc = marksSchema.node('doc', null, [

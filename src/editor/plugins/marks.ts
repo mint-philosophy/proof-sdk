@@ -1751,8 +1751,20 @@ export function mergePendingServerMarks(
 ): Record<string, StoredMark> {
   const canonicalLocal = canonicalizeStoredMarks(localMetadata);
   const canonicalServer = canonicalizeStoredMarks(serverMarks);
-  const merged: Record<string, StoredMark> = { ...canonicalLocal };
   const now = Date.now();
+  const merged: Record<string, StoredMark> = {};
+
+  for (const [id, localMark] of Object.entries(canonicalLocal)) {
+    const status = localMark?.status;
+    if (status === 'accepted' || status === 'rejected') {
+      continue;
+    }
+    if (localMark?.kind !== 'authored' && isResolvedMarkTombstoned(id, now, 'deleted')) {
+      continue;
+    }
+    merged[id] = localMark;
+  }
+
   for (const [id, serverMark] of Object.entries(canonicalServer)) {
     const status = serverMark?.status;
     if (status === 'accepted' || status === 'rejected') {

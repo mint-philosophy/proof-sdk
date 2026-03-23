@@ -147,6 +147,10 @@ async function run(): Promise<void> {
 
     const acceptRequests = requests.filter((request) => request.path === '/api/agent/test-doc/marks/accept');
     const acceptRequest = acceptRequests.find((request) => request.body?.markId === 'mark-accept');
+    assert.ok(
+      acceptRequest?.headers.get('Idempotency-Key'),
+      'acceptSuggestion should send an Idempotency-Key header when the server requires idempotent mutations',
+    );
     assert.equal(acceptRequest?.body?.baseRevision, 41, 'acceptSuggestion should include baseRevision from /state');
     assert.equal(
       acceptRequests.find((request) => request.body?.markId === 'mark-accept-recovered')?.body?.baseUpdatedAt,
@@ -158,12 +162,33 @@ async function run(): Promise<void> {
       3,
       'transient MARK_NOT_FOUND acceptSuggestion should retry until the authoritative share state catches up',
     );
+    const delayedAcceptIdempotencyKeys = acceptRequests
+      .filter((request) => request.body?.markId === 'mark-accept-delayed')
+      .map((request) => request.headers.get('Idempotency-Key') ?? '');
+    assert.ok(
+      delayedAcceptIdempotencyKeys.every((value) => value.length > 0),
+      'retrying acceptSuggestion should preserve the original Idempotency-Key across attempts',
+    );
+    assert.equal(
+      new Set(delayedAcceptIdempotencyKeys).size,
+      1,
+      'retrying acceptSuggestion should reuse the same Idempotency-Key for the same user action',
+    );
 
     const rejectRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/reject');
+    assert.ok(
+      rejectRequest?.headers.get('Idempotency-Key'),
+      'rejectSuggestion should send an Idempotency-Key header when the server requires idempotent mutations',
+    );
     assert.equal(
       rejectRequest?.body?.baseRevision,
       43,
       'rejectSuggestion should continue reading the latest base state after prior mark mutations',
+    );
+    assert.notEqual(
+      acceptRequest?.headers.get('Idempotency-Key'),
+      rejectRequest?.headers.get('Idempotency-Key'),
+      'distinct share review actions should not share an Idempotency-Key',
     );
 
     const resolveRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/resolve');

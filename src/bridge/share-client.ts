@@ -5,6 +5,7 @@
 
 import { executeBridgeCall } from './bridge-executor';
 import { buildShareMutationBaseToken } from './share-mutation-base.js';
+import { createShareMutationIdempotencyKey } from './share-mutation-idempotency.js';
 
 export interface ShareDocument {
   slug: string;
@@ -451,6 +452,7 @@ export class ShareClient {
     path: 'accept' | 'reject';
     markId: string;
     by: string;
+    idempotencyKey: string;
     options?: { token?: string };
   }): Promise<ShareMarkMutationResponse | ShareRequestError | null> {
     const submit = async (base: ShareMutationBase): Promise<ShareMarkMutationResponse | ShareRequestError> => {
@@ -458,6 +460,7 @@ export class ShareClient {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Idempotency-Key': args.idempotencyKey,
           ...this.getShareAuthHeaders(args.options?.token),
         },
         body: JSON.stringify({ markId: args.markId, by: args.by, ...base }),
@@ -902,10 +905,17 @@ export class ShareClient {
     const trimmedMarkId = typeof markId === 'string' ? markId.trim() : '';
     const actor = typeof by === 'string' ? by.trim() : '';
     if (!trimmedMarkId || !actor) return null;
+    const idempotencyKey = createShareMutationIdempotencyKey({
+      path: 'reject',
+      slug: this.slug,
+      markId: trimmedMarkId,
+      by: actor,
+    });
     return this.performMarkMutationWithRetry({
       path: 'reject',
       markId: trimmedMarkId,
       by: actor,
+      idempotencyKey,
       options,
     });
   }
@@ -919,10 +929,17 @@ export class ShareClient {
     const trimmedMarkId = typeof markId === 'string' ? markId.trim() : '';
     const actor = typeof by === 'string' ? by.trim() : '';
     if (!trimmedMarkId || !actor) return null;
+    const idempotencyKey = createShareMutationIdempotencyKey({
+      path: 'accept',
+      slug: this.slug,
+      markId: trimmedMarkId,
+      by: actor,
+    });
     return this.performMarkMutationWithRetry({
       path: 'accept',
       markId: trimmedMarkId,
       by: actor,
+      idempotencyKey,
       options,
     });
   }

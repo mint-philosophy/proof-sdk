@@ -11,6 +11,7 @@ import type { MarkType, Node as ProseMirrorNode } from '@milkdown/kit/prose/mode
 import type { EditorView } from '@milkdown/kit/prose/view';
 
 import { marksPluginKey, getMarkMetadata, buildSuggestionMetadata, syncSuggestionMetadataTransaction } from './marks';
+import { shouldSuppressTrackChangesDeleteIntent, shouldSuppressTrackChangesKeydown } from './track-changes-delete-guard.js';
 import { isYjsChangeOriginTransaction } from './transaction-origins';
 import { generateMarkId, type MarkRange, type StoredMark } from '../../formats/marks';
 import { getCurrentActor } from '../actor';
@@ -626,18 +627,6 @@ export function __debugResolveTrackedDeleteIntentForBeforeInput(
   if (!pendingIntent) return mappedIntent;
   if (mappedIntent && mappedIntent.key !== pendingIntent.key) return mappedIntent;
   return pendingIntent;
-}
-
-function shouldIgnoreTrackedDeleteIntent(
-  intent: TrackedDeleteIntent | null,
-): boolean {
-  return Boolean(
-    intent
-      && intent.key === 'Backspace'
-      && intent.modifiers?.metaKey
-      && !intent.modifiers?.altKey
-      && !intent.modifiers?.ctrlKey,
-  );
 }
 
 export function __debugResolveTrackedDeleteRange(
@@ -1375,7 +1364,7 @@ export const suggestionsPlugin = $prose(() => {
             event.stopPropagation();
             return true;
           }
-          if (shouldIgnoreTrackedDeleteIntent(intent)) {
+          if (shouldSuppressTrackChangesDeleteIntent(intent)) {
             event.preventDefault();
             event.stopPropagation();
             return true;
@@ -1401,7 +1390,7 @@ export const suggestionsPlugin = $prose(() => {
         if (!isSuggestionsEnabled(view.state)) return false;
         if (event.defaultPrevented || event.isComposing || view.composing) return false;
         if (event.key !== 'Backspace' && event.key !== 'Delete') return false;
-        if (event.key === 'Backspace' && event.metaKey && !event.altKey && !event.ctrlKey) {
+        if (shouldSuppressTrackChangesKeydown(event)) {
           rememberModifiedDeleteIntent(view, event, { handled: true });
           event.preventDefault();
           event.stopPropagation();

@@ -2070,9 +2070,9 @@ function updateSuggestionStatus(
   const updated = getDocumentBySlug(slug);
   const resolvedRevision = typeof updated?.revision === 'number' ? updated.revision : (doc.revision + 1);
   upsertMarkTombstone(slug, markId, status, resolvedRevision);
-  if (status === 'rejected') {
-    // Rejected suggestions must survive reload/cache clear, and stale live Yjs fragments
-    // can otherwise rehydrate the rejected mark after the canonical DB write succeeds.
+  if (status === 'accepted' || status === 'rejected') {
+    // Finalized suggestions must survive reload/cache clear, and stale live Yjs fragments
+    // can otherwise rehydrate the old pending mark after the canonical DB write succeeds.
     // Bump the access epoch first so collab sessions on every node reconnect against
     // canonical DB state instead of reusing stale in-memory rooms on other instances.
     bumpDocumentAccessEpoch(slug);
@@ -2384,7 +2384,7 @@ async function updateSuggestionStatusAsync(
       const updated = getDocumentBySlug(slug);
       const resolvedRevision = typeof updated?.revision === 'number' ? updated.revision : (doc.revision + 1);
       upsertMarkTombstone(slug, markId, status, resolvedRevision);
-      if (status === 'rejected') {
+      if (status === 'accepted' || status === 'rejected') {
         if ((updated?.access_epoch ?? doc.access_epoch) === doc.access_epoch) {
           bumpDocumentAccessEpoch(slug);
         }
@@ -2610,7 +2610,7 @@ async function updateSuggestionStatusAsync(
   );
   upsertMarkTombstone(slug, markId, status, mutation.document.revision);
   const updatedMarks = parseMarks(mutation.document.marks);
-  if (status === 'rejected') {
+  if (status === 'accepted' || status === 'rejected') {
     if ((mutation.document.access_epoch ?? doc.access_epoch) === doc.access_epoch) {
       bumpDocumentAccessEpoch(slug);
     }

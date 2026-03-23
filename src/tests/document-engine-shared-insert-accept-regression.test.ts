@@ -1,4 +1,4 @@
-import { unlinkSync } from 'node:fs';
+import { readFileSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -7,6 +7,13 @@ function assert(condition: boolean, message: string): void {
 }
 
 async function run(): Promise<void> {
+  const engineSource = readFileSync(path.resolve(process.cwd(), 'server/document-engine.ts'), 'utf8');
+  assert(
+    engineSource.includes("if (status === 'accepted' || status === 'rejected') {")
+      && engineSource.includes('invalidateCollabDocument(slug);'),
+    'Expected accepted suggestion finalization to invalidate collab state, not just rejected suggestions',
+  );
+
   const dbName = `proof-shared-insert-accept-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
   const dbPath = path.join(os.tmpdir(), dbName);
 

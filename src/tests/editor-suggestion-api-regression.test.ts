@@ -72,8 +72,10 @@ function run(): void {
     editorSource.includes('private runWithTrackChangesSystemTransactionsSuppressed<T>(run: () => T): T {')
       && editorSource.includes('private suppressTrackChangesDuringCollabReconnect: boolean = false;')
       && applyPendingCollabTemplateBlock.includes('this.runWithTrackChangesSystemTransactionsSuppressed(() => {')
+      && applyPendingCollabTemplateBlock.includes("const currentFragment = currentDoc.getXmlFragment('prosemirror');")
+      && applyPendingCollabTemplateBlock.includes('|| !this.isYjsFragmentStructurallyEmpty(currentFragment)')
       && applyPendingCollabTemplateBlock.includes('collabService.applyTemplate(latestTemplate'),
-    'Expected pending collab template application to suppress track-changes wrapping while it seeds canonical content back into Yjs',
+    'Expected pending collab template application to suppress track-changes wrapping while it seeds canonical content back into Yjs, and to abort if the room fragment hydrates before the delayed seed runs',
   );
 
   assert(

@@ -2324,8 +2324,13 @@ class ProofEditorImpl implements ProofEditor {
       const currentDoc = collabClient.getYDoc();
       if (!currentDoc) return;
       const currentSeedMap = currentDoc.getMap<unknown>('collabInit');
+      const currentFragment = currentDoc.getXmlFragment('prosemirror');
 
-      if (currentSeedMap.get('pmTemplateSeeded') === true || !this.isEditorDocStructurallyEmpty()) {
+      if (
+        currentSeedMap.get('pmTemplateSeeded') === true
+        || !this.isYjsFragmentStructurallyEmpty(currentFragment)
+        || !this.isEditorDocStructurallyEmpty()
+      ) {
         this.resetPendingCollabTemplateState(true);
         return;
       }
@@ -2354,7 +2359,11 @@ class ProofEditorImpl implements ProofEditor {
         });
       });
 
-      if (!this.isEditorDocStructurallyEmpty()) {
+      const currentFragmentAfterApply = currentDoc.getXmlFragment('prosemirror');
+      if (
+        !this.isEditorDocStructurallyEmpty()
+        || !this.isYjsFragmentStructurallyEmpty(currentFragmentAfterApply)
+      ) {
         currentDoc.transact(() => {
           currentSeedMap.set('pmTemplateSeeded', true);
           currentSeedMap.set('pmTemplateSeededAt', Date.now());

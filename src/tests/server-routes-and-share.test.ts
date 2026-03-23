@@ -422,6 +422,24 @@ async function runServerSourceTests(): Promise<void> {
     );
   });
 
+  await test('D1: share read routes scrub tombstoned resurrected marks from payloads', async () => {
+    assertIncludes(
+      routesSource,
+      'function parseShareMarks(slug: string, value: string): Record<string, unknown> {',
+      'route source should define a share-mark payload scrubber for read responses',
+    );
+    assertIncludes(
+      routesSource,
+      'return removeResurrectedMarksFromPayload(slug, parseJson(value)).marks;',
+      'share read responses should remove tombstoned resurrected marks before returning payloads',
+    );
+    assertIncludes(
+      routesSource,
+      'marks: parseShareMarks(doc.slug, doc.marks),',
+      'share document and open-context routes should return scrubbed marks payloads',
+    );
+  });
+
   await test('D1: landing template keeps mobile hero CTA visible', async () => {
     assertIncludes(
       homeTemplate,

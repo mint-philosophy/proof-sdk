@@ -34,6 +34,7 @@ import {
   resolveDocumentAccess,
   resolveDocumentAccessRole,
   rebuildDocumentBlocks,
+  removeResurrectedMarksFromPayload,
   resumeDocument,
   revokeDocument,
   revokeDocumentAccessTokens,
@@ -148,6 +149,10 @@ function parseJson(value: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function parseShareMarks(slug: string, value: string): Record<string, unknown> {
+  return removeResurrectedMarksFromPayload(slug, parseJson(value)).marks;
 }
 
 function getIdempotencyKey(req: Request): string | null {
@@ -1196,7 +1201,7 @@ apiRoutes.get('/documents/:slug', (req: Request, res: Response) => {
     docId: doc.doc_id,
     title: doc.title,
     markdown: doc.markdown,
-    marks: parseJson(doc.marks),
+    marks: parseShareMarks(doc.slug, doc.marks),
     // Legacy compatibility for <=0.28 clients.
     active: doc.share_state === 'ACTIVE',
     shareState: doc.share_state,
@@ -1971,7 +1976,7 @@ apiRoutes.get('/documents/:slug/open-context', async (req: Request, res: Respons
         docId: doc.doc_id,
         title: doc.title,
         markdown: doc.markdown,
-        marks: parseJson(doc.marks),
+        marks: parseShareMarks(doc.slug, doc.marks),
         shareState: doc.share_state,
         active: doc.share_state === 'ACTIVE',
         createdAt: doc.created_at,
@@ -2005,7 +2010,7 @@ apiRoutes.get('/documents/:slug/open-context', async (req: Request, res: Respons
       docId: doc.doc_id,
       title: doc.title,
       markdown: doc.markdown,
-      marks: parseJson(doc.marks),
+      marks: parseShareMarks(doc.slug, doc.marks),
       shareState: doc.share_state,
       // Legacy compatibility for <=0.28 clients.
       active: doc.share_state === 'ACTIVE',

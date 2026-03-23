@@ -928,6 +928,20 @@ function buildAcceptedSuggestionMarkdown(markdown: string, suggestion: StoredMar
 
   if (suggestion.kind === 'insert') {
     const content = typeof suggestion.content === 'string' ? suggestion.content : '';
+    const range = getStoredMarkRange(suggestion);
+    const normalizedQuote = quote.trim().replace(/\s+/g, ' ');
+    const normalizedContent = content.trim().replace(/\s+/g, ' ');
+    // Keyboard-authored track-changes inserts already exist in the markdown and carry
+    // a non-collapsed range covering that inserted text. Accepting them should remove
+    // the pending mark, not insert the same content again.
+    if (
+      range
+      && range.to > range.from
+      && normalizedQuote.length > 0
+      && normalizedQuote === normalizedContent
+    ) {
+      return markdown;
+    }
     const span = findQuoteSpanInMarkdown(markdown, quote);
     if (span) {
       return `${markdown.slice(0, span.end)}${content}${markdown.slice(span.end)}`;

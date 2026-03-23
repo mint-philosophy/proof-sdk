@@ -11,6 +11,13 @@ import type { MarkType, Node as ProseMirrorNode } from '@milkdown/kit/prose/mode
 import type { EditorView } from '@milkdown/kit/prose/view';
 
 import { marksPluginKey, getMarkMetadata, buildSuggestionMetadata, syncSuggestionMetadataTransaction } from './marks';
+import {
+  collectSuggestionSegments,
+  getSuggestionClusterRangeFromSegments,
+  getSuggestionTextFromSegments,
+  getSuggestionTextOffsetAtPosition,
+  syncInsertSuggestionMetadataFromDoc,
+} from './suggestion-boundaries';
 import { shouldSuppressTrackChangesDeleteIntent, shouldSuppressTrackChangesKeydown } from './track-changes-delete-guard.js';
 import { isYjsChangeOriginTransaction } from './transaction-origins';
 import { generateMarkId, type MarkRange, type StoredMark } from '../../formats/marks';
@@ -48,6 +55,10 @@ const lastInsertByActor = new Map<string, InsertCoalesceState>();
 const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
 const PENDING_DELETE_INTENT_TTL_MS = 1500;
 
+export function resetSuggestionsInsertCoalescing(): void {
+  lastInsertByActor.clear();
+}
+
 function normalizeSuggestionKind(kind: unknown): SuggestionKind {
   if (kind === 'insert' || kind === 'delete' || kind === 'replace') return kind;
   return 'replace';
@@ -57,43 +68,25 @@ function isWhitespaceOnly(text: string): boolean {
   return /^[\s\u00A0]+$/.test(text);
 }
 
-function resolveLiveSuggestionRange(
-  doc: ProseMirrorNode,
-  id: string,
-  kind: 'insert' | 'delete'
-): MarkRange | null {
-  let from: number | null = null;
-  let to: number | null = null;
-
-  doc.descendants((node, pos) => {
-    if (!node.isText) return true;
-    const hasSuggestionMark = node.marks.some((mark) =>
-      mark.type.name === 'proofSuggestion'
-      && mark.attrs.id === id
-      && normalizeSuggestionKind(mark.attrs.kind) === kind
-    );
-    if (!hasSuggestionMark) return true;
-    if (from === null || pos < from) from = pos;
-    const end = pos + node.nodeSize;
-    if (to === null || end > to) to = end;
-    return true;
-  });
-
-  if (from === null || to === null) return null;
-  return { from, to };
-}
-
 function resolveLiveInsertSuggestionRange(
   doc: ProseMirrorNode,
   id: string
 ): MarkRange | null {
-  return resolveLiveSuggestionRange(doc, id, 'insert');
+  const segments = collectSuggestionSegments(doc, id, 'insert');
+  return getSuggestionClusterRangeFromSegments(segments);
+}
+
+function resolveLiveDeleteSuggestionRange(
+  doc: ProseMirrorNode,
+  id: string
+): MarkRange | null {
+  const segments = collectSuggestionSegments(doc, id, 'delete');
+  return getSuggestionClusterRangeFromSegments(segments);
 }
 
 function getLiveInsertSuggestionText(doc: ProseMirrorNode, id: string): string | null {
-  const range = resolveLiveInsertSuggestionRange(doc, id);
-  if (!range || range.to <= range.from) return null;
-  return doc.textBetween(range.from, range.to, '', '');
+  const segments = collectSuggestionSegments(doc, id, 'insert');
+  return getSuggestionTextFromSegments(segments);
 }
 
 function collectSuggestionIdsInRange(
@@ -130,7 +123,7 @@ function findEditableInsertSuggestionAtPosition(
   pos: number,
   by: string
 ): { id: string; range: MarkRange; offset: number } | null {
-  const matches: Array<{ id: string; from: number; to: number }> = [];
+  const matches: Array<{ id: string; range: MarkRange; offset: number; containsPos: boolean }> = [];
 
   doc.descendants((node, nodePos) => {
     if (!node.isText) return true;
@@ -144,9 +137,12 @@ function findEditableInsertSuggestionAtPosition(
       if ((mark.attrs.by || 'unknown') !== by) continue;
       const id = typeof mark.attrs.id === 'string' ? mark.attrs.id : '';
       if (!id) continue;
-      const range = resolveLiveInsertSuggestionRange(doc, id);
-      if (!range) continue;
-      matches.push({ id, from: range.from, to: range.to });
+      const segments = collectSuggestionSegments(doc, id, 'insert');
+      const range = getSuggestionClusterRangeFromSegments(segments);
+      const offset = getSuggestionTextOffsetAtPosition(segments, pos);
+      if (!range || offset === null) continue;
+      const containsPos = segments.some((segment) => pos >= segment.from && pos <= segment.to);
+      matches.push({ id, range, offset, containsPos });
     }
 
     return true;
@@ -155,55 +151,18 @@ function findEditableInsertSuggestionAtPosition(
   if (matches.length === 0) return null;
 
   matches.sort((a, b) => {
-    const aContains = pos >= a.from && pos <= a.to;
-    const bContains = pos >= b.from && pos <= b.to;
+    const aContains = a.containsPos;
+    const bContains = b.containsPos;
     if (aContains !== bContains) return aContains ? -1 : 1;
-    return (a.to - a.from) - (b.to - b.from);
+    return (a.range.to - a.range.from) - (b.range.to - b.range.from);
   });
 
   const match = matches[0];
-  const offset = Math.max(0, Math.min(pos - match.from, match.to - match.from));
   return {
     id: match.id,
-    range: { from: match.from, to: match.to },
-    offset,
+    range: { from: match.range.from, to: match.range.to },
+    offset: match.offset,
   };
-}
-
-function syncInsertSuggestionMetadataFromDoc(
-  doc: ProseMirrorNode,
-  metadata: Record<string, StoredMark>,
-  insertIds: string[]
-): Record<string, StoredMark> {
-  if (insertIds.length === 0) return metadata;
-
-  let changed = false;
-  const next = { ...metadata };
-
-  for (const id of insertIds) {
-    const existing = next[id];
-    if (!existing || existing.kind !== 'insert') continue;
-
-    const content = getLiveInsertSuggestionText(doc, id);
-    if (!content) {
-      delete next[id];
-      changed = true;
-      continue;
-    }
-
-    const range = resolveLiveInsertSuggestionRange(doc, id);
-    const prevContent = typeof existing.content === 'string' ? existing.content : '';
-    if (prevContent !== content || !range || existing.range?.from !== range.from || existing.range?.to !== range.to) {
-      next[id] = {
-        ...existing,
-        content,
-        ...(range ? { range: { from: range.from, to: range.to } } : {}),
-      };
-      changed = true;
-    }
-  }
-
-  return changed ? next : metadata;
 }
 
 function findTrailingDeleteRangeForInsert(
@@ -227,7 +186,7 @@ function findTrailingDeleteRangeForInsert(
       if (!id || seenDeleteIds.has(id)) continue;
       seenDeleteIds.add(id);
 
-      const deleteRange = resolveLiveSuggestionRange(doc, id, 'delete');
+      const deleteRange = resolveLiveDeleteSuggestionRange(doc, id);
       if (!deleteRange) continue;
       if (deleteRange.from === insertRange.to && deleteRange.to === pos) {
         matchingDeleteRange = deleteRange;

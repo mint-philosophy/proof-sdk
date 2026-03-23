@@ -59,8 +59,13 @@ import {
   disableSuggestions,
   toggleSuggestions,
   isSuggestionsEnabled,
+  resetSuggestionsInsertCoalescing,
   wrapTransactionForSuggestions,
 } from './plugins/suggestions';
+import {
+  buildRemoteInsertSuggestionBoundaryRepair,
+  syncInsertSuggestionMetadataFromDoc,
+} from './plugins/suggestion-boundaries';
 import {
   getYjsTransactionOriginInfo,
   isYjsChangeOriginTransaction as isRemoteYjsChangeOriginTransaction,
@@ -99,6 +104,7 @@ import {
   getMarkMetadata,
   getMarkMetadataForDisk,
   getMarkMetadataWithQuotes,
+  syncSuggestionMetadataTransaction,
   setMarkMetadata,
   applyRemoteMarks,
   setActiveMark,
@@ -5327,6 +5333,31 @@ class ProofEditorImpl implements ProofEditor {
     }
   }
 
+  private repairRemoteSuggestionBoundaryInheritance(
+    view: EditorView,
+    beforeState: any,
+    dispatchBase: (transaction: any) => void,
+  ): void {
+    const repair = buildRemoteInsertSuggestionBoundaryRepair(beforeState, view.state);
+    if (!repair) return;
+
+    let repairTr = repair.transaction;
+    const currentMetadata = getMarkMetadata(view.state);
+    const syncedMetadata = syncInsertSuggestionMetadataFromDoc(
+      repairTr.doc,
+      currentMetadata,
+      repair.affectedInsertIds,
+    );
+    if (syncedMetadata !== currentMetadata) {
+      repairTr = syncSuggestionMetadataTransaction(view.state, repairTr, syncedMetadata);
+    }
+
+    repairTr = repairTr.setMeta('addToHistory', false);
+    this.runWithTrackChangesSystemTransactionsSuppressed(() => {
+      dispatchBase(repairTr);
+    });
+  }
+
   /**
    * Set up the suggestions interceptor to convert edits to tracked changes
    * when suggestion mode is enabled.
@@ -5342,14 +5373,15 @@ class ProofEditorImpl implements ProofEditor {
 
       // Override dispatchTransaction to intercept edits
       (view as any).dispatch = (tr: any) => {
+        const beforeState = view.state;
         const dispatchWithRevision = (transaction: any) => {
           originalDispatch(transaction);
           if (transaction?.docChanged) {
             this.revision += 1;
           }
         };
-        const beforeSelectionFrom = view.state.selection.from;
-        const beforeSelectionEmpty = view.state.selection.empty;
+        const beforeSelectionFrom = beforeState.selection.from;
+        const beforeSelectionEmpty = beforeState.selection.empty;
         const yjsOrigin = getYjsTransactionOriginInfo(tr);
         const isRemoteContentChange = Boolean(tr?.docChanged) && yjsOrigin.isYjsOrigin;
         const isMarksOnlyChange = tr?.getMeta?.(marksPluginKey) !== undefined;
@@ -5415,7 +5447,9 @@ class ProofEditorImpl implements ProofEditor {
           // Don't intercept Yjs-origin collaborative transactions.
           if (yjsOrigin.isYjsOrigin) {
             clearPendingDomSuggestionSelection();
+            resetSuggestionsInsertCoalescing();
             originalDispatch(tr);
+            this.repairRemoteSuggestionBoundaryInheritance(view, beforeState, dispatchWithRevision);
             return;
           }
 

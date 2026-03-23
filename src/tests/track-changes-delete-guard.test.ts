@@ -13,13 +13,13 @@ function run(): void {
   );
   assert.equal(
     shouldSuppressTrackChangesDeleteIntent({ key: 'Backspace', modifiers: { altKey: true } }),
-    true,
-    'Option+Backspace should be intercepted as a no-op in track changes mode',
+    false,
+    'Option+Backspace should go through the tracked word-delete path',
   );
   assert.equal(
     shouldSuppressTrackChangesDeleteIntent({ key: 'Backspace', modifiers: { altKey: true, ctrlKey: true } }),
-    true,
-    'beforeinput word-delete intents should also be suppressed when they map to modified Backspace',
+    false,
+    'beforeinput word-delete intents should keep their tracked delete semantics',
   );
   assert.equal(
     shouldSuppressTrackChangesDeleteIntent({ key: 'Delete', modifiers: { altKey: true } }),
@@ -28,7 +28,7 @@ function run(): void {
   );
   assert.equal(
     shouldSuppressTrackChangesKeydown({ key: 'Backspace', altKey: true }),
-    true,
+    false,
     'keydown suppression should match the intent-based guard',
   );
 

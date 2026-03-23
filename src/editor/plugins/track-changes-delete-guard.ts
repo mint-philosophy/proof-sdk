@@ -23,10 +23,6 @@ export function shouldSuppressTrackChangesDeleteIntent(
     return true;
   }
 
-  if (!intent.modifiers?.metaKey && (intent.modifiers?.altKey || intent.modifiers?.ctrlKey)) {
-    return true;
-  }
-
   return false;
 }
 

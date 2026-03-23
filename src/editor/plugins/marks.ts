@@ -229,6 +229,22 @@ function markResolvedMarkIds(
   }
 }
 
+export function tombstoneResolvedMarkIds(
+  ids: string[],
+  options?: {
+    now?: number;
+    ttlMs?: number;
+    reason?: MarkTombstoneReason;
+  },
+): void {
+  markResolvedMarkIds(
+    ids,
+    options?.now ?? Date.now(),
+    options?.ttlMs ?? RESOLVED_MARK_TOMBSTONE_TTL_MS,
+    options?.reason ?? 'deleted',
+  );
+}
+
 function isResolvedMarkTombstoned(
   id: string,
   now: number = Date.now(),

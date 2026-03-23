@@ -141,6 +141,7 @@ import {
   type StoredMark,
   buildCanonicalShareMarkMetadata,
   mergePendingServerMarks,
+  tombstoneResolvedMarkIds,
   getMarksByKind,
   getPendingSuggestions,
   getUnresolvedComments as getUnresolvedMarkComments,
@@ -8919,6 +8920,7 @@ class ProofEditorImpl implements ProofEditor {
         return false;
       }
 
+      tombstoneResolvedMarkIds([markId], { reason: 'deleted' });
       const success = await this.applyShareMutationDocumentResult(result);
       if (success && this.editor) {
         captureEvent('suggestion_accepted', { count: 1 });
@@ -8996,6 +8998,7 @@ class ProofEditorImpl implements ProofEditor {
         return false;
       }
 
+      tombstoneResolvedMarkIds([markId], { reason: 'deleted' });
       const success = await this.applyShareMutationDocumentResult(result);
       if (success && this.editor) {
         captureEvent('suggestion_rejected', { count: 1 });

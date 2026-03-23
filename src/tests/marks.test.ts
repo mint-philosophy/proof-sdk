@@ -73,6 +73,8 @@ import {
   __getMarkAnchorHydrationFailure,
   __getMarkAnchorHydrationFailureCount,
   __resetMarkAnchorHydrationFailures,
+  __resetResolvedMarkTombstones,
+  tombstoneResolvedMarkIds,
 } from '../editor/plugins/marks.js';
 import { getTextForRange, resolveQuoteRange } from '../editor/utils/text-range.js';
 import { extractEmbeddedProvenance } from '../formats/provenance-sidecar.js';
@@ -1976,6 +1978,27 @@ test('mergePendingServerMarks skips tombstoned deleted comments', () => {
 
   const merged = mergePendingServerMarks(localMetadata, serverMetadata);
   assert(!merged[commentId], 'Tombstoned deleted comments should not be re-added from server');
+});
+
+test('mergePendingServerMarks skips tombstoned resolved suggestions after persisted accept', () => {
+  const suggestionId = 's-persisted-accept';
+  __resetResolvedMarkTombstones();
+  try {
+    tombstoneResolvedMarkIds([suggestionId], { reason: 'deleted' });
+
+    const merged = mergePendingServerMarks({}, {
+      [suggestionId]: {
+        kind: 'insert' as const,
+        by: 'human:seth',
+        content: ' ACCEPT TEST',
+        status: 'pending' as const,
+      },
+    });
+
+    assert(!merged[suggestionId], 'Tombstoned resolved suggestions should not be re-added from stale collab marks');
+  } finally {
+    __resetResolvedMarkTombstones();
+  }
 });
 
 test('comment anchors without metadata are not surfaced or flushed as empty comments', () => {

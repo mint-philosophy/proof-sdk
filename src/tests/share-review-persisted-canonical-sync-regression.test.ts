@@ -71,9 +71,12 @@ function run(): void {
     '\n  /**\n   * Reject a suggestion without changing the document\n   */',
   );
   assert(
-    acceptPersistedBlock.includes('const success = await this.applyShareMutationDocumentResult(result);')
+    acceptPersistedBlock.includes("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
+      && acceptPersistedBlock.indexOf("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
+        < acceptPersistedBlock.indexOf('const success = await this.applyShareMutationDocumentResult(result);')
+      && acceptPersistedBlock.includes('const success = await this.applyShareMutationDocumentResult(result);')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to reconcile share review UI from canonical server markdown instead of replaying a local accept',
+    'Expected markAcceptPersisted to tombstone the resolved suggestion before canonical reload so stale collab marks cannot resurrect it',
   );
 
   const rejectPersistedBlock = sliceBetween(
@@ -82,9 +85,12 @@ function run(): void {
     '\n  /**\n   * Accept all pending suggestions\n   */',
   );
   assert(
-    rejectPersistedBlock.includes('const success = await this.applyShareMutationDocumentResult(result);')
+    rejectPersistedBlock.includes("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
+      && rejectPersistedBlock.indexOf("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
+        < rejectPersistedBlock.indexOf('const success = await this.applyShareMutationDocumentResult(result);')
+      && rejectPersistedBlock.includes('const success = await this.applyShareMutationDocumentResult(result);')
       && !rejectPersistedBlock.includes('rejectMark(view, markId);'),
-    'Expected markRejectPersisted to reconcile share review UI from canonical server markdown instead of replaying a local reject',
+    'Expected markRejectPersisted to tombstone the resolved suggestion before canonical reload so stale collab marks cannot resurrect it',
   );
 
   console.log('share-review-persisted-canonical-sync-regression.test.ts passed');

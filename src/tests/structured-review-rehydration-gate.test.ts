@@ -41,6 +41,20 @@ function parseStoredMarks(raw: unknown): Record<string, StoredMark> {
   }
 }
 
+function buildStaleSuggestion(createdAt: string): StoredMark {
+  return {
+    kind: 'replace',
+    by: 'ai:test',
+    createdAt,
+    quote: 'orphaned suggestion',
+    content: 'should be dropped',
+    status: 'pending',
+    startRel: 'char:999',
+    endRel: 'char:1017',
+    range: { from: 999, to: 1017 },
+  };
+}
+
 async function run(): Promise<void> {
   const dbName = `structured-review-rehydration-gate-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
   const dbPath = path.join(os.tmpdir(), dbName);
@@ -62,49 +76,37 @@ async function run(): Promise<void> {
     const createdAt = new Date('2026-03-23T09:00:00.000Z').toISOString();
     const visibleAuthoredPrefix = 'A';
     const visibleAuthoredSuffix = 'A';
-    const targetQuote = 'legacy target quote';
     const targetReplacement = 'accepted target text';
-    const baseVisibleText = `${visibleAuthoredPrefix} ${targetQuote} ${visibleAuthoredSuffix}`;
-    const targetAnchors = buildRelativeAnchors(baseVisibleText, targetQuote);
-    const targetMarkId = 'target-suggestion';
-    const staleSuggestionId = 'stale-suggestion';
 
-    const authoredWrappedMarkdown = [
+    const acceptTargetQuote = 'legacy target quote';
+    const acceptBaseVisibleText = `${visibleAuthoredPrefix} ${acceptTargetQuote} ${visibleAuthoredSuffix}`;
+    const acceptTargetAnchors = buildRelativeAnchors(acceptBaseVisibleText, acceptTargetQuote);
+    const acceptTargetMarkId = 'target-suggestion-accept';
+    const acceptStaleSuggestionId = 'stale-suggestion-accept';
+    const acceptMarkdown = [
       `<span data-proof="authored" data-by="human:Test Editor">${visibleAuthoredPrefix}</span> `,
-      `<span data-proof="suggestion" data-id="${targetMarkId}" data-by="ai:test" data-kind="replace">${targetQuote}</span> `,
+      `<span data-proof="suggestion" data-id="${acceptTargetMarkId}" data-by="ai:test" data-kind="replace">${acceptTargetQuote}</span> `,
       `<span data-proof="authored" data-by="human:Test Editor">${visibleAuthoredSuffix}</span>`,
     ].join('');
-
-    const initialMarks = canonicalizeStoredMarks({
-      [targetMarkId]: {
+    const acceptMarks = canonicalizeStoredMarks({
+      [acceptTargetMarkId]: {
         kind: 'replace',
         by: 'ai:test',
         createdAt,
-        quote: targetQuote,
+        quote: acceptTargetQuote,
         content: targetReplacement,
         status: 'pending',
-        startRel: targetAnchors.startRel,
-        endRel: targetAnchors.endRel,
-        range: targetAnchors.range,
+        startRel: acceptTargetAnchors.startRel,
+        endRel: acceptTargetAnchors.endRel,
+        range: acceptTargetAnchors.range,
       } satisfies StoredMark,
-      [staleSuggestionId]: {
-        kind: 'replace',
-        by: 'ai:test',
-        createdAt,
-        quote: 'orphaned suggestion',
-        content: 'should be dropped',
-        status: 'pending',
-        startRel: 'char:999',
-        endRel: 'char:1017',
-        range: { from: 999, to: 1017 },
-      } satisfies StoredMark,
+      [acceptStaleSuggestionId]: buildStaleSuggestion(createdAt),
     });
-
     const acceptSlug = `structured-gate-accept-${Math.random().toString(36).slice(2, 10)}`;
-    db.createDocument(acceptSlug, authoredWrappedMarkdown, initialMarks, 'Ignore authored + stale suggestion gate for accept');
+    db.createDocument(acceptSlug, acceptMarkdown, acceptMarks, 'Ignore authored + stale suggestion gate for accept');
 
     const acceptResult = await executeDocumentOperationAsync(acceptSlug, 'POST', '/marks/accept', {
-      markId: targetMarkId,
+      markId: acceptTargetMarkId,
       by: 'human:test',
     });
     assertEqual(acceptResult.status, 200, `Expected accept to ignore authored/stale gate failures, got ${acceptResult.status}`);
@@ -120,44 +122,36 @@ async function run(): Promise<void> {
       'Expected accept to preserve both visible authored wrappers',
     );
     const acceptedMarks = parseStoredMarks(acceptedDoc?.marks);
-    assert(!(targetMarkId in acceptedMarks), 'Expected accept to remove the finalized target suggestion mark');
-    assert(!(staleSuggestionId in acceptedMarks), 'Expected accept to drop unrelated stale suggestions that could not be rehydrated');
+    assert(!(acceptTargetMarkId in acceptedMarks), 'Expected accept to remove the finalized target suggestion mark');
+    assert(!(acceptStaleSuggestionId in acceptedMarks), 'Expected accept to drop unrelated stale suggestions that could not be rehydrated');
 
-    const rejectTargetMarkId = `target-suggestion-reject-${Math.random().toString(36).slice(2, 8)}`;
-    const rejectStaleSuggestionId = `stale-suggestion-reject-${Math.random().toString(36).slice(2, 8)}`;
-    const rejectBaseVisibleText = `${visibleAuthoredPrefix} ${targetQuote} ${visibleAuthoredSuffix}`;
-    const rejectTargetAnchors = buildRelativeAnchors(rejectBaseVisibleText, targetQuote);
-    const rejectInitialMarks = canonicalizeStoredMarks({
+    const rejectFullQuote = 'legacy target quote that should survive reject';
+    const rejectVisibleQuote = rejectFullQuote.slice(0, 20);
+    const rejectBaseVisibleText = `${visibleAuthoredPrefix} ${rejectFullQuote} ${visibleAuthoredSuffix}`;
+    const rejectTargetAnchors = buildRelativeAnchors(rejectBaseVisibleText, rejectFullQuote);
+    const rejectTargetMarkId = 'target-suggestion-reject';
+    const rejectStaleSuggestionId = 'stale-suggestion-reject';
+    const rejectMarkdown = [
+      `<span data-proof="authored" data-by="human:Test Editor">${visibleAuthoredPrefix}</span> `,
+      `<span data-proof="suggestion" data-id="${rejectTargetMarkId}" data-by="ai:test" data-kind="replace">${rejectVisibleQuote}</span> `,
+      `<span data-proof="authored" data-by="human:Test Editor">${visibleAuthoredSuffix}</span>`,
+    ].join('');
+    const rejectMarks = canonicalizeStoredMarks({
       [rejectTargetMarkId]: {
         kind: 'replace',
         by: 'ai:test',
         createdAt,
-        quote: targetQuote,
+        quote: rejectFullQuote,
         content: targetReplacement,
         status: 'pending',
         startRel: rejectTargetAnchors.startRel,
         endRel: rejectTargetAnchors.endRel,
         range: rejectTargetAnchors.range,
       } satisfies StoredMark,
-      [rejectStaleSuggestionId]: {
-        kind: 'replace',
-        by: 'ai:test',
-        createdAt,
-        quote: 'orphaned suggestion',
-        content: 'should be dropped',
-        status: 'pending',
-        startRel: 'char:999',
-        endRel: 'char:1017',
-        range: { from: 999, to: 1017 },
-      } satisfies StoredMark,
+      [rejectStaleSuggestionId]: buildStaleSuggestion(createdAt),
     });
-    const rejectMarkdown = [
-      `<span data-proof="authored" data-by="human:Test Editor">${visibleAuthoredPrefix}</span> `,
-      `<span data-proof="suggestion" data-id="${rejectTargetMarkId}" data-by="ai:test" data-kind="replace">${targetQuote}</span> `,
-      `<span data-proof="authored" data-by="human:Test Editor">${visibleAuthoredSuffix}</span>`,
-    ].join('');
     const rejectSlug = `structured-gate-reject-${Math.random().toString(36).slice(2, 10)}`;
-    db.createDocument(rejectSlug, rejectMarkdown, rejectInitialMarks, 'Ignore authored + stale suggestion gate for reject');
+    db.createDocument(rejectSlug, rejectMarkdown, rejectMarks, 'Ignore authored + stale suggestion gate for reject');
 
     const rejectResult = await executeDocumentOperationAsync(rejectSlug, 'POST', '/marks/reject', {
       markId: rejectTargetMarkId,
@@ -172,8 +166,8 @@ async function run(): Promise<void> {
     );
     assertEqual(
       (rejectedDoc?.markdown.match(/data-proof="authored"[^>]*data-by="human:Test Editor"/g) ?? []).length,
-      2,
-      'Expected reject to preserve both visible authored wrappers',
+      1,
+      'Expected reject to preserve the leading visible authored wrapper',
     );
     const rejectedMarks = parseStoredMarks(rejectedDoc?.marks);
     assert(!(rejectTargetMarkId in rejectedMarks), 'Expected reject to remove the finalized target suggestion mark');

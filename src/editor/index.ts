@@ -2540,12 +2540,16 @@ class ProofEditorImpl implements ProofEditor {
       && this.collabConnectionStatus === 'connected'
       && this.collabIsSynced
       && !awaitingTemplateSeed;
-    const hydrated = !baseAllowLocalEdits ? true : this.isCollabHydratedForEditing();
+    const collabReconnectStable = !this.pendingCollabRebindOnSync
+      && !this.suppressTrackChangesDuringCollabReconnect;
+    const hydrated = !baseAllowLocalEdits
+      ? true
+      : this.hasCompletedInitialCollabHydration && this.isCollabHydratedForEditing();
     if (baseAllowLocalEdits && !hydrated) {
       // Prevent "type into blank doc" races that can overwrite remote Yjs state.
       this.kickCollabHydration();
     }
-    const allowLocalEdits = baseAllowLocalEdits && hydrated;
+    const allowLocalEdits = baseAllowLocalEdits && collabReconnectStable && hydrated;
     this.shareAllowLocalEdits = allowLocalEdits;
     // Only block content mutations for true view-only sessions.
     // Avoid using filterTransaction as a temporary "sync lock", since it can deadlock hydration.
@@ -8743,6 +8747,7 @@ class ProofEditorImpl implements ProofEditor {
       ? result.marks as Record<string, StoredMark>
       : {};
     const collabStatus = typeof result?.collab?.status === 'string' ? result.collab.status : '';
+    resetSuggestionsInsertCoalescing();
     if (markdown !== null && collabStatus === 'pending') {
       this.pendingCollabReconnectTemplateOverride = this.normalizeMarkdownForCollab(markdown);
       this.suppressTrackChangesDuringCollabReconnect = true;

@@ -33,10 +33,11 @@ function run(): void {
   );
   assert(
     applyResultBlock.includes("const collabStatus = typeof result?.collab?.status === 'string' ? result.collab.status : '';")
+      && applyResultBlock.includes('resetSuggestionsInsertCoalescing();')
       && applyResultBlock.includes("this.pendingCollabReconnectTemplateOverride = this.normalizeMarkdownForCollab(markdown);")
       && applyResultBlock.includes("this.collabConnectionStatus = 'connecting';")
       && applyResultBlock.includes('this.collabIsSynced = false;'),
-    'Expected share review mutation results with pending collab status to seed the next reconnect from canonical server markdown and mark collab as unstable before the reconnect finishes',
+    'Expected share review mutation results with pending collab status to clear tracked-insert coalescing, seed the next reconnect from canonical server markdown, and mark collab as unstable before the reconnect finishes',
   );
 
   const reconnectBlock = sliceBetween(
@@ -49,6 +50,19 @@ function run(): void {
       && reconnectBlock.includes('reconnectTemplate = this.pendingCollabReconnectTemplateOverride;')
       && reconnectBlock.includes('this.pendingCollabReconnectTemplateOverride = null;'),
     'Expected collab reconnect to prefer the authoritative share mutation template over a stale fetchDocument fallback',
+  );
+
+  const editGateBlock = sliceBetween(
+    editorSource,
+    '  private updateShareEditGate(): void {',
+    '\n  private ensureShareWebSocketConnection(): void {',
+  );
+  assert(
+    editGateBlock.includes('const collabReconnectStable = !this.pendingCollabRebindOnSync')
+      && editGateBlock.includes('&& !this.suppressTrackChangesDuringCollabReconnect;')
+      && editGateBlock.includes('this.hasCompletedInitialCollabHydration && this.isCollabHydratedForEditing();')
+      && editGateBlock.includes('const allowLocalEdits = baseAllowLocalEdits && collabReconnectStable && hydrated;'),
+    'Expected share edit gating to keep the editor locked until post-review collab reconnect and hydration are fully stable',
   );
 
   const acceptPersistedBlock = sliceBetween(

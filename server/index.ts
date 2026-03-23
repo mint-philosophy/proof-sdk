@@ -1,6 +1,7 @@
-import express from 'express';
+import express, { type Response } from 'express';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
+import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { apiRoutes } from './routes.js';
@@ -16,10 +17,15 @@ import {
   enforceBridgeClientCompatibility,
 } from './client-capabilities.js';
 import { getBuildInfo } from './build-info.js';
+import { createDocument, createDocumentAccessToken } from './db.js';
+import { generateSlug } from './slug.js';
+import { AGENT_TAB_UI_SCRIPT } from './homepage-script.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PORT = Number.parseInt(process.env.PORT || '4000', 10);
+const HOME_TEMPLATE_PATH = path.join(__dirname, 'resources', 'home.html');
+const HOME_HTML = readFileSync(HOME_TEMPLATE_PATH, 'utf8').replace('__AGENT_TAB_UI_SCRIPT__', AGENT_TAB_UI_SCRIPT);
 const DEFAULT_ALLOWED_CORS_ORIGINS = [
   'http://localhost:3000',
   'http://127.0.0.1:3000',
@@ -41,10 +47,20 @@ async function main(): Promise<void> {
   const server = createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
   const allowedCorsOrigins = parseAllowedCorsOrigins();
+  const staticAssetOptions = process.env.NODE_ENV !== 'production'
+    ? {
+      index: false,
+      setHeaders: (res: Response) => {
+        res.setHeader('Cache-Control', 'no-store, max-age=0');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+      },
+    }
+    : { index: false };
 
   app.use(express.json({ limit: '10mb' }));
-  app.use(express.static(path.join(__dirname, '..', 'public'), { maxAge: 0, etag: false }));
-  app.use(express.static(path.join(__dirname, '..', 'dist'), { maxAge: 0, etag: false }));
+  app.use(express.static(path.join(__dirname, '..', 'public'), staticAssetOptions));
+  app.use(express.static(path.join(__dirname, '..', 'dist'), staticAssetOptions));
 
   app.use((req, res, next) => {
     const originHeader = req.header('origin');
@@ -79,29 +95,20 @@ async function main(): Promise<void> {
   });
 
   app.get('/', (_req, res) => {
-    res.type('html').send(`<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Proof SDK</title>
-    <style>
-      body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 48px 24px; color: #17261d; background: #f7faf5; }
-      main { max-width: 760px; margin: 0 auto; }
-      h1 { font-size: 2.5rem; margin: 0 0 0.5rem; }
-      p { font-size: 1.05rem; line-height: 1.6; }
-      code { background: #eaf2e6; padding: 0.2rem 0.35rem; border-radius: 4px; }
-      a { color: #266854; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>Proof SDK</h1>
-      <p>Open-source collaborative markdown editing with provenance tracking and an agent HTTP bridge.</p>
-      <p>Start with <code>POST /documents</code>, inspect <a href="/agent-docs">agent docs</a>, or read <a href="/.well-known/agent.json">discovery metadata</a>.</p>
-    </main>
-  </body>
-</html>`);
+    res.type('html').send(HOME_HTML);
+  });
+
+  app.get('/download', (_req, res) => {
+    res.redirect(302, '/');
+  });
+
+  app.get('/get-started', (_req, res) => {
+    const slug = generateSlug();
+    const title = 'Untitled';
+    const markdown = '# Untitled\n\n';
+    createDocument(slug, markdown, {}, title);
+    const access = createDocumentAccessToken(slug, 'editor');
+    res.redirect(302, `/d/${encodeURIComponent(slug)}?token=${encodeURIComponent(access.secret)}`);
   });
 
   app.get('/health', (_req, res) => {

@@ -383,6 +383,37 @@ async function runServerSourceTests(): Promise<void> {
     );
   });
 
+  await test('D1: server source disables static index fallthrough so the homepage route can render', async () => {
+    assertIncludes(
+      serverSource,
+      'index: false',
+      'server source should disable express static index serving',
+    );
+  });
+
+  await test('D1: server source serves the web homepage and create-doc routes', async () => {
+    assertIncludes(
+      serverSource,
+      "app.get('/', (_req, res) => {\n    res.type('html').send(HOME_HTML);",
+      'server source should serve the homepage template at /',
+    );
+    assertIncludes(
+      serverSource,
+      "app.get('/download', (_req, res) => {\n    res.redirect(302, '/');",
+      'server source should redirect /download to the homepage',
+    );
+    assertIncludes(
+      serverSource,
+      "app.get('/get-started', (_req, res) => {",
+      'server source should expose a get-started route',
+    );
+    assertIncludes(
+      serverSource,
+      "createDocumentAccessToken(slug, 'editor')",
+      'server source should mint an editor token for homepage-created docs',
+    );
+  });
+
   await test('D1: collab WS rewriting infers embedded runtime from the runtime path', async () => {
     assertIncludes(
       routesSource,

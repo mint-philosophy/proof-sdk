@@ -143,13 +143,13 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const REWRITE_COLLAB_TIMEOUT_MS = parsePositiveInt(process.env.PROOF_REWRITE_COLLAB_TIMEOUT_MS, 3000);
+const REWRITE_COLLAB_TIMEOUT_MS = parsePositiveInt(process.env.PROOF_REWRITE_COLLAB_TIMEOUT_MS, 1500);
 const REWRITE_BARRIER_TIMEOUT_MS = parsePositiveInt(process.env.PROOF_REWRITE_BARRIER_TIMEOUT_MS, 5000);
-const EDIT_COLLAB_STABILITY_MS = parsePositiveInt(process.env.AGENT_EDIT_COLLAB_STABILITY_MS, 2500);
-const EDIT_COLLAB_STABILITY_SAMPLE_MS = parsePositiveInt(process.env.AGENT_EDIT_COLLAB_STABILITY_SAMPLE_MS, 100);
-const EDIT_ACTIVE_COLLAB_SETTLE_MS = parsePositiveInt(process.env.AGENT_EDIT_ACTIVE_COLLAB_SETTLE_MS, 300);
-const EDIT_ACTIVE_COLLAB_SETTLE_SAMPLE_MS = parsePositiveInt(process.env.AGENT_EDIT_ACTIVE_COLLAB_SETTLE_SAMPLE_MS, 50);
-const EDIT_ACTIVE_COLLAB_MIN_WAIT_MS = parsePositiveInt(process.env.AGENT_EDIT_ACTIVE_COLLAB_MIN_WAIT_MS, 150);
+const EDIT_COLLAB_STABILITY_MS = parsePositiveInt(process.env.AGENT_EDIT_COLLAB_STABILITY_MS, 750);
+const EDIT_COLLAB_STABILITY_SAMPLE_MS = parsePositiveInt(process.env.AGENT_EDIT_COLLAB_STABILITY_SAMPLE_MS, 50);
+const EDIT_ACTIVE_COLLAB_SETTLE_MS = parsePositiveInt(process.env.AGENT_EDIT_ACTIVE_COLLAB_SETTLE_MS, 120);
+const EDIT_ACTIVE_COLLAB_SETTLE_SAMPLE_MS = parsePositiveInt(process.env.AGENT_EDIT_ACTIVE_COLLAB_SETTLE_SAMPLE_MS, 25);
+const EDIT_ACTIVE_COLLAB_MIN_WAIT_MS = parsePositiveInt(process.env.AGENT_EDIT_ACTIVE_COLLAB_MIN_WAIT_MS, 50);
 const TEST_EDIT_V2_POST_COMMIT_DELAY_MS = parsePositiveInt(process.env.PROOF_TEST_EDIT_V2_POST_COMMIT_DELAY_MS, 0);
 
 function sleep(ms: number): Promise<void> {

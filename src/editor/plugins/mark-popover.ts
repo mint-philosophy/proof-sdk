@@ -67,11 +67,12 @@ const MOBILE_SELECTION_POLL_MS = 120;
 const MOBILE_SELECTION_POLL_WINDOW_MS = 1800;
 const SUGGESTION_HOVER_OPEN_DELAY_MS = 120;
 const SUGGESTION_HOVER_CLOSE_DELAY_MS = 180;
-const REVIEW_ACTION_RETRY_DELAY_MS = 150;
+const REVIEW_ACTION_RETRY_DELAY_MS = 100;
 const REVIEW_ACTION_MAX_RETRIES = 12;
-const REVIEW_FOLLOWUP_RETRY_DELAY_MS = 60;
-const REVIEW_FOLLOWUP_MAX_RETRIES = 20;
-const REVIEW_FOLLOWUP_MAX_RETRIES_WITH_TARGET = 200;
+const REVIEW_FOLLOWUP_RETRY_DELAY_MS = 50;
+const REVIEW_FOLLOWUP_MAX_RETRIES = 12;
+const REVIEW_FOLLOWUP_MAX_RETRIES_WITH_TARGET = 32;
+const TRACK_CHANGES_EDITOR_CLICK_SUPPRESSION_MS = 500;
 const DESKTOP_REVIEW_GUTTER_WIDTH_PX = 360;
 
 type VisibleComment = {
@@ -573,6 +574,8 @@ class MarkPopoverController {
   private hoverPendingMarkId: string | null = null;
   private hoverPopoverActive: boolean = false;
   private activeSuggestionOpenedFromHover: boolean = false;
+  private suppressEditorSuggestionAutoOpenUntil: number = 0;
+  private suppressEditorSuggestionAutoOpenMarkId: string | null = null;
   private reviewActionRetryTimer: number | null = null;
   private suggestionReviewFollowupTimer: number | null = null;
   private suggestionReviewTransitionPending: boolean = false;
@@ -1168,9 +1171,9 @@ class MarkPopoverController {
     if (
       event.pointerType === 'mouse'
       && event.button === 0
-      && isSuggestionKind(mark?.kind)
-      && this.isTrackChangesEnabled()
+      && this.shouldSuppressEditorSuggestionInteraction(mark?.kind)
     ) {
+      this.suppressEditorSuggestionAutoOpen(markId);
       return;
     }
     if (event.pointerType === 'touch') {
@@ -1192,7 +1195,8 @@ class MarkPopoverController {
     const markId = markEl.dataset.markId;
     if (!markId) return;
     const mark = getMarks(this.view.state).find((item) => item.id === markId);
-    if (event.button === 0 && isSuggestionKind(mark?.kind) && this.isTrackChangesEnabled()) {
+    if (event.button === 0 && this.shouldSuppressEditorSuggestionInteraction(mark?.kind)) {
+      this.suppressEditorSuggestionAutoOpen(markId);
       return;
     }
     event.stopPropagation();
@@ -1211,6 +1215,31 @@ class MarkPopoverController {
       this.suggestionHoverCloseTimer = null;
     }
     this.hoverPendingMarkId = null;
+  }
+
+  private shouldSuppressEditorSuggestionInteraction(kind: string | null | undefined): boolean {
+    return this.isTrackChangesEnabled() && isSuggestionKind(kind);
+  }
+
+  private shouldSuppressEditorSuggestionAutoOpen(mark: Mark): boolean {
+    return this.shouldSuppressEditorSuggestionInteraction(mark.kind)
+      && Date.now() < this.suppressEditorSuggestionAutoOpenUntil
+      && (!this.suppressEditorSuggestionAutoOpenMarkId || this.suppressEditorSuggestionAutoOpenMarkId === mark.id);
+  }
+
+  private suppressEditorSuggestionAutoOpen(markId: string): void {
+    this.suppressEditorSuggestionAutoOpenUntil = Date.now() + TRACK_CHANGES_EDITOR_CLICK_SUPPRESSION_MS;
+    this.suppressEditorSuggestionAutoOpenMarkId = markId;
+    this.clearSuggestionHoverTimers();
+    this.hideReviewContextMenu();
+    if (this.mode === 'suggestion') {
+      this.close();
+    }
+    queueMicrotask(() => {
+      if (getActiveMarkId(this.view.state) === markId) {
+        setActiveMark(this.view, null);
+      }
+    });
   }
 
   private clearReviewActionRetryTimer(): void {
@@ -1424,6 +1453,10 @@ class MarkPopoverController {
     const markEl = target?.closest('[data-mark-id]') as HTMLElement | null;
     const markId = markEl?.dataset.markId ?? null;
     const markKind = markEl?.dataset.markKind;
+    if (this.shouldSuppressEditorSuggestionInteraction(markKind)) {
+      this.clearSuggestionHoverTimers();
+      return;
+    }
     if (!markId || !isSuggestionKind(markKind)) {
       this.scheduleSuggestionHoverClose();
       return;
@@ -1866,6 +1899,9 @@ class MarkPopoverController {
     if (stateActiveMarkId && (this.mode === null || stateActiveMarkId !== this.activeMarkId)) {
       const activeMark = getMarks(view.state).find(item => item.id === stateActiveMarkId);
       if (activeMark) {
+        if (this.shouldSuppressEditorSuggestionAutoOpen(activeMark)) {
+          return;
+        }
         this.openForMark(stateActiveMarkId, undefined, {
           source: activeMark.kind !== 'comment' && this.activeSuggestionOpenedFromHover ? 'hover' : 'direct',
         });

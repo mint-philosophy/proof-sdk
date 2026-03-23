@@ -8731,7 +8731,7 @@ class ProofEditorImpl implements ProofEditor {
     this.flushShareMarks({ persistContent: false });
     if (!this.collabEnabled || !this.collabCanEdit) return;
 
-    const deadline = Date.now() + 750;
+    const deadline = Date.now() + 150;
     while (Date.now() < deadline) {
       const synced = this.collabConnectionStatus === 'connected'
         && this.collabIsSynced
@@ -8741,7 +8741,7 @@ class ProofEditorImpl implements ProofEditor {
         return;
       }
       await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, 25);
+        window.setTimeout(resolve, 15);
       });
     }
   }

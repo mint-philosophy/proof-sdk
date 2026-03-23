@@ -41,9 +41,10 @@ const COALESCE_WINDOW_MS = 5000;
 
 type InsertCoalesceState = { id: string; from: number; to: number; by: string; updatedAt: number };
 type TrackedDeleteIntent = { key: 'Backspace' | 'Delete'; modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean } };
+type PendingTrackedDeleteIntent = { intent: TrackedDeleteIntent; at: number; handled: boolean };
 
 const lastInsertByActor = new Map<string, InsertCoalesceState>();
-const pendingModifiedDeleteIntents = new WeakMap<EditorView, { intent: TrackedDeleteIntent; at: number }>();
+const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
 const PENDING_DELETE_INTENT_TTL_MS = 1500;
 
 function normalizeSuggestionKind(kind: unknown): SuggestionKind {
@@ -591,6 +592,7 @@ export function __debugResolveTrackedDeleteIntentFromBeforeInput(
 function rememberModifiedDeleteIntent(
   view: EditorView,
   event: Pick<KeyboardEvent, 'key' | 'altKey' | 'metaKey' | 'ctrlKey'>,
+  options?: { handled?: boolean },
 ): void {
   if (event.key !== 'Backspace' && event.key !== 'Delete') return;
   if (!event.altKey && !event.metaKey && !event.ctrlKey) return;
@@ -604,15 +606,16 @@ function rememberModifiedDeleteIntent(
       },
     },
     at: Date.now(),
+    handled: options?.handled === true,
   });
 }
 
-function takePendingModifiedDeleteIntent(view: EditorView): TrackedDeleteIntent | null {
+function takePendingModifiedDeleteIntent(view: EditorView): PendingTrackedDeleteIntent | null {
   const entry = pendingModifiedDeleteIntents.get(view);
   if (!entry) return null;
   pendingModifiedDeleteIntents.delete(view);
   if (Date.now() - entry.at > PENDING_DELETE_INTENT_TTL_MS) return null;
-  return entry.intent;
+  return entry;
 }
 
 export function __debugResolveTrackedDeleteIntentForBeforeInput(
@@ -1361,11 +1364,17 @@ export const suggestionsPlugin = $prose(() => {
           if (!isSuggestionsEnabled(view.state)) return false;
           if (view.composing) return false;
           const inputEvent = event as InputEvent;
+          const pendingIntent = takePendingModifiedDeleteIntent(view);
           const intent = __debugResolveTrackedDeleteIntentForBeforeInput(
             inputEvent.inputType ?? '',
-            takePendingModifiedDeleteIntent(view),
+            pendingIntent?.intent ?? null,
           );
           if (!intent) return false;
+          if (pendingIntent?.handled) {
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
+          }
           if (shouldIgnoreTrackedDeleteIntent(intent)) {
             event.preventDefault();
             event.stopPropagation();
@@ -1392,13 +1401,27 @@ export const suggestionsPlugin = $prose(() => {
         if (!isSuggestionsEnabled(view.state)) return false;
         if (event.defaultPrevented || event.isComposing || view.composing) return false;
         if (event.key !== 'Backspace' && event.key !== 'Delete') return false;
-        rememberModifiedDeleteIntent(view, event);
         if (event.key === 'Backspace' && event.metaKey && !event.altKey && !event.ctrlKey) {
+          rememberModifiedDeleteIntent(view, event, { handled: true });
           event.preventDefault();
           event.stopPropagation();
           return true;
         }
-        if (event.altKey || event.metaKey || event.ctrlKey) return false;
+        if (event.altKey || event.ctrlKey) {
+          const range = __debugResolveTrackedDeleteRange(view.state, event.key, {
+            altKey: event.altKey,
+            metaKey: event.metaKey,
+            ctrlKey: event.ctrlKey,
+          });
+          if (!range || range.to <= range.from) return false;
+
+          rememberModifiedDeleteIntent(view, event, { handled: true });
+          event.preventDefault();
+          event.stopPropagation();
+          view.dispatch(view.state.tr.delete(range.from, range.to));
+          return true;
+        }
+        if (event.metaKey) return false;
 
         const range = __debugResolveTrackedDeleteRange(view.state, event.key, {
           altKey: event.altKey,

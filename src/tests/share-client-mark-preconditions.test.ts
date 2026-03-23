@@ -20,6 +20,7 @@ async function run(): Promise<void> {
 
   const requests: FetchRecord[] = [];
   let stateReads = 0;
+  let delayedAcceptAttempts = 0;
 
   (globalThis as { window: Record<string, unknown> }).window = {
     location: new URL('https://proof-web-staging.up.railway.app/d/test-doc?token=share-token'),
@@ -54,8 +55,38 @@ async function run(): Promise<void> {
         marks: {},
       }, 409);
     }
+    if (url.pathname === '/api/agent/test-doc/marks/accept' && body?.markId === 'mark-accept-delayed') {
+      delayedAcceptAttempts += 1;
+      if (delayedAcceptAttempts < 3) {
+        return jsonResponse({
+          success: false,
+          code: 'MARK_NOT_FOUND',
+          error: 'Suggestion not found yet in the authoritative share state',
+        }, 409);
+      }
+      return jsonResponse({ success: true, marks: {}, markdown: 'Delayed canonical markdown' });
+    }
     if (url.pathname === '/api/agent/test-doc/marks/accept') {
       return jsonResponse({ success: true, marks: {}, markdown: 'Accepted canonical markdown' });
+    }
+    if (url.pathname === '/api/documents/test-doc/open-context') {
+      return jsonResponse({
+        success: true,
+        doc: {
+          slug: 'test-doc',
+          title: null,
+          markdown: 'Delayed canonical markdown',
+          marks: {
+            'mark-accept-delayed': {
+              kind: 'insert',
+              status: delayedAcceptAttempts >= 3 ? 'accepted' : 'pending',
+            },
+          },
+          updatedAt: '2026-03-06T00:00:09.000Z',
+        },
+        capabilities: { canRead: true, canComment: true, canEdit: true },
+        links: { webUrl: '/d/test-doc', snapshotUrl: null },
+      });
     }
     if (url.pathname === '/api/agent/test-doc/marks/reject') {
       return jsonResponse({ success: true, marks: {}, content: 'Rejected canonical markdown' });
@@ -96,6 +127,18 @@ async function run(): Promise<void> {
       'rejectSuggestion should fall back to content when markdown is returned under the legacy key',
     );
 
+    const delayedAccept = await shareClient.acceptSuggestion('mark-accept-delayed', 'human:editor');
+    assert.equal(
+      (delayedAccept && 'error' in delayedAccept) ? false : delayedAccept?.success,
+      true,
+      'acceptSuggestion should retry transient share-state lag until the suggestion becomes available',
+    );
+    assert.equal(
+      (delayedAccept && 'error' in delayedAccept) ? undefined : delayedAccept?.markdown,
+      'Delayed canonical markdown',
+      'acceptSuggestion should return the eventual canonical markdown after transient MARK_NOT_FOUND retries',
+    );
+
     const resolve = await shareClient.resolveComment('mark-resolve', 'human:editor');
     assert.equal((resolve && 'error' in resolve) ? false : resolve?.success, true, 'resolveComment should succeed');
 
@@ -103,12 +146,17 @@ async function run(): Promise<void> {
     assert.equal((unresolve && 'error' in unresolve) ? false : unresolve?.success, true, 'unresolveComment should succeed');
 
     const acceptRequests = requests.filter((request) => request.path === '/api/agent/test-doc/marks/accept');
-    const acceptRequest = acceptRequests[0];
+    const acceptRequest = acceptRequests.find((request) => request.body?.markId === 'mark-accept');
     assert.equal(acceptRequest?.body?.baseRevision, 41, 'acceptSuggestion should include baseRevision from /state');
     assert.equal(
-      acceptRequests[1]?.body?.baseUpdatedAt,
+      acceptRequests.find((request) => request.body?.markId === 'mark-accept-recovered')?.body?.baseUpdatedAt,
       '2026-03-06T00:00:00.000Z',
       'recoverable acceptSuggestion should still fall back to baseUpdatedAt when revision is unavailable',
+    );
+    assert.equal(
+      acceptRequests.filter((request) => request.body?.markId === 'mark-accept-delayed').length,
+      3,
+      'transient MARK_NOT_FOUND acceptSuggestion should retry until the authoritative share state catches up',
     );
 
     const rejectRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/reject');
@@ -119,13 +167,13 @@ async function run(): Promise<void> {
     );
 
     const resolveRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/resolve');
-    assert.equal(resolveRequest?.body?.baseRevision, 44, 'resolveComment should include baseRevision from /state');
+    assert.equal(resolveRequest?.body?.baseRevision, 47, 'resolveComment should include the latest refreshed baseRevision after transient accept retries');
 
     const unresolveRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/unresolve');
-    assert.equal(unresolveRequest?.body?.baseRevision, 45, 'unresolveComment should include baseRevision from /state');
+    assert.equal(unresolveRequest?.body?.baseRevision, 48, 'unresolveComment should continue reading the latest baseRevision after prior retries');
 
     const stateRequestCount = requests.filter((request) => request.path === '/api/agent/test-doc/state').length;
-    assert.equal(stateRequestCount, 5, 'each share mark mutation should read the latest mutation base');
+    assert.equal(stateRequestCount, 8, 'share mark mutations should keep refreshing the mutation base across retries');
 
     console.log('share-client-mark-preconditions.test.ts passed');
   } finally {

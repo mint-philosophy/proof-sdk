@@ -132,8 +132,9 @@ export type ShareEventHandler = (message: Record<string, unknown>) => void;
 export type ShareSocketState = 'connecting' | 'connected' | 'disconnected';
 type ShareConnectionStateHandler = (state: ShareSocketState) => void;
 
-const MUTATION_BASE_STATE_RETRY_ATTEMPTS = 4;
-const MUTATION_BASE_STATE_RETRY_DELAY_MS = 100;
+const MUTATION_BASE_STATE_RETRY_ATTEMPTS = 8;
+const MUTATION_BASE_STATE_RETRY_DELAY_MS = 125;
+const MARK_MUTATION_RETRY_ATTEMPTS = 3;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -481,27 +482,36 @@ export class ShareClient {
       return this.parseShareMarkMutationResponse(payload);
     };
 
-    const base = await this.getMutationBase(args.options);
-    if ('error' in base) return base;
+    const finalStatus = args.path === 'accept' ? 'accepted' : 'rejected';
+    let lastError: ShareRequestError | null = null;
 
-    const firstResult = await submit(base);
-    if (!('error' in firstResult) || !this.shouldRetryTransientMarkMutation(firstResult)) {
-      return firstResult;
+    for (let attempt = 0; attempt < MARK_MUTATION_RETRY_ATTEMPTS; attempt += 1) {
+      const base = await this.getMutationBase(args.options);
+      if ('error' in base) {
+        lastError = base;
+      } else {
+        const result = await submit(base);
+        if (!('error' in result) || !this.shouldRetryTransientMarkMutation(result)) {
+          return result;
+        }
+        lastError = result;
+      }
+
+      const recovered = this.resolveRecoveredMarkMutation(
+        await this.fetchOpenContext(args.options),
+        args.markId,
+        finalStatus,
+      );
+      if (recovered) return recovered;
+
+      if (attempt < (MARK_MUTATION_RETRY_ATTEMPTS - 1)) {
+        await sleep(MUTATION_BASE_STATE_RETRY_DELAY_MS);
+      }
     }
 
-    const finalStatus = args.path === 'accept' ? 'accepted' : 'rejected';
-    const recovered = this.resolveRecoveredMarkMutation(await this.fetchOpenContext(args.options), args.markId, finalStatus);
-    if (recovered) return recovered;
-
-    await sleep(MUTATION_BASE_STATE_RETRY_DELAY_MS);
-    const retryBase = await this.getMutationBase(args.options);
-    if ('error' in retryBase) return retryBase;
-
-    const retryResult = await submit(retryBase);
-    if (!('error' in retryResult)) return retryResult;
-
     return this.resolveRecoveredMarkMutation(await this.fetchOpenContext(args.options), args.markId, finalStatus)
-      ?? retryResult;
+      ?? lastError
+      ?? this.createLocalRequestError(409, 'mark_mutation_failed', 'Tracked change mutation did not complete');
   }
 
   private extractMutationBase(payload: Record<string, unknown> | null): ShareMutationBase | null {

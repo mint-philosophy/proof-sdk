@@ -65,6 +65,27 @@ function run(): void {
     'Expected share edit gating to keep the editor locked until post-review collab reconnect and hydration are fully stable',
   );
 
+  const authoritativeMarksBlock = sliceBetween(
+    editorSource,
+    '  private applyAuthoritativeShareMarks(serverMarks: Record<string, StoredMark>): void {',
+    '\n  private applyLatestCollabMarksToEditor(): void {',
+  );
+  assert(
+    authoritativeMarksBlock.includes("this.applyExternalMarks(serverMarks, { pruneMissingSuggestions: true });"),
+    'Expected authoritative share mark refreshes to prune stale local suggestion anchors when the server says they are gone',
+  );
+
+  const applyLatestCollabMarksBlock = sliceBetween(
+    editorSource,
+    '  private applyLatestCollabMarksToEditor(): void {',
+    '\n  private runWithTrackChangesSystemTransactionsSuppressed<T>(run: () => T): T {',
+  );
+  assert(
+    !applyLatestCollabMarksBlock.includes('if (Object.keys(this.lastReceivedServerMarks).length === 0) return;')
+      && applyLatestCollabMarksBlock.includes("this.applyExternalMarks(this.lastReceivedServerMarks, { pruneMissingSuggestions: true });"),
+    'Expected collab mark application to treat an empty authoritative mark set as a real signal and prune stale suggestion anchors',
+  );
+
   const acceptPersistedBlock = sliceBetween(
     editorSource,
     '  async markAcceptPersisted(markId: string): Promise<boolean> {',

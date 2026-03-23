@@ -1544,7 +1544,7 @@ class ProofEditorImpl implements ProofEditor {
 
           this.lastReceivedServerMarks = { ...mergedIncomingMarks };
           this.initialMarksSynced = true;
-          if (Object.keys(mergedIncomingMarks).length > 0 && !this.isEditorDocStructurallyEmpty()) {
+          if (!this.isEditorDocStructurallyEmpty()) {
             this.applyLatestCollabMarksToEditor();
           }
         });
@@ -4931,20 +4931,40 @@ class ProofEditorImpl implements ProofEditor {
     this.scheduleBannerLayoutUpdate();
   }
 
-  applyExternalMarks(marks: Record<string, StoredMark>): void {
+  applyExternalMarks(
+    marks: Record<string, StoredMark>,
+    options?: { pruneMissingSuggestions?: boolean },
+  ): void {
     if (!this.editor) return;
 
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
       // Use applyRemoteMarks to create ProseMirror anchors for new marks
       // (using the `quote` field) and merge metadata for existing marks.
-      applyRemoteMarks(view, marks, { hydrateAnchors: this.collabCanEdit });
+      applyRemoteMarks(view, marks, {
+        hydrateAnchors: this.collabCanEdit,
+        pruneMissingSuggestions: options?.pruneMissingSuggestions === true,
+      });
     });
+  }
+
+  private applyAuthoritativeShareMarks(serverMarks: Record<string, StoredMark>): void {
+    this.lastReceivedServerMarks = { ...serverMarks };
+    this.initialMarksSynced = true;
+    if (!this.editor || this.isEditorDocStructurallyEmpty()) return;
+
+    this.applyingCollabRemote = true;
+    this.suppressMarksSync = true;
+    try {
+      this.applyExternalMarks(serverMarks, { pruneMissingSuggestions: true });
+    } finally {
+      this.suppressMarksSync = false;
+      this.applyingCollabRemote = false;
+    }
   }
 
   private applyLatestCollabMarksToEditor(): void {
     if (!this.isShareMode || !this.collabEnabled || !this.editor) return;
-    if (Object.keys(this.lastReceivedServerMarks).length === 0) return;
     if (this.isEditorDocStructurallyEmpty()) return;
 
     const traceMarkId = this.getActiveShareReviewTraceContext()?.markId ?? null;
@@ -4957,7 +4977,7 @@ class ProofEditorImpl implements ProofEditor {
     this.applyingCollabRemote = true;
     this.suppressMarksSync = true;
     try {
-      this.applyExternalMarks(this.lastReceivedServerMarks);
+      this.applyExternalMarks(this.lastReceivedServerMarks, { pruneMissingSuggestions: true });
     } finally {
       this.suppressMarksSync = false;
       this.applyingCollabRemote = false;

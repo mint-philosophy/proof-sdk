@@ -708,6 +708,76 @@ test('applyRemoteMarks reanchors authored marks from relative anchors when quote
   assert(diskMetadata[markId] !== undefined, 'Expected authored mark to survive disk metadata export after remote apply');
 });
 
+test('applyRemoteMarks prunes stale local suggestion anchors when authoritative marks are empty', () => {
+  const suggestionId = 's-prune-stale-after-accept';
+  const suggestionMark = marksSchema.marks.proofSuggestion.create({
+    id: suggestionId,
+    kind: 'insert',
+    by: 'human:seth',
+  });
+  const doc = marksSchema.node('doc', null, [
+    marksSchema.node('paragraph', null, [
+      marksSchema.text('Alpha '),
+      marksSchema.text('ACCEPT TEST', [suggestionMark]),
+      marksSchema.text(' gamma.'),
+    ]),
+  ]);
+
+  const metadata = {
+    [suggestionId]: {
+      kind: 'insert' as const,
+      by: 'human:seth',
+      createdAt: '2026-03-24T00:00:00.000Z',
+      content: 'ACCEPT TEST',
+      quote: 'ACCEPT TEST',
+      status: 'pending' as const,
+    },
+  };
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema: marksSchema,
+    doc,
+    plugins: [marksStatePlugin],
+  });
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  applyRemoteMarks(view, {}, { pruneMissingSuggestions: true });
+
+  assertEqual(
+    state.doc.textBetween(0, state.doc.content.size, '\n', '\n'),
+    'Alpha ACCEPT TEST gamma.',
+    'Expected stale suggestion pruning to preserve the accepted text once',
+  );
+  assert(!getMarks(state).some((mark) => mark.id === suggestionId), 'Expected stale suggestion anchors to be removed');
+  const pluginState = marksPluginKey.getState(state) as { metadata: Record<string, unknown> } | undefined;
+  assert(!pluginState?.metadata?.[suggestionId], 'Expected stale suggestion metadata to be removed');
+});
+
 test('API-shaped remote replace suggestion can be accepted after remote apply', () => {
   const markId = 'm-remote-api-accept';
   const doc = marksSchema.node('doc', null, [

@@ -1027,6 +1027,7 @@ class ProofEditorImpl implements ProofEditor {
   private lastMarkdown: string = '';
   private suppressMarksSync: boolean = false;
   private suppressTrackChangesSystemTransactionsDepth: number = 0;
+  private suppressTrackChangesDuringCollabReconnect: boolean = false;
   private collabEnabled: boolean = false;
   private collabCanComment: boolean = false;
   private collabCanEdit: boolean = false;
@@ -1553,6 +1554,9 @@ class ProofEditorImpl implements ProofEditor {
             if (status.unsyncedChanges === 0) {
               this.flushPendingProjectionMarkdown();
             }
+            if (!this.pendingCollabTemplateMarkdown && !this.pendingCollabRebindOnSync) {
+              this.suppressTrackChangesDuringCollabReconnect = false;
+            }
           }
           this.updateShareBannerSyncDisplay();
         });
@@ -1810,6 +1814,9 @@ class ProofEditorImpl implements ProofEditor {
   private resetPendingCollabTemplateState(clearPendingTemplate: boolean): void {
     if (clearPendingTemplate) {
       this.pendingCollabTemplateMarkdown = null;
+      if (this.collabConnectionStatus === 'connected' && this.collabIsSynced && !this.pendingCollabRebindOnSync) {
+        this.suppressTrackChangesDuringCollabReconnect = false;
+      }
     }
     this.collabTemplateSeedClaimId = null;
     if (this.collabTemplateClaimCheckTimer) {
@@ -5347,7 +5354,10 @@ class ProofEditorImpl implements ProofEditor {
         const isRemoteContentChange = Boolean(tr?.docChanged) && yjsOrigin.isYjsOrigin;
         const isMarksOnlyChange = tr?.getMeta?.(marksPluginKey) !== undefined;
         const isDocumentLoad = tr?.getMeta?.('document-load') !== undefined;
-        const isSystemTrackChangesSuppressed = this.suppressTrackChangesSystemTransactionsDepth > 0 && Boolean(tr?.docChanged);
+        const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (
+          this.suppressTrackChangesSystemTransactionsDepth > 0
+          || this.suppressTrackChangesDuringCollabReconnect
+        );
         const isSuggestionMetaChange = tr?.getMeta?.(suggestionsPluginKey) !== undefined;
         const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;
         const isLocalContentChange = Boolean(tr?.docChanged)
@@ -8701,6 +8711,7 @@ class ProofEditorImpl implements ProofEditor {
     const collabStatus = typeof result?.collab?.status === 'string' ? result.collab.status : '';
     if (markdown !== null && collabStatus === 'pending') {
       this.pendingCollabReconnectTemplateOverride = this.normalizeMarkdownForCollab(markdown);
+      this.suppressTrackChangesDuringCollabReconnect = true;
       if (this.collabEnabled) {
         this.collabConnectionStatus = 'connecting';
         this.collabIsSynced = false;
@@ -8709,6 +8720,7 @@ class ProofEditorImpl implements ProofEditor {
       }
     } else if (collabStatus !== 'pending') {
       this.pendingCollabReconnectTemplateOverride = null;
+      this.suppressTrackChangesDuringCollabReconnect = false;
     }
     if (markdown === null) {
       return this.reloadCanonicalShareDocument();

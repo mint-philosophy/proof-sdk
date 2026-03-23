@@ -59,7 +59,9 @@ function run(): void {
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
   assert(
-    setupSuggestionsInterceptorBlock.includes('const isSystemTrackChangesSuppressed = this.suppressTrackChangesSystemTransactionsDepth > 0 && Boolean(tr?.docChanged);')
+    setupSuggestionsInterceptorBlock.includes('const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (')
+      && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesSystemTransactionsDepth > 0')
+      && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesDuringCollabReconnect')
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
     'Expected the suggestions interceptor to pass through collab/template system transactions instead of wrapping them as tracked user edits',
@@ -68,6 +70,7 @@ function run(): void {
   const applyPendingCollabTemplateBlock = sliceBetween(editorSource, '  private applyPendingCollabTemplate(): void {', '\n  private disconnectCollabService(): void {');
   assert(
     editorSource.includes('private runWithTrackChangesSystemTransactionsSuppressed<T>(run: () => T): T {')
+      && editorSource.includes('private suppressTrackChangesDuringCollabReconnect: boolean = false;')
       && applyPendingCollabTemplateBlock.includes('this.runWithTrackChangesSystemTransactionsSuppressed(() => {')
       && applyPendingCollabTemplateBlock.includes('collabService.applyTemplate(latestTemplate'),
     'Expected pending collab template application to suppress track-changes wrapping while it seeds canonical content back into Yjs',

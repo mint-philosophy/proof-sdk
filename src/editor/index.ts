@@ -160,6 +160,11 @@ import { initThemePicker, getThemePicker } from '../ui/theme-picker';
 import { fileClient } from '../bridge/file-client';
 import { shareClient, type CollabSessionInfo, type SharePendingEvent } from '../bridge/share-client';
 import { collabClient, type CollabSyncStatus } from '../bridge/collab-client';
+import {
+  clearClientIncidentEvents,
+  getClientIncidentEvents,
+  recordClientIncidentEvent,
+} from '../agent/client-incident-buffer';
 import { shouldDeferShareMarksRefresh } from './share-marks-refresh';
 import { collabCursorBuilder, collabSelectionBuilder } from './plugins/collab-cursors';
 import { isAgentScopedId } from '../shared/agent-identity';
@@ -1064,6 +1069,14 @@ class ProofEditorImpl implements ProofEditor {
   private initialMarksSynced: boolean = false;
   private lastReceivedServerMarks: Record<string, StoredMark> = {};
   private shareReviewMutationQueue: Promise<void> = Promise.resolve();
+  private shareReviewTraceContext: {
+    traceId: string;
+    action: 'accept' | 'reject';
+    markId: string;
+    startedAt: number;
+    activeUntilMs: number;
+    expectedMarkdown: string | null;
+  } | null = null;
   private collabTemplateSeedClaimId: string | null = null;
   private collabTemplateClaimCheckTimer: ReturnType<typeof setTimeout> | null = null;
   private collabTemplateRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1491,6 +1504,12 @@ class ProofEditorImpl implements ProofEditor {
           const incomingMarks = (marks && typeof marks === 'object' && !Array.isArray(marks))
             ? (marks as Record<string, StoredMark>)
             : {};
+          const traceMarkId = this.getActiveShareReviewTraceContext()?.markId ?? null;
+          this.traceShareReview('collab.onMarks.received', {
+            incomingCount: Object.keys(incomingMarks).length,
+            incomingHasMarkId: traceMarkId ? Object.prototype.hasOwnProperty.call(incomingMarks, traceMarkId) : null,
+            incomingMarkStatus: traceMarkId ? incomingMarks[traceMarkId]?.status ?? null : null,
+          });
           // Hocuspocus can emit a transient empty marks payload before initial sync
           // and occasionally while local updates are still in flight. If we already
           // have server marks, avoid clobbering them with that empty map.
@@ -1517,6 +1536,12 @@ class ProofEditorImpl implements ProofEditor {
             }
           }
 
+          this.traceShareReview('collab.onMarks.merged', {
+            mergedCount: Object.keys(mergedIncomingMarks).length,
+            mergedHasMarkId: traceMarkId ? Object.prototype.hasOwnProperty.call(mergedIncomingMarks, traceMarkId) : null,
+            mergedMarkStatus: traceMarkId ? mergedIncomingMarks[traceMarkId]?.status ?? null : null,
+          }, traceMarkId && Object.prototype.hasOwnProperty.call(mergedIncomingMarks, traceMarkId) ? 'warn' : 'info');
+
           this.lastReceivedServerMarks = { ...mergedIncomingMarks };
           this.initialMarksSynced = true;
           if (Object.keys(mergedIncomingMarks).length > 0 && !this.isEditorDocStructurallyEmpty()) {
@@ -1535,6 +1560,12 @@ class ProofEditorImpl implements ProofEditor {
           this.collabIsSynced = status.isSynced;
           this.collabUnsyncedChanges = status.unsyncedChanges;
           this.collabPendingLocalUpdates = status.pendingLocalUpdates;
+          this.traceShareReview('collab.sync-status', {
+            statusConnection: status.connectionStatus,
+            statusSynced: status.isSynced,
+            statusUnsyncedChanges: status.unsyncedChanges,
+            statusPendingLocalUpdates: status.pendingLocalUpdates,
+          });
           this.updateShareEditGate();
           if (status.connectionStatus === 'disconnected' && collabClient.terminalCloseReason === 'permission-denied') {
             void this.refreshCollabSessionAndReconnect(false);
@@ -1568,6 +1599,7 @@ class ProofEditorImpl implements ProofEditor {
           this.updateShareBannerSyncDisplay();
         });
         collabClient.onDocumentUpdated(() => {
+          this.traceShareReview('collab.document-updated');
           if (!this.collabEnabled) return;
           if (this.collabUnsyncedChanges > 0) return;
           if (this.collabConnectionStatus === 'connected' && this.collabIsSynced) return;
@@ -1840,6 +1872,76 @@ class ProofEditorImpl implements ProofEditor {
   private resetShareMarksSyncState(): void {
     this.initialMarksSynced = false;
     this.lastReceivedServerMarks = {};
+  }
+
+  private getActiveShareReviewTraceContext(): typeof this.shareReviewTraceContext {
+    if (!this.shareReviewTraceContext) return null;
+    if (Date.now() <= this.shareReviewTraceContext.activeUntilMs) {
+      return this.shareReviewTraceContext;
+    }
+    this.shareReviewTraceContext = null;
+    return null;
+  }
+
+  private beginShareReviewTrace(
+    action: 'accept' | 'reject',
+    markId: string,
+    expectedMarkdown?: string | null,
+  ): void {
+    const startedAt = Date.now();
+    this.shareReviewTraceContext = {
+      traceId: `${action}:${markId}:${startedAt}`,
+      action,
+      markId,
+      startedAt,
+      activeUntilMs: startedAt + 30_000,
+      expectedMarkdown: typeof expectedMarkdown === 'string' ? expectedMarkdown : null,
+    };
+    this.traceShareReview('mutation.started', {
+      expectedMarkdown: this.summarizeTraceMarkdown(expectedMarkdown ?? null),
+    }, 'info', true);
+  }
+
+  private summarizeTraceMarkdown(markdown: string | null | undefined): { length: number; preview: string } | null {
+    if (typeof markdown !== 'string') return null;
+    return {
+      length: markdown.length,
+      preview: markdown.slice(0, 120),
+    };
+  }
+
+  private traceShareReview(
+    event: string,
+    data: Record<string, unknown> = {},
+    level: 'info' | 'warn' | 'error' = 'info',
+    force: boolean = false,
+  ): void {
+    const traceContext = this.getActiveShareReviewTraceContext();
+    if (!traceContext && !force) return;
+    const activeMarkId = traceContext?.markId ?? null;
+    recordClientIncidentEvent({
+      type: `share.review.${event}`,
+      level,
+      data: {
+        traceId: traceContext?.traceId ?? null,
+        action: traceContext?.action ?? null,
+        markId: activeMarkId,
+        sessionAccessEpoch: this.activeCollabSession?.accessEpoch ?? null,
+        sessionSlug: this.activeCollabSession?.slug ?? null,
+        collabConnectionStatus: this.collabConnectionStatus,
+        collabIsSynced: this.collabIsSynced,
+        collabUnsyncedChanges: this.collabUnsyncedChanges,
+        collabPendingLocalUpdates: this.collabPendingLocalUpdates,
+        pendingCollabRebindOnSync: this.pendingCollabRebindOnSync,
+        pendingCollabRebindResetDoc: this.pendingCollabRebindResetDoc,
+        suppressTrackChangesDuringCollabReconnect: this.suppressTrackChangesDuringCollabReconnect,
+        pendingCollabTemplateMarkdown: this.summarizeTraceMarkdown(this.pendingCollabTemplateMarkdown),
+        pendingCollabReconnectTemplateOverride: this.summarizeTraceMarkdown(this.pendingCollabReconnectTemplateOverride),
+        lastReceivedHasMarkId: activeMarkId ? Object.prototype.hasOwnProperty.call(this.lastReceivedServerMarks, activeMarkId) : null,
+        lastReceivedMarkStatus: activeMarkId ? this.lastReceivedServerMarks[activeMarkId]?.status ?? null : null,
+        ...data,
+      },
+    });
   }
 
   private parseCollabTemplateClaim(value: unknown): { id: string; ts: number } | null {
@@ -2413,9 +2515,20 @@ class ProofEditorImpl implements ProofEditor {
     if (this.collabSessionRefreshInFlight) return;
     this.collabSessionRefreshInFlight = true;
     this.pendingCollabRebindOnSync = false;
+    const previousAccessEpoch = this.activeCollabSession?.accessEpoch ?? null;
+    this.traceShareReview('collab.refresh.start', {
+      preserveLocalState,
+      previousAccessEpoch,
+    });
     try {
       const refreshed = await shareClient.refreshCollabSession();
       if (this.isShareRequestError(refreshed)) {
+        this.traceShareReview('collab.refresh.error', {
+          preserveLocalState,
+          previousAccessEpoch,
+          status: refreshed.error.status,
+          code: refreshed.error.code,
+        }, 'error');
         console.warn('[share] collab session refresh failed', refreshed.error);
         if (refreshed.error.status === 401 || refreshed.error.status === 403 || refreshed.error.status === 404 || refreshed.error.status === 410) {
           this.teardownCollabRuntimeAfterTerminalRefreshFailure();
@@ -2438,6 +2551,10 @@ class ProofEditorImpl implements ProofEditor {
         return;
       }
       if (refreshed && 'collabAvailable' in refreshed && refreshed.collabAvailable === false) {
+        this.traceShareReview('collab.refresh.unavailable', {
+          preserveLocalState,
+          previousAccessEpoch,
+        }, 'warn');
         this.collabEnabled = false;
         this.collabCanComment = false;
         this.collabCanEdit = false;
@@ -2481,6 +2598,13 @@ class ProofEditorImpl implements ProofEditor {
       if (!this.shouldAllowCollabTemplateSeed(refreshed.session)) {
         reconnectTemplate = null;
       }
+      this.traceShareReview('collab.refresh.ready', {
+        preserveLocalState,
+        previousAccessEpoch,
+        nextAccessEpoch: refreshed.session.accessEpoch ?? null,
+        reconnectTemplate: this.summarizeTraceMarkdown(reconnectTemplate),
+        shouldPreserveLocalState,
+      });
       this.pendingCollabRebindOnSync = true;
       this.pendingCollabRebindResetDoc = !shouldPreserveLocalState || !this.collabCanEdit;
       this.resetProjectionPublishState();
@@ -2496,6 +2620,11 @@ class ProofEditorImpl implements ProofEditor {
     } catch (error) {
       this.pendingCollabRebindOnSync = false;
       this.pendingCollabRebindResetDoc = false;
+      this.traceShareReview('collab.refresh.exception', {
+        preserveLocalState,
+        previousAccessEpoch,
+        error: this.getErrorMessage(error),
+      }, 'error');
       console.warn('[share] failed to refresh collab session', error);
     } finally {
       this.collabSessionRefreshInFlight = false;
@@ -4818,6 +4947,13 @@ class ProofEditorImpl implements ProofEditor {
     if (Object.keys(this.lastReceivedServerMarks).length === 0) return;
     if (this.isEditorDocStructurallyEmpty()) return;
 
+    const traceMarkId = this.getActiveShareReviewTraceContext()?.markId ?? null;
+    this.traceShareReview('collab.apply-marks.before', {
+      serverMarkCount: Object.keys(this.lastReceivedServerMarks).length,
+      serverHasMarkId: traceMarkId ? Object.prototype.hasOwnProperty.call(this.lastReceivedServerMarks, traceMarkId) : null,
+      serverMarkStatus: traceMarkId ? this.lastReceivedServerMarks[traceMarkId]?.status ?? null : null,
+    }, traceMarkId && Object.prototype.hasOwnProperty.call(this.lastReceivedServerMarks, traceMarkId) ? 'warn' : 'info');
+
     this.applyingCollabRemote = true;
     this.suppressMarksSync = true;
     try {
@@ -4825,6 +4961,18 @@ class ProofEditorImpl implements ProofEditor {
     } finally {
       this.suppressMarksSync = false;
       this.applyingCollabRemote = false;
+    }
+
+    if (traceMarkId && this.editor) {
+      this.editor.action((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        const metadata = getMarkMetadataWithQuotes(view.state);
+        this.traceShareReview('collab.apply-marks.after', {
+          localHasMarkId: Object.prototype.hasOwnProperty.call(metadata, traceMarkId),
+          localMarkStatus: metadata[traceMarkId]?.status ?? null,
+          localTextPreview: view.state.doc.textBetween(0, view.state.doc.content.size, '\n', '\n').slice(0, 160),
+        }, Object.prototype.hasOwnProperty.call(metadata, traceMarkId) ? 'warn' : 'info');
+      });
     }
   }
 
@@ -8748,6 +8896,11 @@ class ProofEditorImpl implements ProofEditor {
       ? result.marks as Record<string, StoredMark>
       : {};
     const collabStatus = typeof result?.collab?.status === 'string' ? result.collab.status : '';
+    this.traceShareReview('mutation.apply-result', {
+      collabStatus,
+      markdown: this.summarizeTraceMarkdown(markdown),
+      markCount: Object.keys(marks).length,
+    });
     resetSuggestionsInsertCoalescing();
     if (markdown !== null && collabStatus === 'pending') {
       this.pendingCollabReconnectTemplateOverride = this.normalizeMarkdownForCollab(markdown);
@@ -8802,6 +8955,13 @@ class ProofEditorImpl implements ProofEditor {
       ? result.marks as Record<string, StoredMark>
       : {};
     const expectedMarkdown = this.normalizeMarkdownForCollab(markdown);
+    this.traceShareReview('mutation.local-resolve.start', {
+      action,
+      markId,
+      expectedMarkdown: this.summarizeTraceMarkdown(expectedMarkdown),
+      serverMarkCount: Object.keys(serverMarks).length,
+      serverHasMarkId: Object.prototype.hasOwnProperty.call(serverMarks, markId),
+    });
 
     let matchedServerResult = false;
     this.editor.action((ctx) => {
@@ -8819,11 +8979,25 @@ class ProofEditorImpl implements ProofEditor {
       } finally {
         this.suppressMarksSync = previousSuppressMarksSync;
       }
-      if (!resolved) return;
+      if (!resolved) {
+        this.traceShareReview('mutation.local-resolve.failed', {
+          action,
+          markId,
+        }, 'warn');
+        return;
+      }
 
       const liveMarkdown = this.normalizeMarkdownForCollab(serializer(view.state.doc));
       const liveMetadata = getMarkMetadataWithQuotes(view.state);
       matchedServerResult = liveMarkdown === expectedMarkdown && !Object.prototype.hasOwnProperty.call(liveMetadata, markId);
+      this.traceShareReview('mutation.local-resolve.result', {
+        action,
+        markId,
+        matchedServerResult,
+        liveMarkdown: this.summarizeTraceMarkdown(liveMarkdown),
+        liveHasMarkId: Object.prototype.hasOwnProperty.call(liveMetadata, markId),
+        liveMarkStatus: liveMetadata[markId]?.status ?? null,
+      }, matchedServerResult ? 'info' : 'warn');
       if (!matchedServerResult) return;
 
       this.lastReceivedServerMarks = { ...serverMarks };
@@ -8834,6 +9008,11 @@ class ProofEditorImpl implements ProofEditor {
       resetSuggestionsInsertCoalescing();
       this.pendingCollabReconnectTemplateOverride = expectedMarkdown;
       this.suppressTrackChangesDuringCollabReconnect = true;
+      this.traceShareReview('mutation.local-resolve.disconnect-old-room', {
+        action,
+        markId,
+        expectedMarkdown: this.summarizeTraceMarkdown(expectedMarkdown),
+      }, 'warn');
       if (this.collabEnabled) {
         this.collabConnectionStatus = 'connecting';
         this.collabIsSynced = false;
@@ -8979,11 +9158,26 @@ class ProofEditorImpl implements ProofEditor {
     return this.runSerializedShareReviewMutation(async () => {
       await this.flushShareReviewMutationState();
       const actor = getCurrentActor();
+      this.beginShareReviewTrace('accept', markId);
       const result = await shareClient.acceptSuggestion(markId, actor);
       if (!result || 'error' in result || result.success !== true) {
+        this.traceShareReview('mutation.api-failed', {
+          action: 'accept',
+          markId,
+          result,
+        }, 'error');
         console.error('[markAcceptPersisted] Failed to persist suggestion acceptance via share mutation:', result);
         return false;
       }
+      this.beginShareReviewTrace('accept', markId, typeof result.markdown === 'string' ? result.markdown : null);
+      this.traceShareReview('mutation.api-succeeded', {
+        action: 'accept',
+        markId,
+        collabStatus: result.collab?.status ?? null,
+        serverMarkCount: result.marks && typeof result.marks === 'object' && !Array.isArray(result.marks)
+          ? Object.keys(result.marks).length
+          : null,
+      });
 
       tombstoneResolvedMarkIds([markId], { reason: 'deleted' });
       const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)
@@ -9058,11 +9252,26 @@ class ProofEditorImpl implements ProofEditor {
     return this.runSerializedShareReviewMutation(async () => {
       await this.flushShareReviewMutationState();
       const actor = getCurrentActor();
+      this.beginShareReviewTrace('reject', markId);
       const result = await shareClient.rejectSuggestion(markId, actor);
       if (!result || 'error' in result || result.success !== true) {
+        this.traceShareReview('mutation.api-failed', {
+          action: 'reject',
+          markId,
+          result,
+        }, 'error');
         console.error('[markRejectPersisted] Failed to persist suggestion rejection via share mutation:', result);
         return false;
       }
+      this.beginShareReviewTrace('reject', markId, typeof result.markdown === 'string' ? result.markdown : null);
+      this.traceShareReview('mutation.api-succeeded', {
+        action: 'reject',
+        markId,
+        collabStatus: result.collab?.status ?? null,
+        serverMarkCount: result.marks && typeof result.marks === 'object' && !Array.isArray(result.marks)
+          ? Object.keys(result.marks).length
+          : null,
+      });
 
       tombstoneResolvedMarkIds([markId], { reason: 'deleted' });
       const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)
@@ -10762,6 +10971,8 @@ if (window.location?.pathname?.startsWith('/d/')) {
     getMarkdown: () => (window.proof.getMarkdownSnapshot()?.content ?? ''),
     insertMarkdown: (markdown: string) => window.proof.insertAtCursor(markdown, 'ai:browser-agent'),
     replaceSelection: (markdown: string) => window.proof.replaceSelection(markdown, 'ai:browser-agent'),
+    getClientIncidentEvents: (limit?: number) => getClientIncidentEvents(limit),
+    clearClientIncidentEvents: () => clearClientIncidentEvents(),
     focus: () => {
       try {
         const el = document.querySelector('#editor .ProseMirror') as HTMLElement | null;
@@ -10817,6 +11028,8 @@ if (window.location?.pathname?.startsWith('/d/')) {
   window.proof.debugResolveRangeWithValidation(quote, range);
 (window as any).debugAnalyzeReplace = (quote: string, content: string, range?: MarkRange) =>
   window.proof.debugAnalyzeReplace(quote, content, range);
+(window as any).getClientIncidentEvents = (limit?: number) => getClientIncidentEvents(limit);
+(window as any).clearClientIncidentEvents = () => clearClientIncidentEvents();
 
 // Comment navigation shortcuts for devtools/testing hooks
 (window as any).navigateNextComment = () => window.proof.navigateToNextComment();

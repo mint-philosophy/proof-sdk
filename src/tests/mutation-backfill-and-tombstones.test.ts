@@ -21,6 +21,7 @@ async function run(): Promise<void> {
   process.env.PROOF_DB_ENV_INIT = 'development';
 
   const db = await import('../../server/db.ts');
+  const collab = await import('../../server/collab.ts');
 
   try {
     const slug = `backfill-${Math.random().toString(36).slice(2, 10)}`;
@@ -97,6 +98,13 @@ async function run(): Promise<void> {
     assert(scrubbed.removed.includes('m-1'), 'Expected tombstoned pending mark to be removed');
     assert(!scrubbed.removed.includes('m-3'), 'Expected terminal mark to be retained');
     assert(scrubbed.marks['m-2'] !== undefined, 'Expected non-tombstoned mark to remain');
+
+    const mergedFallbackMarks = collab.mergePreservedActionMarks(slug, {
+      'm-1': { status: 'pending', kind: 'insert', content: ' resurrected' },
+      'm-2': { status: 'pending', kind: 'insert', content: ' fresh' },
+    }, { includeSuggestions: true });
+    assert(mergedFallbackMarks['m-1'] === undefined, 'Expected collab fallback merge to suppress tombstoned pending suggestions');
+    assert(mergedFallbackMarks['m-2'] !== undefined, 'Expected collab fallback merge to keep non-tombstoned suggestions');
 
     sqlite.prepare(`
       INSERT OR REPLACE INTO mark_tombstones

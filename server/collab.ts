@@ -24,6 +24,7 @@ import {
   listRecentDocumentLiveCollabLeaseSlugs,
   getYStateBlob,
   pruneObsoleteYHistory,
+  removeResurrectedMarksFromPayload,
   updateYStateBlob,
   getYUpdatesAtOrAfter,
   getYUpdatesAfter,
@@ -2474,7 +2475,7 @@ export function mergePreservedActionMarks(
       incomingMarkCount: Object.keys(incomingMarks).length,
     });
   }
-  return incomingMarks;
+  return removeResurrectedMarksFromPayload(slug, incomingMarks).marks;
 }
 
 function touchDoc(slug: string): void {

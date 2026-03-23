@@ -8830,6 +8830,21 @@ class ProofEditorImpl implements ProofEditor {
       this.initialMarksSynced = true;
     });
 
+    if (matchedServerResult) {
+      resetSuggestionsInsertCoalescing();
+      this.pendingCollabReconnectTemplateOverride = expectedMarkdown;
+      this.suppressTrackChangesDuringCollabReconnect = true;
+      if (this.collabEnabled) {
+        this.collabConnectionStatus = 'connecting';
+        this.collabIsSynced = false;
+        this.disconnectCollabService();
+        collabClient.disconnect();
+      }
+      if (this.collabEnabled && this.activeCollabSession) {
+        void this.refreshCollabSessionAndReconnect(false);
+      }
+    }
+
     return matchedServerResult;
   }
 

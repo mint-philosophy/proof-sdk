@@ -106,8 +106,12 @@ function run(): void {
       && localResolveBlock.includes("acceptMark(view, markId, parser)")
       && localResolveBlock.includes(': rejectMark(view, markId);')
       && localResolveBlock.includes('const liveMarkdown = this.normalizeMarkdownForCollab(serializer(view.state.doc));')
-      && localResolveBlock.includes("matchedServerResult = liveMarkdown === expectedMarkdown && !Object.prototype.hasOwnProperty.call(liveMetadata, markId);"),
-    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response',
+      && localResolveBlock.includes("matchedServerResult = liveMarkdown === expectedMarkdown && !Object.prototype.hasOwnProperty.call(liveMetadata, markId);")
+      && localResolveBlock.includes('this.pendingCollabReconnectTemplateOverride = expectedMarkdown;')
+      && localResolveBlock.includes('this.disconnectCollabService();')
+      && localResolveBlock.includes('collabClient.disconnect();')
+      && localResolveBlock.includes('void this.refreshCollabSessionAndReconnect(false);'),
+    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response, then tear down the old collab room before reconnecting',
   );
 
   console.log('share-review-persisted-canonical-sync-regression.test.ts passed');

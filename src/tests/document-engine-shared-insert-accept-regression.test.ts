@@ -10,8 +10,8 @@ async function run(): Promise<void> {
   const engineSource = readFileSync(path.resolve(process.cwd(), 'server/document-engine.ts'), 'utf8');
   assert(
     engineSource.includes("if (status === 'accepted' || status === 'rejected') {")
-      && engineSource.includes('invalidateCollabDocument(slug);'),
-    'Expected accepted suggestion finalization to invalidate collab state, not just rejected suggestions',
+      && engineSource.includes('await invalidateCollabDocumentAndWait(slug);'),
+    'Expected async accepted suggestion finalization to wait for full collab invalidation before returning',
   );
 
   const dbName = `proof-shared-insert-accept-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;

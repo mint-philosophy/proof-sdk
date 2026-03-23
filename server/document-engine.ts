@@ -2366,6 +2366,17 @@ async function updateSuggestionStatusAsync(
     };
   }
 
+  const finalizeCollabInvalidation = async (
+    previousAccessEpoch: number | null | undefined,
+    nextAccessEpoch: number | null | undefined,
+  ): Promise<void> => {
+    if (status !== 'accepted' && status !== 'rejected') return;
+    if ((nextAccessEpoch ?? previousAccessEpoch) === previousAccessEpoch) {
+      bumpDocumentAccessEpoch(slug);
+    }
+    await invalidateCollabDocumentAndWait(slug);
+  };
+
   if (existing.kind !== 'insert' && existing.kind !== 'delete' && existing.kind !== 'replace') {
     const nextMarks: Record<string, StoredMark> = {
       ...marks,
@@ -2384,12 +2395,7 @@ async function updateSuggestionStatusAsync(
       const updated = getDocumentBySlug(slug);
       const resolvedRevision = typeof updated?.revision === 'number' ? updated.revision : (doc.revision + 1);
       upsertMarkTombstone(slug, markId, status, resolvedRevision);
-      if (status === 'accepted' || status === 'rejected') {
-        if ((updated?.access_epoch ?? doc.access_epoch) === doc.access_epoch) {
-          bumpDocumentAccessEpoch(slug);
-        }
-        invalidateCollabDocument(slug);
-      }
+      await finalizeCollabInvalidation(doc.access_epoch, updated?.access_epoch);
     }
     return result;
   }
@@ -2531,10 +2537,7 @@ async function updateSuggestionStatusAsync(
       );
       upsertMarkTombstone(slug, markId, status, mutation.document.revision);
       const updatedMarks = parseMarks(mutation.document.marks);
-      if ((mutation.document.access_epoch ?? doc.access_epoch) === doc.access_epoch) {
-        bumpDocumentAccessEpoch(slug);
-      }
-      invalidateCollabDocument(slug);
+      await finalizeCollabInvalidation(doc.access_epoch, mutation.document.access_epoch);
 
       return {
         status: 200,
@@ -2610,12 +2613,7 @@ async function updateSuggestionStatusAsync(
   );
   upsertMarkTombstone(slug, markId, status, mutation.document.revision);
   const updatedMarks = parseMarks(mutation.document.marks);
-  if (status === 'accepted' || status === 'rejected') {
-    if ((mutation.document.access_epoch ?? doc.access_epoch) === doc.access_epoch) {
-      bumpDocumentAccessEpoch(slug);
-    }
-    invalidateCollabDocument(slug);
-  }
+  await finalizeCollabInvalidation(doc.access_epoch, mutation.document.access_epoch);
 
   return {
     status: 200,

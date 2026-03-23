@@ -858,14 +858,17 @@ class MarkPopoverController {
     }
   }
 
+  private isTrackChangesEnabled(): boolean {
+    const proof = getProofEditorApi();
+    return Boolean(proof?.isSuggestionsEnabled?.());
+  }
+
   private shouldReserveDesktopReviewGutter(): boolean {
     if (isMobileTouch()) return false;
     if (!shouldUseDesktopSuggestionPanel()) return false;
     if (!this.view.dom.isConnected) return false;
-    if (this.mode !== 'suggestion') return false;
-    if (this.renderMode !== 'desktop-side-panel') return false;
-    if (!this.activeMarkId) return false;
-    return this.popover.style.display !== 'none';
+    if (getSuggestionDisplayMode(this.view.state) !== 'simple') return false;
+    return this.isTrackChangesEnabled();
   }
 
   private syncDesktopReviewGutter(active: boolean): void {
@@ -887,7 +890,7 @@ class MarkPopoverController {
     this.syncDesktopReviewGutter(reserveGutter);
 
     if (!this.view.dom.isConnected || isMobileTouch()) {
-      this.hideSuggestionRail();
+      this.hideSuggestionRail({ preserveGutter: reserveGutter });
       return;
     }
 
@@ -898,7 +901,7 @@ class MarkPopoverController {
 
     const pendingSuggestions = this.getPendingSuggestionReviewItems();
     if (pendingSuggestions.length === 0) {
-      this.hideSuggestionRail();
+      this.hideSuggestionRail({ preserveGutter: reserveGutter });
       return;
     }
 
@@ -906,12 +909,12 @@ class MarkPopoverController {
     try {
       editorRect = this.view.dom.getBoundingClientRect();
     } catch {
-      this.hideSuggestionRail();
+      this.hideSuggestionRail({ preserveGutter: reserveGutter });
       return;
     }
 
     if (editorRect.height <= 0 || editorRect.width <= 0) {
-      this.hideSuggestionRail();
+      this.hideSuggestionRail({ preserveGutter: reserveGutter });
       return;
     }
 
@@ -1161,6 +1164,15 @@ class MarkPopoverController {
     if (!markEl) return;
     const markId = markEl.dataset.markId;
     if (!markId) return;
+    const mark = getMarks(this.view.state).find((item) => item.id === markId);
+    if (
+      event.pointerType === 'mouse'
+      && event.button === 0
+      && mark?.kind === 'insert'
+      && this.isTrackChangesEnabled()
+    ) {
+      return;
+    }
     if (event.pointerType === 'touch') {
       event.preventDefault();
     }
@@ -1179,6 +1191,10 @@ class MarkPopoverController {
     if (!markEl) return;
     const markId = markEl.dataset.markId;
     if (!markId) return;
+    const mark = getMarks(this.view.state).find((item) => item.id === markId);
+    if (event.button === 0 && mark?.kind === 'insert' && this.isTrackChangesEnabled()) {
+      return;
+    }
     event.stopPropagation();
     const coords = { left: event.clientX, top: event.clientY };
     const pos = this.view.posAtCoords(coords)?.pos ?? null;

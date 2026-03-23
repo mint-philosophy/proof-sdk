@@ -2025,10 +2025,8 @@ function updateSuggestionStatus(
     return existingForApply.result;
   }
 
-  const nextMarks: Record<string, StoredMark> = {
-    ...marks,
-    [markId]: { ...existingForApply.mark, status },
-  };
+  const nextMarks: Record<string, StoredMark> = { ...marks };
+  delete nextMarks[markId];
   let nextMarkdown = doc.markdown;
 
   if (status === 'accepted' && (existing.kind === 'insert' || existing.kind === 'delete' || existing.kind === 'replace')) {
@@ -2094,7 +2092,7 @@ function updateSuggestionStatus(
       updatedAt: updated?.updated_at ?? new Date().toISOString(),
       content: updated?.markdown ?? nextMarkdown,
       markdown: updated?.markdown ?? nextMarkdown,
-      marks: nextMarks,
+      marks: updated?.marks ? parseMarks(updated.marks) : nextMarks,
     },
   };
 }
@@ -2481,15 +2479,6 @@ async function updateSuggestionStatusAsync(
         );
         upsertMarkTombstone(slug, markId, status, mutation.document.revision);
         const updatedMarks = parseMarks(mutation.document.marks);
-        const responseMarks: Record<string, StoredMark> = {
-          ...updatedMarks,
-          [markId]: {
-            ...fallbackMark,
-            ...(updatedMarks[markId] ?? {}),
-            status,
-          },
-        };
-
         return {
           status: 200,
           body: {
@@ -2499,7 +2488,7 @@ async function updateSuggestionStatusAsync(
             updatedAt: mutation.document.updated_at,
             content: mutation.document.markdown,
             markdown: mutation.document.markdown,
-            marks: responseMarks,
+            marks: updatedMarks,
           },
         };
       }
@@ -2542,14 +2531,6 @@ async function updateSuggestionStatusAsync(
       );
       upsertMarkTombstone(slug, markId, status, mutation.document.revision);
       const updatedMarks = parseMarks(mutation.document.marks);
-      const responseMarks: Record<string, StoredMark> = {
-        ...updatedMarks,
-        [markId]: {
-          ...existing,
-          ...(updatedMarks[markId] ?? {}),
-          status,
-        },
-      };
       if ((mutation.document.access_epoch ?? doc.access_epoch) === doc.access_epoch) {
         bumpDocumentAccessEpoch(slug);
       }
@@ -2564,7 +2545,7 @@ async function updateSuggestionStatusAsync(
           updatedAt: mutation.document.updated_at,
           content: mutation.document.markdown,
           markdown: mutation.document.markdown,
-          marks: responseMarks,
+          marks: updatedMarks,
         },
       };
     }
@@ -2629,14 +2610,6 @@ async function updateSuggestionStatusAsync(
   );
   upsertMarkTombstone(slug, markId, status, mutation.document.revision);
   const updatedMarks = parseMarks(mutation.document.marks);
-  const responseMarks: Record<string, StoredMark> = {
-    ...updatedMarks,
-    [markId]: {
-      ...existing,
-      ...(updatedMarks[markId] ?? {}),
-      status,
-    },
-  };
   if (status === 'rejected') {
     if ((mutation.document.access_epoch ?? doc.access_epoch) === doc.access_epoch) {
       bumpDocumentAccessEpoch(slug);
@@ -2653,7 +2626,7 @@ async function updateSuggestionStatusAsync(
       updatedAt: mutation.document.updated_at,
       content: mutation.document.markdown,
       markdown: mutation.document.markdown,
-      marks: responseMarks,
+      marks: updatedMarks,
     },
   };
 }

@@ -142,11 +142,7 @@ async function run(): Promise<void> {
     );
 
     const acceptedMarks = (accepted.body.marks ?? {}) as Record<string, StoredMark>;
-    assertEqual(
-      acceptedMarks[insertOneId]?.status,
-      'accepted',
-      'Expected accepted insert to be finalized in the response payload',
-    );
+    assert(!acceptedMarks[insertOneId], 'Expected accepted insert to be removed from the response marks payload');
     assertEqual(
       acceptedMarks[insertTwoId]?.range?.from,
       24,

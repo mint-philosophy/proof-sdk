@@ -93,6 +93,8 @@ async function run(): Promise<void> {
       by: 'human:test',
     });
     assertEqual(acceptResult.status, 200, `Expected legacy accept to succeed, got ${acceptResult.status}`);
+    const acceptResponseMarks = (acceptResult.body.marks ?? {}) as Record<string, StoredMark>;
+    assert(!acceptResponseMarks[acceptMarkId], 'Expected accepted legacy suggestion to be removed from response marks');
     const acceptedDoc = db.getDocumentBySlug(acceptSlug);
     assert(acceptedDoc?.markdown.includes(replacement), 'Expected accept to write replacement content into canonical markdown');
     assert(!acceptedDoc?.markdown.includes(truncatedQuote), 'Expected accept to remove the stale truncated wrapper text');
@@ -124,6 +126,8 @@ async function run(): Promise<void> {
       by: 'human:test',
     });
     assertEqual(rejectResult.status, 200, `Expected legacy reject to succeed, got ${rejectResult.status}`);
+    const rejectResponseMarks = (rejectResult.body.marks ?? {}) as Record<string, StoredMark>;
+    assert(!rejectResponseMarks[rejectMarkId], 'Expected rejected legacy suggestion to be removed from response marks');
     const rejectedDoc = db.getDocumentBySlug(rejectSlug);
     const rejectedVisibleText = stripAllProofSpanTags(rejectedDoc?.markdown ?? '');
     assert(rejectedVisibleText.includes(fullQuote), 'Expected reject to restore the full original quote text');

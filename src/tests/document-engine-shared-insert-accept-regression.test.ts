@@ -47,6 +47,8 @@ async function run(): Promise<void> {
       String(accepted.body.markdown ?? '') === 'Alpha beta gamma.\n',
       `Expected accepted markdown to include inserted text, got ${JSON.stringify(accepted.body.markdown)}`,
     );
+    const acceptedMarks = (accepted.body.marks ?? {}) as Record<string, { kind?: string }>;
+    assert(!acceptedMarks[markId], 'Expected accepted insert to be removed from the mutation response marks payload');
 
     const stored = db.getDocumentBySlug(slug);
     assert(stored?.markdown === 'Alpha beta gamma.\n', `Expected stored markdown to include inserted text, got ${JSON.stringify(stored?.markdown)}`);

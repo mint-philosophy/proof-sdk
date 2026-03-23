@@ -392,6 +392,50 @@ async function run(): Promise<void> {
       'Expected persisted split repair to keep the nested comment wrapper',
     );
 
+    const corruptedDeleteSlug = `rehydrate-corrupted-delete-${Math.random().toString(36).slice(2, 10)}`;
+    const corruptedDeleteMarkId = 'corrupted-delete-suggestion';
+    db.createDocument(
+      corruptedDeleteSlug,
+      `Alpha <span data-proof="suggestion" data-id="${corruptedDeleteMarkId}" data-by="Minty" data-kind="delete">betabeta</span> gamma.`,
+      canonicalizeStoredMarks({
+        [corruptedDeleteMarkId]: {
+          kind: 'delete',
+          by: 'Minty',
+          createdAt,
+          quote: 'beta',
+          status: 'pending',
+          startRel: 'char:6',
+          endRel: 'char:10',
+          range: { from: 7, to: 11 },
+        } satisfies StoredMark,
+      }),
+      'Corrupted delete accept fallback',
+    );
+    const corruptedDeleteAccept = await executeDocumentOperationAsync(corruptedDeleteSlug, 'POST', '/marks/accept', {
+      markId: corruptedDeleteMarkId,
+      by: 'human:test',
+    });
+    assertEqual(
+      corruptedDeleteAccept.status,
+      200,
+      `Expected corrupted delete accept fallback to succeed, got ${corruptedDeleteAccept.status}`,
+    );
+    const corruptedDeleteDoc = db.getDocumentBySlug(corruptedDeleteSlug);
+    assertEqual(
+      stripAllProofSpanTags(corruptedDeleteDoc?.markdown ?? '').replace(/\s+/g, ' ').trim(),
+      'Alpha gamma.',
+      'Expected corrupted delete accept fallback to remove the duplicated wrapper text',
+    );
+    assert(
+      !corruptedDeleteDoc?.markdown.includes(`data-id="${corruptedDeleteMarkId}"`),
+      'Expected corrupted delete accept fallback to remove the stale suggestion wrapper',
+    );
+    const corruptedDeleteMarks = parseStoredMarks(corruptedDeleteDoc?.marks);
+    assert(
+      !(corruptedDeleteMarkId in corruptedDeleteMarks),
+      'Expected corrupted delete accept fallback to drop the finalized delete metadata from storage',
+    );
+
     const staleAuthoredSlug = `rehydrate-stale-authored-${Math.random().toString(36).slice(2, 10)}`;
     const staleAuthoredSuggestionId = 'stale-authored-suggestion';
     const staleAuthoredBase = 'Before Hello After';

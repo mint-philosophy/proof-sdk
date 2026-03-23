@@ -47,6 +47,11 @@ const keybindingsKey = new PluginKey('keybindings');
 // Callbacks for showing the agent input dialog
 let showAgentInputCallback: ((context: AgentInputContext, callbacks: AgentInputCallbacks) => void) | null = null;
 
+function getProofEditorApi(): Window['proof'] | null {
+  if (typeof window === 'undefined') return null;
+  return window.proof ?? null;
+}
+
 /**
  * Set the callback for showing the agent input dialog
  */
@@ -234,6 +239,17 @@ function resolveActiveComment(
   return true;
 }
 
+function toggleSuggestionsCommand(
+  _state: EditorState,
+  _dispatch: ((tr: unknown) => void) | undefined,
+  _view: EditorView | undefined,
+): boolean {
+  const proof = getProofEditorApi();
+  if (!proof?.toggleSuggestions) return false;
+  proof.toggleSuggestions();
+  return true;
+}
+
 // ============================================================================
 // Quick Actions
 // ============================================================================
@@ -282,6 +298,7 @@ const agentKeymap = keymap({
   'Mod-Shift-k': addProofCommentCommand,
   'Mod-]': navigateNextComment,
   'Mod-[': navigatePrevComment,
+  'Mod-Shift-e': toggleSuggestionsCommand,
   'Mod-Shift-r': resolveActiveComment,
 });
 

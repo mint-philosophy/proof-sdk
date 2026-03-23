@@ -587,7 +587,16 @@ function resolveRequestScopedCollabWsBase(req: Request): string {
   }
 
   const embeddedRaw = (process.env.COLLAB_EMBEDDED_WS || '').trim().toLowerCase();
-  const embedded = embeddedRaw === '1' || embeddedRaw === 'true' || embeddedRaw === 'yes' || embeddedRaw === 'on';
+  let embedded = embeddedRaw === '1' || embeddedRaw === 'true' || embeddedRaw === 'yes' || embeddedRaw === 'on';
+  if (!embedded) {
+    try {
+      const runtimeUrl = new URL(runtimeBase);
+      const runtimePath = runtimeUrl.pathname.replace(/\/+$/, '') || '/';
+      embedded = runtimePath === '/ws';
+    } catch {
+      embedded = /\/ws$/i.test(runtimeBase);
+    }
+  }
 
   const publicBase = getPublicBaseUrl(req);
   if (!publicBase) return runtimeBase;

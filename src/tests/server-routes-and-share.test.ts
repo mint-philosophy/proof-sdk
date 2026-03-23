@@ -356,6 +356,7 @@ async function withMockOAuth(run: (oauthBaseUrl: string) => Promise<void>): Prom
 
 async function runServerSourceTests(): Promise<void> {
   const serverSource = readFileSync(path.resolve(process.cwd(), 'server', 'index.ts'), 'utf8');
+  const routesSource = readFileSync(path.resolve(process.cwd(), 'server', 'routes.ts'), 'utf8');
   const homeTemplate = readFileSync(path.resolve(process.cwd(), 'server', 'resources', 'home.html'), 'utf8');
 
   await test('D1: server source mounts canonical /documents bridge routes', async () => {
@@ -379,6 +380,14 @@ async function runServerSourceTests(): Promise<void> {
       serverSource,
       "app.get('/health'",
       'server source should publish a health endpoint',
+    );
+  });
+
+  await test('D1: collab WS rewriting infers embedded runtime from the runtime path', async () => {
+    assertIncludes(
+      routesSource,
+      "embedded = runtimePath === '/ws';",
+      'route source should infer embedded collab mode from the runtime /ws path instead of only env flags',
     );
   });
 

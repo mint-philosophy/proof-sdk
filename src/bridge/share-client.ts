@@ -105,6 +105,12 @@ export interface AccessLinkResponse {
 export interface ShareMarkMutationResponse {
   success: boolean;
   marks?: Record<string, unknown>;
+  markdown?: string;
+  updatedAt?: string;
+  collab?: {
+    status?: string;
+    reason?: string;
+  };
 }
 
 type ShareMutationBase = {
@@ -299,18 +305,31 @@ export class ShareClient {
       code?: unknown;
       retryAfterMs?: unknown;
     }));
+    return this.buildRequestError(response.status, response.statusText, requestId, body);
+  }
+
+  private buildRequestError(
+    status: number,
+    statusText: string,
+    requestId: string | null,
+    body: {
+      error?: unknown;
+      code?: unknown;
+      retryAfterMs?: unknown;
+    },
+  ): ShareRequestError {
     const code = typeof body.code === 'string' && body.code.trim().length > 0
       ? body.code
       : 'unknown';
     const message = typeof body.error === 'string' && body.error.trim().length > 0
       ? body.error
-      : response.statusText || 'Request failed';
+      : statusText || 'Request failed';
     const retryAfterMs = typeof body.retryAfterMs === 'number' && Number.isFinite(body.retryAfterMs)
       ? Math.max(0, Math.trunc(body.retryAfterMs))
       : null;
     return {
       error: {
-        status: response.status,
+        status,
         code,
         message,
         retryAfterMs,
@@ -343,11 +362,35 @@ export class ShareClient {
   }
 
   private parseShareMarkMutationResponse(payload: Record<string, unknown> | null): ShareMarkMutationResponse {
+    const collab = (payload?.collab && typeof payload.collab === 'object' && !Array.isArray(payload.collab))
+      ? payload.collab as Record<string, unknown>
+      : null;
     return {
       success: payload?.success === true,
       marks: (payload?.marks && typeof payload.marks === 'object' && !Array.isArray(payload.marks))
         ? payload.marks as Record<string, unknown>
         : undefined,
+      markdown: typeof payload?.markdown === 'string'
+        ? payload.markdown
+        : (typeof payload?.content === 'string' ? payload.content : undefined),
+      updatedAt: typeof payload?.updatedAt === 'string' ? payload.updatedAt : undefined,
+      collab: collab
+        ? {
+            status: typeof collab.status === 'string' ? collab.status : undefined,
+            reason: typeof collab.reason === 'string' ? collab.reason : undefined,
+          }
+        : undefined,
+    };
+  }
+
+  private parseRecoverableMarkMutationError(payload: Record<string, unknown> | null): ShareMarkMutationResponse | null {
+    const code = typeof payload?.code === 'string' ? payload.code.trim().toUpperCase() : '';
+    if (code !== 'COLLAB_SYNC_FAILED') return null;
+    const recovered = this.parseShareMarkMutationResponse(payload);
+    if (!recovered.markdown && !recovered.marks) return null;
+    return {
+      ...recovered,
+      success: true,
     };
   }
 
@@ -379,7 +422,12 @@ export class ShareClient {
     if (!marks) return null;
 
     if (!(markId in marks)) {
-      return { success: true, marks };
+      return {
+        success: true,
+        marks,
+        markdown: typeof context.doc?.markdown === 'string' ? context.doc.markdown : undefined,
+        updatedAt: typeof context.doc?.updatedAt === 'string' ? context.doc.updatedAt : undefined,
+      };
     }
 
     const entry = marks[markId];
@@ -388,7 +436,12 @@ export class ShareClient {
       ? (entry as { status: string }).status.trim().toLowerCase()
       : '';
     if (status === finalStatus) {
-      return { success: true, marks };
+      return {
+        success: true,
+        marks,
+        markdown: typeof context.doc?.markdown === 'string' ? context.doc.markdown : undefined,
+        updatedAt: typeof context.doc?.updatedAt === 'string' ? context.doc.updatedAt : undefined,
+      };
     }
     return null;
   }
@@ -408,8 +461,23 @@ export class ShareClient {
         },
         body: JSON.stringify({ markId: args.markId, by: args.by, ...base }),
       });
-      if (!response.ok) return this.parseRequestError(response);
       const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+      if (!response.ok) {
+        const recovered = this.parseRecoverableMarkMutationError(payload);
+        if (recovered) {
+          this.rememberObservedDocument(payload);
+          this.rememberObservedMutationBase(payload);
+          return recovered;
+        }
+        return this.buildRequestError(
+          response.status,
+          response.statusText,
+          this.readRequestId(response),
+          payload ?? {},
+        );
+      }
+      this.rememberObservedDocument(payload);
+      this.rememberObservedMutationBase(payload);
       return this.parseShareMarkMutationResponse(payload);
     };
 

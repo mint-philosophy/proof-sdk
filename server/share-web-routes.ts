@@ -170,6 +170,7 @@ function buildShareRuntimeConfigScript(slug: string, shareToken?: string | null)
   const configLines = [
     shareToken ? `window.__PROOF_CONFIG__.shareSlug = ${JSON.stringify(slug)};` : '',
     shareToken ? `window.__PROOF_CONFIG__.shareToken = ${JSON.stringify(shareToken)};` : '',
+    'window.__PROOF_CONFIG__.trackChangesViewDefaultMode = "simple";',
     commentUiDefaultMode ? `window.__PROOF_CONFIG__.commentUiDefaultMode = ${JSON.stringify(commentUiDefaultMode)};` : '',
   ].filter(Boolean);
   if (configLines.length === 0) return '';

@@ -64,6 +64,7 @@ import {
   getMarkMetadataForDisk,
   getMarkMetadataWithQuotes,
   mergePendingServerMarks,
+  __debugDescribeDecorations,
   reply as replyMark,
   resolve as resolveMark,
   deleteMark,
@@ -3168,6 +3169,243 @@ test('accept preserves leading whitespace for insert suggestions', () => {
     docText,
     'Hello [ACCEPT_TEST]',
     `Leading whitespace should be preserved after accept (actual: "${docText}")`
+  );
+});
+
+test('shared insert suggestions preserve metadata content and accept/reject operate at the anchor point', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'inline*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'insert' },
+          by: { default: 'unknown' },
+          status: { default: 'pending' },
+          content: { default: null },
+          createdAt: { default: null },
+          updatedAt: { default: null },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      proofAuthored: {
+        attrs: {
+          by: { default: 'unknown' },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+    },
+  });
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  const createView = (markId: string) => {
+    const metadata: Record<string, StoredMark> = {
+      [markId]: {
+        kind: 'insert',
+        by: 'ai:test',
+        createdAt: new Date('2026-02-11T00:00:00.000Z').toISOString(),
+        quote: 'Alpha',
+        content: ' beta',
+        status: 'pending',
+        startRel: 'char:0',
+        endRel: 'char:5',
+      },
+    };
+    let state = EditorState.create({
+      schema,
+      doc: schema.node('doc', null, [
+        schema.node('paragraph', null, [schema.text('Alpha gamma.')]),
+      ]),
+      plugins: [marksStatePlugin],
+    });
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(tr: any) {
+        state = state.apply(tr);
+      },
+    } as any;
+    applyRemoteMarks(view, metadata, { hydrateAnchors: true });
+    return { view, getText: () => state.doc.textBetween(0, state.doc.content.size, '\n', '\n') };
+  };
+
+  const acceptMarkId = 'm-shared-insert-anchor-accept';
+  const acceptCase = createView(acceptMarkId);
+  const hydratedInsert = getMarks(acceptCase.view.state).find((mark) => mark.id === acceptMarkId);
+  assert(hydratedInsert, 'Hydrated insert mark should exist');
+  assertEqual(
+    (hydratedInsert!.data as InsertData | undefined)?.content,
+    ' beta',
+    'Hydrated insert mark should preserve metadata content instead of substituting the anchor quote',
+  );
+  const parser = (_markdown: string) =>
+    schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text(' beta')]),
+    ]);
+  const accepted = acceptMark(acceptCase.view, acceptMarkId, parser as any);
+  assert(accepted, 'Accept should succeed for a shared anchor-based insert suggestion');
+  assertEqual(
+    acceptCase.getText(),
+    'Alpha beta gamma.',
+    'Accept should insert shared suggestion content after the anchor quote',
+  );
+
+  const rejectMarkId = 'm-shared-insert-anchor-reject';
+  const rejectCase = createView(rejectMarkId);
+  const rejected = rejectMark(rejectCase.view, rejectMarkId);
+  assert(rejected, 'Reject should succeed for a shared anchor-based insert suggestion');
+  assertEqual(
+    rejectCase.getText(),
+    'Alpha gamma.',
+    'Reject should preserve the anchor quote instead of deleting it',
+  );
+});
+
+test('metadata-only insert suggestions with collapsed ranges rehydrate at the insertion point', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'inline*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'insert' },
+          by: { default: 'unknown' },
+          status: { default: 'pending' },
+          content: { default: null },
+          createdAt: { default: null },
+          updatedAt: { default: null },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      proofAuthored: {
+        attrs: {
+          by: { default: 'unknown' },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+    },
+  });
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  const markId = 'm-collapsed-insert-anchor';
+  const metadata: Record<string, StoredMark> = {
+    [markId]: {
+      kind: 'insert',
+      by: 'human:test',
+      createdAt: new Date('2026-03-22T12:00:00.000Z').toISOString(),
+      content: ' brave',
+      status: 'pending',
+      range: { from: 18, to: 18 },
+    },
+  };
+
+  let state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text('Alpha beta gamma.')]),
+    ]),
+    plugins: [marksStatePlugin],
+  });
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  applyRemoteMarks(view, metadata, { hydrateAnchors: true });
+  const hydratedInsert = getMarks(view.state).find((mark) => mark.id === markId);
+  assert(hydratedInsert, 'Collapsed-range insert metadata should hydrate into an actionable mark');
+  assertDeepEqual(
+    hydratedInsert!.range,
+    { from: 18, to: 18 },
+    'Hydrated insert should preserve the collapsed insertion point',
+  );
+  assertEqual(
+    (hydratedInsert!.data as InsertData | undefined)?.content,
+    ' brave',
+    'Hydrated collapsed insert should preserve its pending content',
+  );
+  const flushed = getMarkMetadataWithQuotes(view.state);
+  assertEqual(
+    flushed[markId]?.content,
+    ' brave',
+    'Collapsed-range insert metadata should remain flushable after normalization',
+  );
+  const decorations = __debugDescribeDecorations(
+    view.state,
+    getMarks(view.state),
+    null,
+    null,
+    'simple',
+  );
+  assert(
+    decorations.some((decoration) =>
+      decoration.markId === markId
+      && decoration.decorationRole === 'replace-preview'
+      && decoration.text === ' brave'
+    ),
+    'Collapsed-range insert should render a simple-markup preview widget',
+  );
+
+  const parser = (_markdown: string) =>
+    schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text(' brave')]),
+    ]);
+  const accepted = acceptMark(view, markId, parser as any);
+  assert(accepted, 'Accept should succeed for a collapsed-range insert suggestion');
+  assertEqual(
+    view.state.doc.textBetween(0, view.state.doc.content.size, '\n', '\n'),
+    'Alpha beta gamma. brave',
+    'Accept should insert collapsed-range suggestion content at the stored insertion point',
   );
 });
 

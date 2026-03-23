@@ -48,12 +48,15 @@ export interface MarksPluginState {
   metadata: Record<string, StoredMark>;
   activeMarkId: string | null;
   composeAnchorRange?: MarkRange | null;
+  suggestionDisplayMode: SuggestionDisplayMode;
+  marks: Mark[];
+  decorations: DecorationSet;
 }
 
 export const marksPluginKey = new PluginKey<MarksPluginState>('marks');
 
 export const marksCtx = $ctx<MarksPluginState, 'marks'>(
-  { metadata: {}, activeMarkId: null, composeAnchorRange: null },
+  { metadata: {}, activeMarkId: null, composeAnchorRange: null, suggestionDisplayMode: 'simple', marks: [], decorations: DecorationSet.empty },
   'marks'
 );
 
@@ -65,6 +68,8 @@ export interface ResolvedMark extends Mark {
   resolvedRange: { from: number; to: number } | null;
   resolvedRanges?: MarkRange[];
 }
+
+export type SuggestionDisplayMode = 'all' | 'simple' | 'no-markup' | 'original';
 
 // ============================================================================
 // Helpers
@@ -131,6 +136,11 @@ function hashStringFNV1a(value: string): string {
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
   return hash.toString(16).padStart(8, '0');
+}
+
+function normalizeSuggestionDisplayMode(mode: unknown): SuggestionDisplayMode {
+  if (mode === 'simple' || mode === 'no-markup' || mode === 'original') return mode;
+  return 'all';
 }
 
 function getHydrationDocumentId(): string | null {
@@ -200,6 +210,10 @@ export function __getMarkAnchorHydrationFailureCount(): number {
   return markAnchorHydrationFailures.size;
 }
 
+export function __resetResolvedMarkTombstones(): void {
+  resolvedMarkTombstones.clear();
+}
+
 function markResolvedMarkIds(
   ids: string[],
   now: number = Date.now(),
@@ -236,6 +250,7 @@ type AnchorInfo = {
   by: string;
   from: number;
   to: number;
+  ranges: MarkRange[];
   attrMeta?: Partial<StoredMark>;
 };
 
@@ -258,6 +273,22 @@ function getMarkTypeForKind(state: EditorState, kind: MarkKind): MarkType | null
 
 function resolveRangeFromQuote(doc: ProseMirrorNode, quote: string): MarkRange | null {
   return resolveQuoteRange(doc, quote);
+}
+
+function resolveRangeFromNearbyQuote(
+  doc: ProseMirrorNode,
+  quote: string,
+  candidateRange: MarkRange,
+): MarkRange | null {
+  const normalizedQuote = normalizeQuote(quote);
+  if (!normalizedQuote) return null;
+
+  const padding = 8;
+  const scope: MarkRange = {
+    from: Math.max(0, candidateRange.from - padding),
+    to: Math.min(doc.content.size, candidateRange.to + padding),
+  };
+  return resolveQuoteRange(doc, normalizedQuote, scope);
 }
 
 function parseRelativeCharOffset(value: unknown): number | null {
@@ -286,7 +317,7 @@ function resolveStoredMarkRange(doc: ProseMirrorNode, stored: StoredMark): MarkR
   const normalizedStoredQuote = typeof stored.quote === 'string'
     ? normalizeQuote(stored.quote)
     : '';
-  const allowsQuoteLessAnchorFallback = stored.kind === 'authored';
+  const allowsQuoteLessAnchorFallback = stored.kind === 'authored' || stored.kind === 'insert';
 
   const relativeRange = resolveRangeFromRelativeAnchors(doc, stored.startRel, stored.endRel);
   if (relativeRange) {
@@ -299,6 +330,10 @@ function resolveStoredMarkRange(doc: ProseMirrorNode, stored: StoredMark): MarkR
       if (actualRelativeQuote === normalizedStoredQuote) {
         return relativeRange;
       }
+      const nearbyRelativeRange = resolveRangeFromNearbyQuote(doc, normalizedStoredQuote, relativeRange);
+      if (nearbyRelativeRange) {
+        return nearbyRelativeRange;
+      }
     }
   }
 
@@ -310,8 +345,9 @@ function resolveStoredMarkRange(doc: ProseMirrorNode, stored: StoredMark): MarkR
     && Number.isFinite(storedRange.from)
     && Number.isFinite(storedRange.to)
     && storedRange.from >= 0
-    && storedRange.to > storedRange.from
+    && storedRange.to >= storedRange.from
     && storedRange.to <= doc.content.size
+    && (storedRange.to > storedRange.from || stored.kind === 'insert')
   ) {
     const candidateRange = { from: storedRange.from, to: storedRange.to };
     if (!normalizedStoredQuote) {
@@ -322,6 +358,10 @@ function resolveStoredMarkRange(doc: ProseMirrorNode, stored: StoredMark): MarkR
       const actualQuote = normalizeQuote(getTextForRange(doc, candidateRange));
       if (actualQuote === normalizedStoredQuote) {
         return candidateRange;
+      }
+      const nearbyStoredRange = resolveRangeFromNearbyQuote(doc, normalizedStoredQuote, candidateRange);
+      if (nearbyStoredRange) {
+        return nearbyStoredRange;
       }
     }
   }
@@ -356,6 +396,36 @@ function addRelativeAnchorsToMetadata(
     meta.startRel = `char:${startOffset}`;
     meta.endRel = `char:${endOffset}`;
   }
+}
+
+function buildRelativeAnchorMetadataForRange(
+  doc: ProseMirrorNode,
+  range: MarkRange,
+): { startRel?: string; endRel?: string } {
+  const index = buildTextIndex(doc);
+  if (!index) return {};
+
+  let startOffset = -1;
+  let endOffset = -1;
+  for (let i = 0; i < index.positions.length; i += 1) {
+    const pos = index.positions[i];
+    if (typeof pos !== 'number') continue;
+    if (startOffset < 0 && pos >= range.from) {
+      startOffset = i;
+    }
+    if (pos < range.to) {
+      endOffset = i + 1;
+    }
+  }
+
+  if (startOffset >= 0 && endOffset > startOffset) {
+    return {
+      startRel: `char:${startOffset}`,
+      endRel: `char:${endOffset}`,
+    };
+  }
+
+  return {};
 }
 
 function isWordChar(char: string | undefined): boolean {
@@ -917,6 +987,16 @@ function finalizeMarkTransaction(
   view.dispatch(tr);
 }
 
+export function syncSuggestionMetadataTransaction(
+  state: EditorState,
+  tr: Transaction,
+  metadata: Record<string, StoredMark>,
+): Transaction {
+  const normalized = normalizeMetadata(metadata, tr.doc);
+  const stamped = stampSuggestionMetadataOnDocument(state, tr, normalized);
+  return stamped.setMeta(marksPluginKey, { type: 'SET_METADATA', metadata: normalized });
+}
+
 function removeSuggestionAnchors(
   tr: Transaction,
   ids: Set<string>
@@ -985,23 +1065,31 @@ function buildCommentData(id: string, meta: StoredMark | undefined): CommentData
 function buildSuggestionData(
   kind: MarkKind,
   meta: StoredMark | undefined,
-  quote: string
+  quote: string,
+  liveText?: string
 ): InsertData | DeleteData | ReplaceData {
   const status = meta?.status ?? 'pending';
   const orchestrationMeta = extractOrchestrationMeta(meta);
+  const currentText = typeof liveText === 'string' && liveText.length > 0
+    ? liveText
+    : quote;
 
   if (kind === 'insert') {
     return {
       ...orchestrationMeta,
-      content: meta?.content ?? quote,
+      content: meta?.content ?? currentText ?? '',
       status,
     } as InsertData;
   }
 
   if (kind === 'replace') {
+    const originalQuote = typeof meta?.originalQuote === 'string' && meta.originalQuote.trim().length > 0
+      ? meta.originalQuote
+      : undefined;
     return {
       ...orchestrationMeta,
-      content: meta?.content ?? quote,
+      content: originalQuote ? currentText : (meta?.content ?? currentText),
+      ...(originalQuote ? { originalQuote } : {}),
       status,
     } as ReplaceData;
   }
@@ -1012,12 +1100,21 @@ function buildSuggestionData(
   } as DeleteData;
 }
 
+function appendAnchorRange(ranges: MarkRange[], from: number, to: number): void {
+  const last = ranges[ranges.length - 1];
+  if (last && from <= last.to) {
+    last.to = Math.max(last.to, to);
+    return;
+  }
+  ranges.push({ from, to });
+}
+
 function buildAnchorMarks(
   doc: ProseMirrorNode,
   metadata: Record<string, StoredMark>
-): Mark[] {
+): ResolvedMark[] {
   const anchors = new Map<string, AnchorInfo>();
-  const authored: Mark[] = [];
+  const authored: ResolvedMark[] = [];
   const authoredMetadataIds = new Map<string, string>();
 
   for (const [id, stored] of Object.entries(metadata)) {
@@ -1050,11 +1147,12 @@ function buildAnchorMarks(
           if (existing) {
             existing.from = Math.min(existing.from, from);
             existing.to = Math.max(existing.to, to);
+            appendAnchorRange(existing.ranges, from, to);
             existing.attrMeta = existing.attrMeta
               ? { ...existing.attrMeta, ...attrMeta }
               : attrMeta;
           } else {
-            anchors.set(id, { id, kind, by, from, to, attrMeta });
+            anchors.set(id, { id, kind, by, from, to, ranges: [{ from, to }], attrMeta });
           }
           break;
         }
@@ -1066,8 +1164,9 @@ function buildAnchorMarks(
           if (existing) {
             existing.from = Math.min(existing.from, from);
             existing.to = Math.max(existing.to, to);
+            appendAnchorRange(existing.ranges, from, to);
           } else {
-            anchors.set(id, { id, kind: 'comment', by, from, to });
+            anchors.set(id, { id, kind: 'comment', by, from, to, ranges: [{ from, to }] });
           }
           break;
         }
@@ -1079,8 +1178,9 @@ function buildAnchorMarks(
           if (existing) {
             existing.from = Math.min(existing.from, from);
             existing.to = Math.max(existing.to, to);
+            appendAnchorRange(existing.ranges, from, to);
           } else {
-            anchors.set(id, { id, kind: 'flagged', by, from, to });
+            anchors.set(id, { id, kind: 'flagged', by, from, to, ranges: [{ from, to }] });
           }
           break;
         }
@@ -1092,8 +1192,9 @@ function buildAnchorMarks(
           if (existing) {
             existing.from = Math.min(existing.from, from);
             existing.to = Math.max(existing.to, to);
+            appendAnchorRange(existing.ranges, from, to);
           } else {
-            anchors.set(id, { id, kind: 'approved', by, from, to });
+            anchors.set(id, { id, kind: 'approved', by, from, to, ranges: [{ from, to }] });
           }
           break;
         }
@@ -1110,6 +1211,8 @@ function buildAnchorMarks(
             at: '1970-01-01T00:00:00.000Z',
             range: { from, to },
             quote,
+            resolvedRange: { from, to },
+            resolvedRanges: [{ from, to }],
             data: {},
           });
           break;
@@ -1120,7 +1223,7 @@ function buildAnchorMarks(
     return true;
   });
 
-  const marks: Mark[] = [];
+  const marks: ResolvedMark[] = [];
 
   for (const anchor of anchors.values()) {
     const pluginMeta = metadata[anchor.id];
@@ -1142,7 +1245,7 @@ function buildAnchorMarks(
     if (anchor.kind === 'comment') {
       data = buildCommentData(anchor.id, pluginMeta);
     } else if (anchor.kind === 'insert' || anchor.kind === 'delete' || anchor.kind === 'replace') {
-      data = buildSuggestionData(anchor.kind, meta as StoredMark | undefined, quote);
+      data = buildSuggestionData(anchor.kind, meta as StoredMark | undefined, quote, text);
     } else if (anchor.kind === 'flagged') {
       data = pluginMeta?.note ? { note: pluginMeta.note } : undefined;
     }
@@ -1154,6 +1257,8 @@ function buildAnchorMarks(
       at: createdAt,
       range: { from: anchor.from, to: anchor.to },
       quote,
+      resolvedRange: anchor.ranges[0] ?? null,
+      resolvedRanges: anchor.ranges.length ? anchor.ranges : undefined,
       data,
     });
   }
@@ -1179,7 +1284,7 @@ function buildAnchorMarks(
     if (stored.kind === 'comment') {
       data = buildCommentData(id, stored);
     } else if (stored.kind === 'insert' || stored.kind === 'delete' || stored.kind === 'replace') {
-      data = buildSuggestionData(stored.kind, stored, quote);
+      data = buildSuggestionData(stored.kind, stored, quote, text);
     } else if (stored.kind === 'flagged') {
       data = stored.note ? { note: stored.note } : undefined;
     }
@@ -1191,6 +1296,8 @@ function buildAnchorMarks(
       at: createdAt,
       range,
       quote,
+      resolvedRange: range,
+      resolvedRanges: [range],
       data,
     });
   }
@@ -1222,6 +1329,13 @@ function isMatchingAnchorMark(mark: Mark, nodeMark: { type: MarkType; attrs: Rec
 function collectAnchorRanges(doc: ProseMirrorNode, mark: Mark): MarkRange[] {
   if (mark.kind === 'authored' && mark.range) {
     return [mark.range];
+  }
+
+  if (mark.range && mark.quote) {
+    const directQuote = normalizeQuote(getTextForRange(doc, mark.range));
+    if (directQuote && directQuote === mark.quote) {
+      return [mark.range];
+    }
   }
 
   const ranges: MarkRange[] = [];
@@ -1375,6 +1489,7 @@ function normalizeMetadata(
     if (!ids.has(id)) {
       const detached = next[id];
       if (detached?.kind === 'comment' && shouldIncludeMetadataEntry(detached, true)) continue;
+      if (shouldRetainDetachedMetadataEntry(detached, doc)) continue;
       delete next[id];
       changed = true;
     }
@@ -1443,7 +1558,12 @@ function buildMetadataFromMark(mark: Mark): StoredMark {
     applyOrchestrationMeta(meta, data);
   } else if (mark.kind === 'replace') {
     const data = mark.data as ReplaceData | undefined;
-    meta.content = data?.content ?? '';
+    if (typeof data?.originalQuote === 'string' && data.originalQuote.trim().length > 0) {
+      meta.originalQuote = data.originalQuote;
+      meta.content = mark.quote;
+    } else {
+      meta.content = data?.content ?? '';
+    }
     meta.status = data?.status ?? 'pending';
     applyOrchestrationMeta(meta, data);
   } else if (mark.kind === 'flagged') {
@@ -1465,6 +1585,15 @@ function shouldIncludeMetadataEntry(
   return true;
 }
 
+function shouldRetainDetachedMetadataEntry(
+  entry: StoredMark | undefined,
+  doc: ProseMirrorNode
+): boolean {
+  if (!entry || entry.kind !== 'insert' || entry.status !== 'pending') return false;
+  const range = resolveStoredMarkRange(doc, entry);
+  return !!range && range.from === range.to;
+}
+
 function buildMetadataSnapshot(
   state: EditorState,
   options?: { includeAuthored?: boolean; includeQuotes?: boolean }
@@ -1477,7 +1606,8 @@ function buildMetadataSnapshot(
   const metadata: Record<string, StoredMark> = {};
 
   for (const [id, entry] of Object.entries(pluginState.metadata ?? {})) {
-    if (!anchoredIds.has(id) && entry?.kind !== 'comment') continue;
+    const retainDetached = entry?.kind === 'comment' || shouldRetainDetachedMetadataEntry(entry, state.doc);
+    if (!anchoredIds.has(id) && !retainDetached) continue;
     if (!shouldIncludeMetadataEntry(entry, includeAuthored)) continue;
     metadata[id] = { ...entry };
   }
@@ -1497,6 +1627,7 @@ function buildMetadataSnapshot(
 function collectMarks(state: EditorState): Mark[] {
   const pluginState = marksPluginKey.getState(state);
   if (!pluginState) return [];
+  if (Array.isArray(pluginState.marks)) return pluginState.marks;
   return buildAnchorMarks(state.doc, pluginState.metadata);
 }
 
@@ -1584,6 +1715,9 @@ function mergeStoredMarkWithFallback(
       merged.content = existingContent;
     }
   }
+  if (!incoming.originalQuote && existing.originalQuote) {
+    merged.originalQuote = existing.originalQuote;
+  }
 
   if (!incoming.createdAt && existing.createdAt) merged.createdAt = existing.createdAt;
   if (!incoming.quote && existing.quote) merged.quote = existing.quote;
@@ -1596,7 +1730,8 @@ function mergeStoredMarkWithFallback(
 
 export function mergePendingServerMarks(
   localMetadata: Record<string, StoredMark>,
-  serverMarks: Record<string, StoredMark>
+  serverMarks: Record<string, StoredMark>,
+  options?: { dropMissingPendingSuggestions?: boolean },
 ): Record<string, StoredMark> {
   const canonicalLocal = canonicalizeStoredMarks(localMetadata);
   const canonicalServer = canonicalizeStoredMarks(serverMarks);
@@ -1620,7 +1755,36 @@ export function mergePendingServerMarks(
       if (kind === 'comment' && isResolvedTombstone && merged[id]?.resolved === true) {
         merged[id] = mergeStoredMarkWithFallback(merged[id], { ...serverMark, resolved: true });
       } else if (!isDeletedTombstone) {
-        merged[id] = mergeStoredMarkWithFallback(merged[id], serverMark);
+        const localMark = merged[id];
+        const shouldPreferLocalPendingSuggestion = (
+          !!localMark
+          && (kind === 'insert' || kind === 'replace')
+          && localMark.kind === kind
+          && localMark.status === 'pending'
+          && serverMark.status === 'pending'
+        );
+        const mergedMark = mergeStoredMarkWithFallback(localMark, serverMark);
+        if (shouldPreferLocalPendingSuggestion && localMark) {
+          if (typeof localMark.content === 'string' && localMark.content.length > 0) {
+            mergedMark.content = localMark.content;
+          }
+          if (typeof localMark.quote === 'string' && localMark.quote.length > 0) {
+            mergedMark.quote = localMark.quote;
+          }
+          if (localMark.range) {
+            mergedMark.range = localMark.range;
+          }
+          if (localMark.startRel) {
+            mergedMark.startRel = localMark.startRel;
+          }
+          if (localMark.endRel) {
+            mergedMark.endRel = localMark.endRel;
+          }
+          if (typeof localMark.originalQuote === 'string' && localMark.originalQuote.length > 0) {
+            mergedMark.originalQuote = localMark.originalQuote;
+          }
+        }
+        merged[id] = mergedMark;
       }
       continue;
     }
@@ -1629,7 +1793,112 @@ export function mergePendingServerMarks(
       merged[id] = serverMark;
     }
   }
+
+  if (options?.dropMissingPendingSuggestions) {
+    for (const [id, localMark] of Object.entries(canonicalLocal)) {
+      const kind = localMark?.kind;
+      if (kind !== 'insert' && kind !== 'delete' && kind !== 'replace') continue;
+      if (Object.prototype.hasOwnProperty.call(canonicalServer, id)) continue;
+      delete merged[id];
+    }
+  }
+
   return canonicalizeStoredMarks(merged);
+}
+
+export function buildCanonicalShareMarkMetadata(
+  state: EditorState,
+  metadata?: Record<string, StoredMark>,
+): Record<string, StoredMark> {
+  const sourceMetadata = canonicalizeStoredMarks(
+    metadata ?? buildMetadataSnapshot(state, { includeAuthored: true, includeQuotes: true }),
+  );
+  const liveMarks = getMarks(state);
+  const liveMarksById = new Map(liveMarks.map((mark) => [mark.id, mark] as const));
+  const liveInsertRanges = getPendingSuggestions(liveMarks)
+    .filter((mark) => mark.kind === 'insert' && mark.range && mark.range.to > mark.range.from)
+    .map((mark) => mark.range as MarkRange)
+    .sort((a, b) => b.from - a.from);
+
+  let projectionTr = state.tr;
+  for (const range of liveInsertRanges) {
+    projectionTr = projectionTr.delete(range.from, range.to);
+  }
+
+  const canonicalDoc = projectionTr.doc;
+  const docSize = canonicalDoc.content.size;
+  const mapPos = (pos: number, assoc: -1 | 1): number => {
+    const mapped = projectionTr.mapping.map(pos, assoc);
+    return Math.max(0, Math.min(mapped, docSize));
+  };
+
+  const canonicalMetadata: Record<string, StoredMark> = {};
+  for (const [id, entry] of Object.entries(sourceMetadata)) {
+    const nextEntry: StoredMark = { ...entry };
+    const liveMark = liveMarksById.get(id);
+    const liveRange = liveMark?.range ?? (
+      entry.range
+      && typeof entry.range.from === 'number'
+      && typeof entry.range.to === 'number'
+      && Number.isFinite(entry.range.from)
+      && Number.isFinite(entry.range.to)
+      ? { from: entry.range.from, to: entry.range.to }
+      : null
+    );
+    const isPendingSuggestion = (
+      (entry.kind === 'insert' || entry.kind === 'delete' || entry.kind === 'replace')
+      && entry.status !== 'accepted'
+      && entry.status !== 'rejected'
+    );
+
+    if (entry.kind === 'insert' && isPendingSuggestion) {
+      const anchorPos = liveRange ? mapPos(liveRange.from, -1) : null;
+      if (anchorPos !== null) {
+        nextEntry.range = { from: anchorPos, to: anchorPos };
+      } else {
+        delete nextEntry.range;
+      }
+      delete nextEntry.quote;
+      delete nextEntry.startRel;
+      delete nextEntry.endRel;
+      canonicalMetadata[id] = nextEntry;
+      continue;
+    }
+
+    if (liveRange) {
+      const mappedFrom = mapPos(liveRange.from, 1);
+      const mappedTo = mapPos(liveRange.to, -1);
+      const mappedRange: MarkRange = {
+        from: mappedFrom,
+        to: Math.max(mappedFrom, mappedTo),
+      };
+      nextEntry.range = mappedRange;
+
+      if (mappedRange.to > mappedRange.from) {
+        const mappedQuote = normalizeQuote(getTextForRange(canonicalDoc, mappedRange));
+        if (mappedQuote) {
+          nextEntry.quote = mappedQuote;
+        } else {
+          delete nextEntry.quote;
+        }
+        const relativeAnchors = buildRelativeAnchorMetadataForRange(canonicalDoc, mappedRange);
+        if (relativeAnchors.startRel && relativeAnchors.endRel) {
+          nextEntry.startRel = relativeAnchors.startRel;
+          nextEntry.endRel = relativeAnchors.endRel;
+        } else {
+          delete nextEntry.startRel;
+          delete nextEntry.endRel;
+        }
+      } else {
+        delete nextEntry.startRel;
+        delete nextEntry.endRel;
+      }
+    }
+
+    canonicalMetadata[id] = nextEntry;
+  }
+
+  return canonicalizeStoredMarks(canonicalMetadata);
 }
 
 export function buildSuggestionMetadata(
@@ -1665,10 +1934,16 @@ export function setMarkMetadata(view: EditorView, metadata: Record<string, Store
 export function applyRemoteMarks(
   view: EditorView,
   metadata: Record<string, StoredMark>,
-  options?: { hydrateAnchors?: boolean }
+  options?: {
+    hydrateAnchors?: boolean;
+    pruneMissingSuggestions?: boolean;
+    hydrateAuthoredAnchors?: boolean;
+  }
 ): void {
   const canonicalMetadata = canonicalizeStoredMarks(metadata);
   const hydrateAnchors = options?.hydrateAnchors !== false;
+  const hydrateAuthoredAnchors = options?.hydrateAuthoredAnchors !== false;
+  const pruneMissingSuggestions = options?.pruneMissingSuggestions === true;
   const existingIds = getProofAnchorIds(view.state.doc);
   let tr = view.state.tr;
   const now = Date.now();
@@ -1678,13 +1953,14 @@ export function applyRemoteMarks(
   const finalizedSuggestionIds = new Set<string>();
   let authoredHydrationFailures = 0;
   let authoredHydrationSuppressed = 0;
+  const existingMetadata = getMarkMetadata(view.state);
 
   // Merge with existing metadata so we don't lose local marks.
   // For tombstoned comment marks, we merge metadata (replies, thread, etc.)
   // but preserve the local resolved state to prevent stale server data from
   // flipping resolved comments back to unresolved.
   // For tombstoned suggestion marks, skip entirely (accepted/rejected locally).
-  const merged = canonicalizeStoredMarks({ ...getMarkMetadata(view.state) });
+  const merged = canonicalizeStoredMarks({ ...existingMetadata });
   const filteredEntries: [string, StoredMark][] = [];
   for (const [id, stored] of allEntries) {
     const status = stored?.status;
@@ -1716,6 +1992,16 @@ export function applyRemoteMarks(
     filteredEntries.push([id, stored]);
   }
 
+  if (pruneMissingSuggestions) {
+    for (const [id, stored] of Object.entries(existingMetadata)) {
+      const kind = stored?.kind;
+      if (kind !== 'insert' && kind !== 'delete' && kind !== 'replace') continue;
+      if (canonicalMetadata[id]) continue;
+      finalizedSuggestionIds.add(id);
+      delete merged[id];
+    }
+  }
+
   tr = removeSuggestionAnchors(tr, finalizedSuggestionIds);
 
   if (hydrateAnchors) {
@@ -1723,6 +2009,7 @@ export function applyRemoteMarks(
       if (existingIds.has(id)) continue; // Already has an anchor
       if (!stored.kind) continue;
       const isAuthored = stored.kind === 'authored';
+      if (isAuthored && !hydrateAuthoredAnchors) continue;
       if (isAuthored && authoredHydrationFailures >= AUTHORED_ANCHOR_HYDRATION_FAILURE_BUDGET_PER_PASS) {
         authoredHydrationSuppressed += 1;
         continue;
@@ -2624,6 +2911,16 @@ function applyMarkdownInsert(
   by: string,
   parser: MarkdownParser | undefined
 ): MarkdownApplyResult {
+  if (range.from === range.to && !isStructuralMarkdown(markdown, parser)) {
+    tr = tr.insertText(markdown, range.from, range.to);
+    const appliedRange: MarkRange = {
+      from: range.from,
+      to: range.from + markdown.length,
+    };
+    tr = addAuthoredMarkToTransaction(view.state, tr, appliedRange, by);
+    return { ok: true, tr, appliedRange };
+  }
+
   const parsedFragment = parseMarkdownFragment(parser, markdown);
   const docBefore = tr.doc;
   const analysis = analyzeTextblockRange(docBefore, range);
@@ -2635,8 +2932,13 @@ function applyMarkdownInsert(
       console.warn('[marks] Rejecting structural insert accept because markdown could not be parsed.');
       return { ok: false };
     }
-    tr = addAuthoredMarkToTransaction(view.state, tr, defaultRange, by);
-    return { ok: true, tr, appliedRange: defaultRange };
+    tr = tr.insertText(markdown, range.from, range.to);
+    const appliedRange: MarkRange = {
+      from: range.from,
+      to: range.from + markdown.length,
+    };
+    tr = addAuthoredMarkToTransaction(view.state, tr, appliedRange, by);
+    return { ok: true, tr, appliedRange };
   }
 
   const structural = isStructuralMarkdown(markdown, parser);
@@ -2701,6 +3003,43 @@ function applyMarkdownInsert(
   return { ok: true, tr, appliedRange };
 }
 
+function insertAcceptNeedsMaterialization(
+  markdown: string,
+  parser: MarkdownParser | undefined,
+): boolean {
+  const parsedFragment = parseMarkdownFragment(parser, markdown);
+  if (!parsedFragment || parsedFragment.childCount === 0) {
+    return isStructuralMarkdown(markdown, parser);
+  }
+
+  const parsedFragmentForInsert = unwrapSingleParagraph(parsedFragment) ?? parsedFragment;
+  if (fragmentHasBlockNodes(parsedFragmentForInsert)) {
+    return true;
+  }
+
+  let needsMaterialization = false;
+  parsedFragmentForInsert.descendants((node) => {
+    if (!node.isText) {
+      needsMaterialization = true;
+      return false;
+    }
+    if (node.marks.length > 0) {
+      needsMaterialization = true;
+      return false;
+    }
+    return !needsMaterialization;
+  });
+
+  return needsMaterialization;
+}
+
+function isAnchorBasedInsertSuggestion(mark: Mark, existingText: string): boolean {
+  if (mark.kind !== 'insert') return false;
+  const data = mark.data as InsertData | undefined;
+  const content = typeof data?.content === 'string' ? data.content : '';
+  return content.length > 0 && existingText !== content;
+}
+
 export function accept(view: EditorView, markId: string, parser?: MarkdownParser): boolean {
   const effectiveParser = resolveMarkdownParser(parser);
   const marks = getMarks(view.state);
@@ -2717,15 +3056,33 @@ export function accept(view: EditorView, markId: string, parser?: MarkdownParser
     case 'insert': {
       const markType = getMarkTypeForKind(view.state, 'insert');
       if (!markType) return false;
+      const data = mark.data as InsertData | undefined;
       for (const range of ranges) {
+        const existingText = getTextForRange(view.state.doc, range);
+        const content = data?.content ?? existingText;
+        if (isAnchorBasedInsertSuggestion(mark, existingText)) {
+          tr = tr.removeMark(range.from, range.to, markType);
+          const insertionPoint = { from: range.to, to: range.to };
+          const result = applyMarkdownInsert(view, tr, insertionPoint, content, mark.by, effectiveParser);
+          if (!result.ok) return false;
+          tr = result.tr;
+          applied = true;
+          continue;
+        }
+        if (
+          existingText === content
+          && !insertAcceptNeedsMaterialization(content, effectiveParser)
+        ) {
+          tr = removeSuggestionAnchors(tr, new Set([mark.id]));
+          applied = true;
+          continue;
+        }
         tr = tr.removeMark(range.from, range.to, markType);
-        const data = mark.data as InsertData | undefined;
-        const content = data?.content ?? getTextForRange(view.state.doc, range);
         const result = applyMarkdownInsert(view, tr, range, content, mark.by, effectiveParser);
         if (!result.ok) return false;
         tr = result.tr;
+        applied = true;
       }
-      applied = true;
       break;
     }
     case 'delete': {
@@ -2739,12 +3096,6 @@ export function accept(view: EditorView, markId: string, parser?: MarkdownParser
       const data = mark.data as ReplaceData | undefined;
       if (ranges.length !== 1) return false;
       const range = ranges[0];
-      const markType = getMarkTypeForKind(view.state, 'replace');
-      if (markType) {
-        // Ensure the accepted suggestion mark clears even when the replacement content is a no-op.
-        const attrs = buildSuggestionAttrs(mark.id, 'replace', mark.by, metadata[mark.id]);
-        tr = tr.removeMark(range.from, range.to, markType.create(attrs));
-      }
       const replacementContent =
         (typeof data?.content === 'string' && data.content.trim().length > 0)
           ? data.content
@@ -2755,6 +3106,7 @@ export function accept(view: EditorView, markId: string, parser?: MarkdownParser
       if (existingText === replacementContent) {
         // A no-op accept should only clear the suggestion mark and preserve any
         // nested comments/review marks already anchored inside the range.
+        tr = removeSuggestionAnchors(tr, new Set([mark.id]));
         applied = true;
         break;
       }
@@ -2809,11 +3161,19 @@ export function reject(view: EditorView, markId: string): boolean {
   if (ranges.length === 0) return false;
 
   switch (mark.kind) {
-    case 'insert':
+    case 'insert': {
+      const markType = getMarkTypeForKind(view.state, 'insert');
+      if (!markType) return false;
       for (const range of ranges) {
+        const existingText = getTextForRange(view.state.doc, range);
+        if (isAnchorBasedInsertSuggestion(mark, existingText)) {
+          tr = tr.removeMark(range.from, range.to, markType);
+          continue;
+        }
         tr = tr.delete(range.from, range.to);
       }
       break;
+    }
     case 'delete': {
       const markType = getMarkTypeForKind(view.state, 'delete');
       if (!markType) return false;
@@ -2823,10 +3183,20 @@ export function reject(view: EditorView, markId: string): boolean {
       break;
     }
     case 'replace': {
-      const markType = getMarkTypeForKind(view.state, 'replace');
-      if (!markType) return false;
-      for (const range of ranges) {
-        tr = tr.removeMark(range.from, range.to, markType);
+      const data = mark.data as ReplaceData | undefined;
+      const originalQuote = typeof data?.originalQuote === 'string' && data.originalQuote.trim().length > 0
+        ? data.originalQuote
+        : null;
+      if (originalQuote) {
+        if (ranges.length !== 1) return false;
+        const range = ranges[0];
+        tr = tr.insertText(originalQuote, range.from, range.to);
+      } else {
+        const markType = getMarkTypeForKind(view.state, 'replace');
+        if (!markType) return false;
+        for (const range of ranges) {
+          tr = tr.removeMark(range.from, range.to, markType);
+        }
       }
       break;
     }
@@ -2915,12 +3285,20 @@ export function rejectAll(view: EditorView): number {
         break;
       }
       case 'replace': {
-        const markType = getMarkTypeForKind(view.state, 'replace');
+        const data = mark.data as ReplaceData | undefined;
+        const originalQuote = typeof data?.originalQuote === 'string' && data.originalQuote.trim().length > 0
+          ? data.originalQuote
+          : null;
         for (const range of ranges) {
           const from = tr.mapping.map(range.from);
           const to = tr.mapping.map(range.to);
-          if (markType) {
-            tr = tr.removeMark(from, to, markType);
+          if (originalQuote) {
+            tr = tr.insertText(originalQuote, from, to);
+          } else {
+            const markType = getMarkTypeForKind(view.state, 'replace');
+            if (markType) {
+              tr = tr.removeMark(from, to, markType);
+            }
           }
         }
         break;
@@ -3025,6 +3403,10 @@ export function resolveMarks(doc: ProseMirrorNode, marks: Mark[]): ResolvedMark[
   });
 }
 
+function hasResolvedRanges(mark: Mark): mark is ResolvedMark {
+  return 'resolvedRange' in mark;
+}
+
 // ============================================================================
 // Decorations
 // ============================================================================
@@ -3040,8 +3422,11 @@ const STYLES = {
   comment_resolved: 'background-color: rgba(156, 163, 175, 0.15); border-bottom: 1px dashed #9CA3AF;',
   compose_anchor: 'background-color: rgba(252, 211, 77, 0.22); border-bottom: 2px dashed #F59E0B;',
 
-  insert: 'background-color: rgba(34, 197, 94, 0.25); border-bottom: 2px solid #22C55E;',
-  delete: 'background-color: rgba(239, 68, 68, 0.2); text-decoration: line-through; color: #666;',
+  insert: 'color: #15803d; font-weight: 500;',
+  insert_simple: 'color: #15803d; font-weight: 500;',
+  delete: 'color: #b91c1c; text-decoration: line-through; text-decoration-color: #b91c1c;',
+  hidden_source: 'display:none;color:transparent;text-decoration:none;background:transparent;border:none;padding:0;margin:0;pointer-events:none;',
+  change_indicator: 'display:inline-flex;width:7px;height:7px;margin:0 2px;vertical-align:middle;border-radius:999px;background:rgba(185, 28, 28, 0.45);box-shadow:none;cursor:pointer;transform:translateY(-0.06em);',
 };
 
 function normalizeComposeAnchorRange(range: MarkRange | null, doc: ProseMirrorNode): MarkRange | null {
@@ -3055,21 +3440,32 @@ function normalizeComposeAnchorRange(range: MarkRange | null, doc: ProseMirrorNo
 }
 
 function createDecorations(
-  state: EditorState,
+  doc: ProseMirrorNode,
   marks: Mark[],
   activeMarkId: string | null,
-  composeAnchorRange: MarkRange | null
+  composeAnchorRange: MarkRange | null,
+  suggestionDisplayMode: SuggestionDisplayMode
 ): DecorationSet {
   const decorations: Decoration[] = [];
-  const resolved = resolveMarks(state.doc, marks);
+  const resolved = marks.every(hasResolvedRanges)
+    ? marks
+    : resolveMarks(doc, marks);
   const primaryReplaceMarkIds = new Set<string>();
   const overlappingReplaceGroups = new Map<string, Mark[]>();
+  const now = Date.now();
 
-  const safeComposeRange = normalizeComposeAnchorRange(composeAnchorRange, state.doc);
+  const safeComposeRange = normalizeComposeAnchorRange(composeAnchorRange, doc);
   if (safeComposeRange) {
     decorations.push(
       Decoration.inline(safeComposeRange.from, safeComposeRange.to, {
         class: 'mark-compose-anchor',
+        style: STYLES.compose_anchor,
+      }, {
+        markId: null,
+        markKind: 'compose-anchor',
+        renderMode: suggestionDisplayMode,
+        decorationRole: 'compose-anchor',
+        className: 'mark-compose-anchor',
         style: STYLES.compose_anchor,
       })
     );
@@ -3101,11 +3497,20 @@ function createDecorations(
     const ranges = mark.resolvedRanges ?? (mark.resolvedRange ? [mark.resolvedRange] : []);
     if (ranges.length === 0) continue;
     const isActive = mark.id === activeMarkId;
+    const firstRangeFrom = ranges[0]?.from ?? 0;
+    const lastRangeTo = ranges[ranges.length - 1]?.to ?? firstRangeFrom;
+    const liveRangeText = ranges.map((range) => getTextForRange(doc, range)).join('');
 
     let style = '';
     let cssClass = '';
 
     let replacementContent: string | null = null;
+    let hideSourceContent = false;
+    let widgetPos: number | null = null;
+    let widgetClassName = '';
+    let widgetStyle = '';
+    let widgetText = '';
+    let widgetRole: 'replace-preview' | 'replace-original' | 'hidden-change-indicator' | null = null;
 
     switch (mark.kind) {
       case 'authored':
@@ -3124,8 +3529,37 @@ function createDecorations(
       case 'insert': {
         const data = mark.data as InsertData;
         if (data?.status === 'pending') {
-          style = STYLES.insert;
-          cssClass = 'mark-insert';
+          const anchorBasedInsert = isAnchorBasedInsertSuggestion(mark, liveRangeText);
+          if (anchorBasedInsert) {
+            widgetPos = lastRangeTo;
+            widgetText = data.content ?? '';
+            if (suggestionDisplayMode === 'simple') {
+              widgetClassName = 'mark-insert mark-simple mark-accepted-view';
+              widgetStyle = STYLES.insert_simple;
+              widgetRole = 'replace-preview';
+            } else if (suggestionDisplayMode === 'no-markup') {
+              widgetClassName = 'mark-insert mark-no-markup mark-accepted-view';
+              widgetStyle = '';
+              widgetRole = 'replace-preview';
+            } else if (suggestionDisplayMode === 'all') {
+              widgetClassName = 'mark-insert';
+              widgetStyle = STYLES.insert;
+              widgetRole = 'replace-preview';
+            }
+          } else if (suggestionDisplayMode === 'simple') {
+            style = STYLES.insert_simple;
+            cssClass = 'mark-insert mark-simple mark-accepted-view';
+          } else if (suggestionDisplayMode === 'no-markup') {
+            style = '';
+            cssClass = 'mark-insert mark-no-markup mark-accepted-view';
+          } else if (suggestionDisplayMode === 'original') {
+            style = STYLES.hidden_source;
+            cssClass = 'mark-insert mark-original mark-hidden-source';
+            hideSourceContent = true;
+          } else {
+            style = STYLES.insert;
+            cssClass = 'mark-insert';
+          }
         }
         break;
       }
@@ -3133,8 +3567,25 @@ function createDecorations(
       case 'delete': {
         const data = mark.data as DeleteData;
         if (data?.status === 'pending') {
-          style = STYLES.delete;
-          cssClass = 'mark-delete';
+          if (suggestionDisplayMode === 'simple') {
+            style = STYLES.hidden_source;
+            cssClass = 'mark-delete mark-simple mark-hidden-source';
+            hideSourceContent = true;
+            widgetPos = firstRangeFrom;
+            widgetClassName = 'mark-simple-indicator mark-simple-delete-indicator';
+            widgetStyle = STYLES.change_indicator;
+            widgetRole = 'hidden-change-indicator';
+          } else if (suggestionDisplayMode === 'no-markup') {
+            style = STYLES.hidden_source;
+            cssClass = 'mark-delete mark-no-markup mark-hidden-source';
+            hideSourceContent = true;
+          } else if (suggestionDisplayMode === 'original') {
+            style = '';
+            cssClass = 'mark-delete mark-original mark-original-view';
+          } else {
+            style = STYLES.delete;
+            cssClass = 'mark-delete';
+          }
         }
         break;
       }
@@ -3145,36 +3596,97 @@ function createDecorations(
           if (!primaryReplaceMarkIds.has(mark.id)) {
             continue;
           }
-          style = STYLES.delete;
-          cssClass = 'mark-replace mark-delete';
           replacementContent = data.content ?? '';
+          const originalQuote = typeof data.originalQuote === 'string' && data.originalQuote.trim().length > 0
+            ? data.originalQuote
+            : null;
+          if (originalQuote) {
+            if (suggestionDisplayMode === 'simple') {
+              style = STYLES.insert_simple;
+              cssClass = 'mark-replace mark-insert mark-simple mark-simple-replace-current mark-accepted-view';
+              widgetPos = firstRangeFrom;
+              widgetClassName = 'mark-simple-indicator mark-simple-delete-indicator';
+              widgetStyle = STYLES.change_indicator;
+              widgetRole = 'hidden-change-indicator';
+            } else if (suggestionDisplayMode === 'no-markup') {
+              style = '';
+              cssClass = 'mark-replace mark-insert mark-no-markup mark-accepted-view';
+            } else if (suggestionDisplayMode === 'original') {
+              style = STYLES.hidden_source;
+              cssClass = 'mark-replace mark-original mark-hidden-source';
+              hideSourceContent = true;
+              widgetPos = firstRangeFrom;
+              widgetClassName = 'mark-replace-original mark-original-preview';
+              widgetStyle = '';
+              widgetText = originalQuote;
+              widgetRole = 'replace-original';
+            } else {
+              style = STYLES.insert;
+              cssClass = 'mark-replace mark-insert';
+              widgetPos = ranges.reduce((minPos, range) => Math.min(minPos, range.from), ranges[0]?.from ?? 0);
+              widgetClassName = 'mark-replace-delete mark-delete';
+              widgetStyle = STYLES.delete;
+              widgetText = originalQuote;
+              widgetRole = 'replace-original';
+            }
+          } else if (suggestionDisplayMode === 'simple') {
+            style = STYLES.hidden_source;
+            cssClass = 'mark-replace mark-delete mark-simple mark-hidden-source';
+            hideSourceContent = true;
+            widgetPos = firstRangeFrom;
+            widgetClassName = 'mark-replace-insert mark-simple mark-accepted-view mark-simple-replace';
+            widgetStyle = STYLES.insert_simple;
+            widgetText = replacementContent;
+            widgetRole = 'replace-preview';
+          } else if (suggestionDisplayMode === 'no-markup') {
+            style = STYLES.hidden_source;
+            cssClass = 'mark-replace mark-no-markup mark-hidden-source';
+            hideSourceContent = true;
+            widgetPos = firstRangeFrom;
+            widgetClassName = 'mark-replace-insert mark-no-markup mark-accepted-view';
+            widgetStyle = '';
+            widgetText = replacementContent;
+            widgetRole = 'replace-preview';
+          } else if (suggestionDisplayMode === 'original') {
+            style = '';
+            cssClass = 'mark-replace mark-original mark-original-view';
+          } else {
+            style = STYLES.delete;
+            cssClass = 'mark-replace mark-delete';
+          }
         }
         break;
       }
     }
 
-    if (style) {
-      // Add glow class for newly-created marks (within last 2 seconds)
-      const GLOW_DURATION_MS = 2000;
-      const markAge = Date.now() - new Date(mark.at).getTime();
-      const glowClass = markAge < GLOW_DURATION_MS ? 'proof-mark-new' : '';
+    const GLOW_DURATION_MS = 2000;
+    const markAge = now - new Date(mark.at).getTime();
+    const glowClass = markAge < GLOW_DURATION_MS ? 'proof-mark-new' : '';
 
+    if (style || cssClass || hideSourceContent) {
       for (const { from, to } of ranges) {
+        const className = [cssClass, glowClass].filter(Boolean).join(' ');
         decorations.push(
           Decoration.inline(from, to, {
-            class: [cssClass, glowClass].filter(Boolean).join(' '),
+            class: className,
             style,
             'data-mark-id': mark.id,
             'data-mark-kind': mark.kind,
+          }, {
+            markId: mark.id,
+            markKind: mark.kind,
+            renderMode: suggestionDisplayMode,
+            decorationRole: hideSourceContent ? 'hidden-source' : 'inline-mark',
+            className,
+            style,
           })
         );
       }
 
-      if (mark.kind === 'replace' && replacementContent !== null) {
-        const widgetPos = ranges.reduce((maxPos, range) => Math.max(maxPos, range.to), 0);
+      if (mark.kind === 'replace' && replacementContent !== null && suggestionDisplayMode === 'all') {
         decorations.push(
           Decoration.widget(
-            widgetPos,
+            lastRangeTo,
             () => {
               const span = document.createElement('span');
               span.className = ['mark-replace-insert', 'mark-insert', glowClass].filter(Boolean).join(' ');
@@ -3184,14 +3696,69 @@ function createDecorations(
               span.textContent = replacementContent ?? '';
               return span;
             },
-            { side: 1, key: `replace-insert-${mark.id}` }
+            {
+              side: 1,
+              key: `replace-insert-${mark.id}`,
+              markId: mark.id,
+              markKind: mark.kind,
+              renderMode: suggestionDisplayMode,
+              decorationRole: 'replace-preview',
+              className: ['mark-replace-insert', 'mark-insert', glowClass].filter(Boolean).join(' '),
+              style: STYLES.insert,
+              text: replacementContent ?? '',
+            }
           )
         );
       }
     }
+
+    if (widgetRole && widgetPos !== null) {
+      decorations.push(
+        Decoration.widget(
+          widgetPos,
+          () => {
+            const span = document.createElement('span');
+            span.className = [widgetClassName, glowClass].filter(Boolean).join(' ');
+            span.style.cssText = widgetStyle;
+            span.setAttribute('data-mark-id', mark.id);
+            span.setAttribute('data-mark-kind', mark.kind);
+            if (widgetRole === 'hidden-change-indicator') {
+              span.setAttribute('title', 'Hidden deletion');
+              span.setAttribute('aria-label', 'Pending deletion');
+            } else {
+              span.textContent = widgetText;
+            }
+            return span;
+          },
+          {
+            side: -1,
+            key: `${widgetRole}-${mark.id}`,
+            markId: mark.id,
+            markKind: mark.kind,
+            renderMode: suggestionDisplayMode,
+            decorationRole: widgetRole,
+            className: [widgetClassName, glowClass].filter(Boolean).join(' '),
+            style: widgetStyle,
+            text: widgetRole === 'replace-preview' || widgetRole === 'replace-original' ? widgetText : '',
+          }
+        )
+      );
+    }
   }
 
-  return DecorationSet.create(state.doc, decorations);
+  return DecorationSet.create(doc, decorations);
+}
+
+function buildPresentationState(
+  doc: ProseMirrorNode,
+  metadata: Record<string, StoredMark>,
+  activeMarkId: string | null,
+  composeAnchorRange: MarkRange | null,
+  suggestionDisplayMode: SuggestionDisplayMode
+): Pick<MarksPluginState, 'marks' | 'decorations'> {
+  const marks = buildAnchorMarks(doc, metadata);
+  const decorations = createDecorations(doc, marks, activeMarkId, composeAnchorRange, suggestionDisplayMode);
+  return { marks, decorations };
 }
 
 // ============================================================================
@@ -3209,13 +3776,19 @@ function injectGlowStyles(): void {
   style.textContent = `
     /* Glow animation for newly-created suggestion marks */
     @keyframes proof-change-glow {
-      0% { box-shadow: 0 0 8px rgba(34, 197, 94, 0.6); background-color: rgba(34, 197, 94, 0.4); }
-      100% { box-shadow: none; background-color: rgba(34, 197, 94, 0.25); }
+      0% { text-shadow: 0 0 8px rgba(34, 197, 94, 0.45); }
+      100% { text-shadow: none; }
     }
     .proof-mark-new { animation: proof-change-glow 2s ease-out forwards; }
 
     /* Delete glow */
     .mark-delete.proof-mark-new {
+      animation-name: proof-delete-glow;
+    }
+    .mark-hidden-source.proof-mark-new {
+      animation: none;
+    }
+    .mark-simple-indicator.proof-mark-new {
       animation-name: proof-delete-glow;
     }
     @keyframes proof-delete-glow {
@@ -3245,6 +3818,7 @@ function injectGlowStyles(): void {
     }
     .proof-share-welcome-toast {
       max-width: min(420px, calc(100vw - 24px));
+      pointer-events: none;
     }
     @media (prefers-color-scheme: dark) {
       .proof-external-change-toast {
@@ -3465,32 +4039,48 @@ export const marksPlugin = $prose(() => {
 
     state: {
       init(_config, state): MarksPluginState {
+        const metadata = normalizeMetadata({}, state.doc);
+        const presentation = buildPresentationState(state.doc, metadata, null, null, 'simple');
         return {
-          metadata: normalizeMetadata({}, state.doc),
+          metadata,
           activeMarkId: null,
           composeAnchorRange: null,
+          suggestionDisplayMode: 'simple',
+          ...presentation,
         };
       },
 
       apply(tr, value): MarksPluginState {
         const meta = tr.getMeta(marksPluginKey);
         let nextState = value;
+        let shouldRebuildMarks = false;
+        let shouldRefreshDecorations = false;
 
         if (meta) {
           switch (meta.type) {
             case 'SET_METADATA':
               nextState = { ...value, metadata: normalizeMetadata(meta.metadata, tr.doc) };
+              shouldRebuildMarks = true;
+              shouldRefreshDecorations = true;
               break;
             case 'SET_ACTIVE':
               nextState = { ...value, activeMarkId: meta.markId };
+              shouldRefreshDecorations = true;
               break;
             case 'SET_COMPOSE_ANCHOR':
               nextState = { ...value, composeAnchorRange: normalizeComposeAnchorRange(meta.range ?? null, tr.doc) };
+              shouldRefreshDecorations = true;
+              break;
+            case 'SET_SUGGESTION_DISPLAY_MODE':
+              nextState = { ...value, suggestionDisplayMode: normalizeSuggestionDisplayMode(meta.mode) };
+              shouldRefreshDecorations = true;
               break;
           }
         }
 
         if (tr.docChanged) {
+          shouldRebuildMarks = true;
+          shouldRefreshDecorations = true;
           const currentComposeRange = nextState.composeAnchorRange ?? null;
           const mappedComposeRange = nextState.composeAnchorRange
             ? normalizeComposeAnchorRange({
@@ -3512,6 +4102,28 @@ export const marksPlugin = $prose(() => {
           }
         }
 
+        if (shouldRebuildMarks) {
+          const presentation = buildPresentationState(
+            tr.doc,
+            nextState.metadata,
+            nextState.activeMarkId,
+            nextState.composeAnchorRange ?? null,
+            nextState.suggestionDisplayMode,
+          );
+          nextState = { ...nextState, ...presentation };
+        } else if (shouldRefreshDecorations) {
+          nextState = {
+            ...nextState,
+            decorations: createDecorations(
+              tr.doc,
+              nextState.marks,
+              nextState.activeMarkId,
+              nextState.composeAnchorRange ?? null,
+              nextState.suggestionDisplayMode,
+            ),
+          };
+        }
+
         return nextState;
       },
     },
@@ -3520,16 +4132,66 @@ export const marksPlugin = $prose(() => {
       decorations(state) {
         const pluginState = marksPluginKey.getState(state);
         if (!pluginState) return DecorationSet.empty;
-        return createDecorations(
-          state,
-          collectMarks(state),
-          pluginState.activeMarkId,
-          pluginState.composeAnchorRange ?? null
-        );
+        return pluginState.decorations ?? DecorationSet.empty;
       },
     },
   });
 });
+
+export function getSuggestionDisplayMode(state: EditorState): SuggestionDisplayMode {
+  const pluginState = marksPluginKey.getState(state) as MarksPluginState | undefined;
+  return normalizeSuggestionDisplayMode(pluginState?.suggestionDisplayMode);
+}
+
+export function setSuggestionDisplayMode(view: EditorView, mode: SuggestionDisplayMode): SuggestionDisplayMode {
+  const nextMode = normalizeSuggestionDisplayMode(mode);
+  view.dispatch(
+    view.state.tr
+      .setMeta(marksPluginKey, { type: 'SET_SUGGESTION_DISPLAY_MODE', mode: nextMode })
+      .setMeta('addToHistory', false)
+  );
+  return nextMode;
+}
+
+export function toggleSuggestionDisplayMode(view: EditorView): SuggestionDisplayMode {
+  const nextMode = getSuggestionDisplayMode(view.state) === 'simple' ? 'all' : 'simple';
+  return setSuggestionDisplayMode(view, nextMode);
+}
+
+export function __debugDescribeDecorations(
+  state: EditorState,
+  marks: Mark[],
+  activeMarkId: string | null,
+  composeAnchorRange: MarkRange | null,
+  suggestionDisplayMode: SuggestionDisplayMode
+): Array<{
+  from: number;
+  to: number;
+  markId: string | null;
+  markKind: string | null;
+  renderMode: SuggestionDisplayMode;
+  decorationRole: string | null;
+  className: string;
+  style: string;
+  text: string;
+}> {
+  return createDecorations(state.doc, marks, activeMarkId, composeAnchorRange, suggestionDisplayMode)
+    .find()
+    .map((decoration) => {
+      const spec = decoration.spec as Record<string, unknown> | undefined;
+      return {
+        from: decoration.from,
+        to: decoration.to,
+        markId: typeof spec?.markId === 'string' ? spec.markId : null,
+        markKind: typeof spec?.markKind === 'string' ? spec.markKind : null,
+        renderMode: normalizeSuggestionDisplayMode(spec?.renderMode),
+        decorationRole: typeof spec?.decorationRole === 'string' ? spec.decorationRole : null,
+        className: typeof spec?.className === 'string' ? spec.className : '',
+        style: typeof spec?.style === 'string' ? spec.style : '',
+        text: typeof spec?.text === 'string' ? spec.text : '',
+      };
+    });
+}
 
 // ============================================================================
 // Export

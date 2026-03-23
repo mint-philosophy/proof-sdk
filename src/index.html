@@ -41,6 +41,7 @@
       --font-size: 16px;
       --line-height: 1.6;
       --content-max-width: none;
+      --proof-review-gutter-width: 0px;
       --heading-weight: bold;
       --heading-align: left;
       --text-align: left;
@@ -107,15 +108,16 @@
 
     #editor {
       background: var(--bg-color);
-      padding: 60px 40px 40px;
+      padding: 60px calc(40px + var(--proof-review-gutter-width)) 40px 40px;
       padding-left: calc(var(--provenance-bar-width) + 20px);
       min-height: 100vh;
       outline: none;
+      transition: padding-right 160ms ease;
     }
 
     /* Share mode: comfortable reading/writing width */
     body[data-share-mode="true"] #editor {
-      padding: 80px 80px 40px;
+      padding: 80px calc(80px + var(--proof-review-gutter-width)) 40px 80px;
       padding-left: calc(var(--provenance-bar-width) + 80px);
     }
 
@@ -202,6 +204,18 @@
       color: #666;
     }
 
+    .ProseMirror[data-track-changes-view="simple"] span[data-proof="suggestion"] {
+      background: transparent !important;
+      border-bottom: none !important;
+      color: inherit !important;
+      text-decoration: none !important;
+    }
+
+    .ProseMirror[data-track-changes-view="simple"] .mark-replace-insert.mark-simple {
+      background: transparent !important;
+      border-bottom: none !important;
+    }
+
     .mark-replace-insert {
       background-color: rgba(34, 197, 94, 0.25);
       border-bottom: 2px solid #22C55E;
@@ -224,6 +238,49 @@
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
       font-size: 12px;
       line-height: 1.4;
+    }
+
+    .mark-popover.mark-popover-side-panel {
+      width: min(320px, calc(100vw - 32px));
+      max-width: min(320px, calc(100vw - 32px));
+      border-radius: 16px;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.98);
+      color: #111827;
+      border: 1px solid rgba(15, 23, 42, 0.10);
+      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
+    }
+
+    .mark-popover.mark-popover-side-panel .mark-popover-header {
+      color: #0f172a;
+      font-size: 13px;
+      margin-bottom: 10px;
+    }
+
+    .mark-popover.mark-popover-side-panel .mark-popover-body {
+      color: #111827;
+    }
+
+    .mark-popover.mark-popover-side-panel .mark-popover-actions {
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    .mark-popover.mark-popover-side-panel .mark-popover-actions button {
+      min-height: 38px;
+      padding: 8px 12px;
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      background: #eef2f7;
+      color: #111827;
+    }
+
+    .mark-popover.mark-popover-side-panel .mark-popover-actions button:hover {
+      background: #e2e8f0;
+    }
+
+    .mark-popover.mark-popover-side-panel .mark-popover-actions button:disabled {
+      opacity: 0.45;
+      cursor: default;
     }
 
     .mark-popover-backdrop {

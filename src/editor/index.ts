@@ -62,6 +62,10 @@ import {
   wrapTransactionForSuggestions,
 } from './plugins/suggestions';
 import {
+  getYjsTransactionOriginInfo,
+  isYjsChangeOriginTransaction as isRemoteYjsChangeOriginTransaction,
+} from './plugins/transaction-origins';
+import {
   markPopoverPlugin,
   openCommentComposer,
   captureCommentPopoverDraft,
@@ -129,12 +133,15 @@ import {
   type MarkRange,
   type CommentData,
   type StoredMark,
+  buildCanonicalShareMarkMetadata,
   mergePendingServerMarks,
   getMarksByKind,
   getPendingSuggestions,
   getUnresolvedComments as getUnresolvedMarkComments,
   findMark,
   resolveMarks,
+  getSuggestionDisplayMode,
+  setSuggestionDisplayMode,
 } from './plugins/marks';
 import {
   executeBatch as executeBatchImpl,
@@ -822,6 +829,8 @@ export interface ProofEditor {
   markModifySuggestion(markId: string, content: string): boolean;
   markAccept(markId: string): boolean;
   markReject(markId: string): boolean;
+  markAcceptPersisted(markId: string): Promise<boolean>;
+  markRejectPersisted(markId: string): Promise<boolean>;
   markAcceptAll(): number;
   markRejectAll(): number;
 
@@ -1032,6 +1041,7 @@ class ProofEditorImpl implements ProofEditor {
   private collabUnhealthySinceMs: number | null = null;
   private collabLastRecoveryAttemptMs: number = 0;
   private pendingCollabTemplateMarkdown: string | null = null;
+  private pendingCollabReconnectTemplateOverride: string | null = null;
   // During session refresh we defer rebinding Milkdown collab until the new provider is synced.
   // This prevents transient empty-doc renders while reconnecting to a fresh Yjs room.
   private pendingCollabRebindOnSync: boolean = false;
@@ -1044,6 +1054,7 @@ class ProofEditorImpl implements ProofEditor {
   private pendingProjectionPublish: boolean = false;
   private initialMarksSynced: boolean = false;
   private lastReceivedServerMarks: Record<string, StoredMark> = {};
+  private shareReviewMutationQueue: Promise<void> = Promise.resolve();
   private collabTemplateSeedClaimId: string | null = null;
   private collabTemplateClaimCheckTimer: ReturnType<typeof setTimeout> | null = null;
   private collabTemplateRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1064,6 +1075,8 @@ class ProofEditorImpl implements ProofEditor {
   private shareWelcomeToast: HTMLElement | null = null;
   private shareDocTitle: string = 'Untitled';
   private shareBannerTitleEl: HTMLElement | null = null;
+  private shareBannerEditModeButtonEl: HTMLButtonElement | null = null;
+  private shareBannerTrackChangesButtonEl: HTMLButtonElement | null = null;
   private shareBannerAvatarsEl: HTMLElement | null = null;
   private shareBannerAgentSlotEl: HTMLElement | null = null;
   private shareBannerSyncDotEl: HTMLElement | null = null;
@@ -1080,6 +1093,7 @@ class ProofEditorImpl implements ProofEditor {
   private shareLastForcedCollabEventId: number = 0;
   private shareDocumentUpdatedTimer: ReturnType<typeof setTimeout> | null = null;
   private shareMarksRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private shareMarksFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingShareMarksRefresh: boolean = false;
   private pendingCommentDraftRestoreTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCommentDraftSnapshot: CommentPopoverDraftSnapshot | null = null;
@@ -1109,6 +1123,7 @@ class ProofEditorImpl implements ProofEditor {
   private cleanupNavigation: (() => void) | null = null;
   private lastEditorInputActivitySentAt: number = 0;
   private lastLocalTypingAt: number = 0;
+  private pendingDomSuggestionSelection: MarkRange | null = null;
   private lifecycleHandlersInstalled: boolean = false;
   private readonly webHaptics = new WebHaptics();
   private readonly collabTemplateClaimStaleMs: number = 3_000;
@@ -1251,6 +1266,7 @@ class ProofEditorImpl implements ProofEditor {
 
     const view = this.editor.ctx.get(editorViewCtx);
     (window as any).__editorView = view;
+    view.dom.dataset.trackChangesView = 'simple';
     this.updateEditableState(view);
     this.cleanupNavigation = initAgentNavigation(view);
 
@@ -2429,15 +2445,20 @@ class ProofEditorImpl implements ProofEditor {
           reconnectTemplate = this.normalizeMarkdownForCollab(this.lastMarkdown);
         }
       } else {
-        try {
-          const latest = await shareClient.fetchDocument();
-          if (!this.isShareRequestError(latest) && latest && typeof latest.markdown === 'string' && latest.markdown.trim().length > 0) {
-            reconnectTemplate = this.normalizeMarkdownForCollab(latest.markdown);
+        if (this.pendingCollabReconnectTemplateOverride && this.pendingCollabReconnectTemplateOverride.trim().length > 0) {
+          reconnectTemplate = this.pendingCollabReconnectTemplateOverride;
+        } else {
+          try {
+            const latest = await shareClient.fetchDocument();
+            if (!this.isShareRequestError(latest) && latest && typeof latest.markdown === 'string' && latest.markdown.trim().length > 0) {
+              reconnectTemplate = this.normalizeMarkdownForCollab(latest.markdown);
+            }
+          } catch {
+            // best-effort; reconnect against the live room without replaying stale local projection.
           }
-        } catch {
-          // best-effort; reconnect against the live room without replaying stale local projection.
         }
       }
+      this.pendingCollabReconnectTemplateOverride = null;
       if (!this.shouldAllowCollabTemplateSeed(refreshed.session)) {
         reconnectTemplate = null;
       }
@@ -2517,6 +2538,7 @@ class ProofEditorImpl implements ProofEditor {
     });
     this.updateEditableState();
     this.updateShareBannerTitleDisplay();
+    this.updateShareBannerTrackChangesDisplay();
   }
 
   private ensureShareWebSocketConnection(): void {
@@ -3026,9 +3048,11 @@ class ProofEditorImpl implements ProofEditor {
       }
       #share-banner .share-pill-status-inline .status-label {
         color:#6b7280;
+        display:inline-block;
         font-size:11px;
         font-weight:500;
         line-height:1;
+        min-width:9ch;
       }
       #share-banner .share-pill-status-sep {
         width:1px;
@@ -3383,11 +3407,94 @@ class ProofEditorImpl implements ProofEditor {
     this.shareBannerSyncLabelEl.style.display = this.shouldShowStatusText(statusText) ? '' : 'none';
   }
 
+  private canToggleTrackChanges(): boolean {
+    return !this.isReadOnly
+      && this.reviewLockCount === 0
+      && (!this.isShareMode || this.shareAllowLocalEdits);
+  }
+
+  private updateShareBannerTrackChangesDisplay(): void {
+    const editButton = this.shareBannerEditModeButtonEl;
+    const trackChangesButton = this.shareBannerTrackChangesButtonEl;
+    if (!editButton || !trackChangesButton) return;
+
+    const enabled = this.isSuggestionsEnabled();
+    const canToggle = this.canToggleTrackChanges();
+    const container = editButton.parentElement as HTMLElement | null;
+    if (container) {
+      container.style.display = canToggle ? 'inline-flex' : 'none';
+    }
+
+    const applyState = (button: HTMLButtonElement, active: boolean, title: string) => {
+      button.disabled = !canToggle || active;
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      button.title = canToggle ? title : 'Track changes is currently unavailable';
+      button.style.background = active ? '#111827' : 'transparent';
+      button.style.color = active ? '#fff' : '#4b5563';
+      button.style.boxShadow = active ? '0 1px 2px rgba(17,24,39,0.16)' : 'none';
+      button.style.opacity = canToggle ? '1' : '0.5';
+      button.style.cursor = !canToggle || active ? 'default' : 'pointer';
+    };
+
+    applyState(editButton, !enabled, 'Make direct edits (Cmd/Ctrl+Shift+E)');
+    applyState(trackChangesButton, enabled, 'Record edits as tracked changes (Cmd/Ctrl+Shift+E)');
+  }
+
+  private createTrackChangesToggle(): HTMLElement {
+    const container = document.createElement('div');
+    container.className = 'share-pill-track-toggle';
+    container.style.cssText = `
+      display:inline-flex;align-items:center;gap:4px;padding:4px;border-radius:999px;
+      background:rgba(17,24,39,0.06);flex-shrink:0;
+    `;
+
+    const makeSegment = (label: string, onSelect: () => void): HTMLButtonElement => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'share-pill-track-btn';
+      button.textContent = label;
+      button.style.cssText = `
+        min-height:40px;border:none;border-radius:999px;padding:0 12px;background:transparent;
+        color:#4b5563;font-size:12px;font-weight:600;font-family:inherit;white-space:nowrap;
+        transition:background 0.15s,color 0.15s,box-shadow 0.15s;cursor:pointer;
+      `;
+      button.onmouseenter = () => {
+        if (button.disabled || button.getAttribute('aria-pressed') === 'true') return;
+        button.style.background = 'rgba(17,24,39,0.08)';
+      };
+      button.onmouseleave = () => {
+        if (button.getAttribute('aria-pressed') === 'true') return;
+        button.style.background = 'transparent';
+      };
+      button.onclick = () => {
+        if (button.disabled) return;
+        this.triggerHaptic('selection');
+        onSelect();
+      };
+      return button;
+    };
+
+    const editButton = makeSegment('Edit', () => {
+      this.disableSuggestions();
+    });
+    const trackChangesButton = makeSegment('Track Changes', () => {
+      this.enableSuggestions();
+    });
+
+    this.shareBannerEditModeButtonEl = editButton;
+    this.shareBannerTrackChangesButtonEl = trackChangesButton;
+    container.append(editButton, trackChangesButton);
+    this.updateShareBannerTrackChangesDisplay();
+    return container;
+  }
+
   private renderShareBannerContent(banner: HTMLElement, otherViewerCount: number): void {
     this.ensureShareBannerResponsiveCSS();
     this.shareOtherViewerCount = otherViewerCount;
     if (
       this.shareBannerTitleEl
+      && this.shareBannerEditModeButtonEl
+      && this.shareBannerTrackChangesButtonEl
       && this.shareBannerAvatarsEl
       && this.shareBannerAgentSlotEl
       && this.shareBannerSyncDotEl
@@ -3398,6 +3505,7 @@ class ProofEditorImpl implements ProofEditor {
       this.updateShareBannerPresenceDisplay();
       this.updateShareBannerAgentControlDisplay();
       this.updateShareBannerSyncDisplay();
+      this.updateShareBannerTrackChangesDisplay();
       this.scheduleBannerLayoutUpdate();
       return;
     }
@@ -3447,9 +3555,10 @@ class ProofEditorImpl implements ProofEditor {
     syncStatusInline.append(syncDot, syncLabel);
     this.updateShareBannerSyncDisplay();
 
+    const trackChangesToggle = this.createTrackChangesToggle();
     const shareBtn = this.createShareMenuButton();
 
-    banner.replaceChildren(wordmark, separator, title, syncStatusSep, syncStatusInline, avatars, agentSlot, shareBtn);
+    banner.replaceChildren(wordmark, separator, title, syncStatusSep, syncStatusInline, trackChangesToggle, avatars, agentSlot, shareBtn);
     this.scheduleBannerLayoutUpdate();
   }
 
@@ -4645,6 +4754,8 @@ class ProofEditorImpl implements ProofEditor {
     this.closeAgentMenu();
     this.shareBannerTitleEditing = false;
     this.shareBannerTitleEl = null;
+    this.shareBannerEditModeButtonEl = null;
+    this.shareBannerTrackChangesButtonEl = null;
     this.shareBannerAvatarsEl = null;
     this.shareBannerAgentSlotEl = null;
     this.shareBannerSyncDotEl = null;
@@ -4764,15 +4875,32 @@ class ProofEditorImpl implements ProofEditor {
     });
   }
 
+  private scheduleShareMarksFlush(): void {
+    if (!this.isShareMode || this.suppressMarksSync) return;
+    if (this.shareMarksFlushTimer !== null) return;
+
+    // Let y-prosemirror publish the local content change into the Yjs fragment
+    // before we send mark metadata back through the share runtime.
+    this.shareMarksFlushTimer = setTimeout(() => {
+      this.shareMarksFlushTimer = null;
+      this.flushShareMarks();
+    }, 0);
+  }
+
   private flushShareMarks(_options?: { keepalive?: boolean; persistContent?: boolean }): void {
     if (!this.isShareMode || !this.editor || this.suppressMarksSync) return;
+    if (this.shareMarksFlushTimer !== null) {
+      clearTimeout(this.shareMarksFlushTimer);
+      this.shareMarksFlushTimer = null;
+    }
     if (!this.initialMarksSynced) return;
     this.editor.action((ctx) => {
       try {
         const view = ctx.get(editorViewCtx);
         const localMetadata = getMarkMetadataWithQuotes(view.state);
-        const metadata = mergePendingServerMarks(localMetadata, this.lastReceivedServerMarks);
-        this.lastReceivedServerMarks = { ...metadata };
+        const liveMetadata = mergePendingServerMarks(localMetadata, this.lastReceivedServerMarks);
+        const persistedMetadata = buildCanonicalShareMarkMetadata(view.state, liveMetadata);
+        this.lastReceivedServerMarks = { ...persistedMetadata };
         this.initialMarksSynced = true;
         const serializer = ctx.get(serializerCtx);
         const markdown = this.normalizeMarkdownForRuntime(serializer(view.state.doc));
@@ -4800,7 +4928,7 @@ class ProofEditorImpl implements ProofEditor {
         });
         if (this.collabEnabled && this.collabCanEdit) {
           this.publishProjectionMarkdown(view, markdown, 'marks-flush');
-          collabClient.setMarksMetadata(metadata);
+          collabClient.setMarksMetadata(liveMetadata);
         }
         if (shouldPersistContent) {
           const allowLocalKeepaliveBaseToken = shouldUseLocalKeepaliveBaseToken({
@@ -4812,7 +4940,7 @@ class ProofEditorImpl implements ProofEditor {
             collabUnsyncedChanges: this.collabUnsyncedChanges,
             collabPendingLocalUpdates: this.collabPendingLocalUpdates,
           });
-          void shareClient.pushUpdate(markdown, metadata, getCurrentActor(), {
+          void shareClient.pushUpdate(markdown, persistedMetadata, getCurrentActor(), {
             keepalive: Boolean(_options?.keepalive),
             allowLocalKeepaliveBaseToken,
           });
@@ -4822,7 +4950,7 @@ class ProofEditorImpl implements ProofEditor {
           return;
         }
         if (!this.collabEnabled || !this.collabCanEdit || LEGACY_REST_FALLBACK) {
-          void shareClient.pushMarks(metadata, getCurrentActor(), { keepalive: Boolean(_options?.keepalive) });
+          void shareClient.pushMarks(persistedMetadata, getCurrentActor(), { keepalive: Boolean(_options?.keepalive) });
         }
       } catch (error) {
         console.error('[flushShareMarks] Failed to push marks via collab runtime:', error);
@@ -5103,6 +5231,10 @@ class ProofEditorImpl implements ProofEditor {
 
       const reportInputActivity = () => {
         this.reportEditorInputActivity('input');
+        const domSelection = this.getDomSelectionRange(view);
+        this.pendingDomSuggestionSelection = domSelection && domSelection.from < domSelection.to
+          ? domSelection
+          : null;
       };
 
       dom.addEventListener('keyup', reportKeyboardActivity);
@@ -5127,20 +5259,7 @@ class ProofEditorImpl implements ProofEditor {
   }
 
   private isYjsChangeOriginTransaction(transaction: any): boolean {
-    const ySyncMeta = transaction?.getMeta?.(ySyncPluginKey) as { isChangeOrigin?: boolean } | undefined;
-    if (ySyncMeta?.isChangeOrigin === true) return true;
-
-    const rawMeta = (transaction as { meta?: Record<string, unknown> } | null)?.meta;
-    if (!rawMeta || typeof rawMeta !== 'object') return false;
-
-    for (const [key, value] of Object.entries(rawMeta)) {
-      if (!key.startsWith('y-sync')) continue;
-      if (value === true) return true;
-      if (value && typeof value === 'object' && (value as { isChangeOrigin?: boolean }).isChangeOrigin === true) {
-        return true;
-      }
-    }
-    return false;
+    return isRemoteYjsChangeOriginTransaction(transaction);
   }
 
   private stabilizeCursorAfterRemoteYjsTransaction(
@@ -5210,9 +5329,12 @@ class ProofEditorImpl implements ProofEditor {
         };
         const beforeSelectionFrom = view.state.selection.from;
         const beforeSelectionEmpty = view.state.selection.empty;
-        const isRemoteContentChange = Boolean(tr?.docChanged) && this.isYjsChangeOriginTransaction(tr);
+        const yjsOrigin = getYjsTransactionOriginInfo(tr);
+        const isRemoteContentChange = Boolean(tr?.docChanged) && yjsOrigin.isYjsOrigin;
         const isMarksOnlyChange = tr?.getMeta?.(marksPluginKey) !== undefined;
         const isDocumentLoad = tr?.getMeta?.('document-load') !== undefined;
+        const isSuggestionMetaChange = tr?.getMeta?.(suggestionsPluginKey) !== undefined;
+        const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;
         const isLocalContentChange = Boolean(tr?.docChanged)
           && !isRemoteContentChange
           && !isMarksOnlyChange
@@ -5232,8 +5354,13 @@ class ProofEditorImpl implements ProofEditor {
         }
 
         if (suggestionsEnabled && tr.docChanged) {
+          const clearPendingDomSuggestionSelection = () => {
+            this.pendingDomSuggestionSelection = null;
+          };
+
           // Don't intercept meta transactions (like enabling/disabling suggestions)
           if (tr.getMeta(suggestionsPluginKey) !== undefined) {
+            clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr);
             return;
           }
@@ -5241,32 +5368,45 @@ class ProofEditorImpl implements ProofEditor {
           // Don't intercept marks operations (accept/reject suggestions)
           // These are internal operations that should not be converted to suggestions
           if (tr.getMeta(marksPluginKey) !== undefined) {
+            clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr);
             return;
           }
 
           // Don't intercept document load transactions
           if (tr.getMeta('document-load') !== undefined) {
+            clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr);
             return;
           }
 
           // Don't intercept Yjs-origin collaborative transactions.
-          if (this.isYjsChangeOriginTransaction(tr)) {
+          if (yjsOrigin.isYjsOrigin) {
+            clearPendingDomSuggestionSelection();
             originalDispatch(tr);
             return;
           }
 
           // Don't intercept undo/redo transactions (from history plugin)
           if (tr.getMeta('history$') !== undefined || tr.getMeta('addToHistory') === false) {
+            clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr);
             return;
+          }
+
+          const domSelectionRange = this.pendingDomSuggestionSelection ?? this.getDomSelectionRange(view);
+          clearPendingDomSuggestionSelection();
+          if (domSelectionRange && domSelectionRange.from < domSelectionRange.to) {
+            tr.setMeta('proof-dom-selection-range', domSelectionRange);
           }
 
           // Wrap the transaction to convert edits to suggestions
           const wrappedTr = wrapTransactionForSuggestions(tr, view.state, true);
           dispatchWithRevision(wrappedTr);
         } else {
+          if (tr?.docChanged) {
+            this.pendingDomSuggestionSelection = null;
+          }
           dispatchWithRevision(tr);
         }
 
@@ -5281,6 +5421,32 @@ class ProofEditorImpl implements ProofEditor {
 
       console.log('[setupSuggestionsInterceptor] Suggestions interceptor installed');
     });
+  }
+
+  private getDomSelectionRange(view: EditorView): MarkRange | null {
+    const selection = document.getSelection();
+    if (!selection || selection.rangeCount === 0) return null;
+
+    const range = selection.getRangeAt(0);
+    const getElement = (node: Node | null): Element | null => {
+      if (!node) return null;
+      return node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+    };
+
+    const startElement = getElement(range.startContainer);
+    const endElement = getElement(range.endContainer);
+    if (!startElement || !endElement) return null;
+    if (!view.dom.contains(startElement) || !view.dom.contains(endElement)) return null;
+
+    try {
+      const startPos = view.posAtDOM(range.startContainer, range.startOffset);
+      const endPos = view.posAtDOM(range.endContainer, range.endOffset);
+      const from = Math.min(startPos, endPos);
+      const to = Math.max(startPos, endPos);
+      return from === to ? null : { from, to };
+    } catch {
+      return null;
+    }
   }
 
   private posToLineCol(doc: import('@milkdown/kit/prose/model').Node, pos: number): { line: number; col: number } {
@@ -5467,16 +5633,21 @@ class ProofEditorImpl implements ProofEditor {
       actionMetadata ?? getMarkMetadataWithQuotes(view.state),
       this.lastReceivedServerMarks,
     );
-    this.lastReceivedServerMarks = { ...metadata };
+    const persistedMetadata = this.isShareMode
+      ? buildCanonicalShareMarkMetadata(view.state, metadata)
+      : metadata;
+    this.lastReceivedServerMarks = { ...persistedMetadata };
     this.initialMarksSynced = true;
 
-    if (this.collabEnabled && this.collabCanEdit) {
-      collabClient.setMarksMetadata(metadata);
-    }
-
-    // In share mode, push marks-only updates immediately for reliability.
     if (this.isShareMode) {
-      this.flushShareMarks();
+      // During ordinary tracked typing, y-prosemirror already carries the content
+      // change into the live collab fragment. Replaying the whole editor state again
+      // from the marks callback can duplicate freshly typed suggestion content on the
+      // server. Let content flow through the existing collab binding, then flush mark
+      // metadata separately once the dispatch cycle has settled.
+      this.scheduleShareMarksFlush();
+    } else if (this.collabEnabled && this.collabCanEdit) {
+      collabClient.setMarksMetadata(metadata);
     }
 
     // Pass marks changes to agent integration for @proof detection
@@ -6477,9 +6648,14 @@ class ProofEditorImpl implements ProofEditor {
 
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
+      if (getSuggestionDisplayMode(view.state) === 'all') {
+        setSuggestionDisplayMode(view, 'simple');
+        view.dom.dataset.trackChangesView = 'simple';
+      }
       enableSuggestions(view);
       console.log('[enableSuggestions] Suggestions enabled');
     });
+    this.updateShareBannerTrackChangesDisplay();
   }
 
   /**
@@ -6496,6 +6672,7 @@ class ProofEditorImpl implements ProofEditor {
       disableSuggestions(view);
       console.log('[disableSuggestions] Suggestions disabled');
     });
+    this.updateShareBannerTrackChangesDisplay();
   }
 
   /**
@@ -6511,8 +6688,13 @@ class ProofEditorImpl implements ProofEditor {
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
       enabled = toggleSuggestions(view);
+      if (enabled && getSuggestionDisplayMode(view.state) === 'all') {
+        setSuggestionDisplayMode(view, 'simple');
+        view.dom.dataset.trackChangesView = 'simple';
+      }
       console.log('[toggleSuggestions] Suggestions:', enabled ? 'enabled' : 'disabled');
     });
+    this.updateShareBannerTrackChangesDisplay();
     return enabled;
   }
 
@@ -8474,6 +8656,96 @@ class ProofEditorImpl implements ProofEditor {
   /**
    * Accept a suggestion and apply the change
    */
+  private loadCanonicalShareDocument(markdown: string, marks: Record<string, StoredMark>): void {
+    this.lastReceivedServerMarks = { ...marks };
+    this.initialMarksSynced = true;
+    this.loadDocument(embedMarks(markdown, marks), {
+      allowShareContentMutation: true,
+      preserveHistory: true,
+    });
+  }
+
+  private async applyShareMutationDocumentResult(
+    result: {
+      markdown?: string;
+      marks?: Record<string, unknown> | null;
+      collab?: { status?: string; reason?: string };
+    },
+  ): Promise<boolean> {
+    const markdown = typeof result?.markdown === 'string' ? result.markdown : null;
+    const marks = (result?.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
+      ? result.marks as Record<string, StoredMark>
+      : {};
+    const collabStatus = typeof result?.collab?.status === 'string' ? result.collab.status : '';
+    if (markdown !== null && collabStatus === 'pending') {
+      this.pendingCollabReconnectTemplateOverride = this.normalizeMarkdownForCollab(markdown);
+      if (this.collabEnabled) {
+        this.collabConnectionStatus = 'connecting';
+        this.collabIsSynced = false;
+        this.disconnectCollabService();
+        collabClient.disconnect();
+      }
+    } else if (collabStatus !== 'pending') {
+      this.pendingCollabReconnectTemplateOverride = null;
+    }
+    if (markdown === null) {
+      return this.reloadCanonicalShareDocument();
+    }
+    this.loadCanonicalShareDocument(markdown, marks);
+    if (collabStatus === 'pending' && this.collabEnabled && this.activeCollabSession) {
+      void this.refreshCollabSessionAndReconnect(false);
+    }
+    return true;
+  }
+
+  private async reloadCanonicalShareDocument(): Promise<boolean> {
+    const doc = await shareClient.fetchDocument();
+    if (!doc) return false;
+    const markdown = typeof doc.markdown === 'string' ? doc.markdown : '';
+    const marks = (doc.marks && typeof doc.marks === 'object' && !Array.isArray(doc.marks))
+      ? doc.marks as Record<string, StoredMark>
+      : {};
+    this.loadCanonicalShareDocument(markdown, marks);
+    return true;
+  }
+
+  private async runSerializedShareReviewMutation<T>(run: () => Promise<T>): Promise<T> {
+    const previous = this.shareReviewMutationQueue;
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.shareReviewMutationQueue = previous
+      .catch(() => {})
+      .then(() => gate);
+    await previous.catch(() => {});
+    try {
+      return await run();
+    } finally {
+      release?.();
+    }
+  }
+
+  private async flushShareReviewMutationState(): Promise<void> {
+    if (!this.isShareMode || !this.editor || this.suppressMarksSync) return;
+    this.flushShareMarks({ persistContent: false });
+    if (!this.collabEnabled || !this.collabCanEdit) return;
+
+    const deadline = Date.now() + 750;
+    while (Date.now() < deadline) {
+      const synced = this.collabConnectionStatus === 'connected'
+        && this.collabIsSynced
+        && this.collabUnsyncedChanges === 0
+        && this.collabPendingLocalUpdates === 0;
+      if (synced) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 25);
+      });
+    }
+  }
+
   markAccept(markId: string): boolean {
     if (!this.editor) {
       console.warn('[markAccept] Editor not initialized');
@@ -8505,7 +8777,7 @@ class ProofEditorImpl implements ProofEditor {
             const innerView = innerCtx.get(editorViewCtx);
             applyRemoteMarks(innerView, serverMarks, { hydrateAnchors: this.collabCanEdit });
             const stats = getAuthorshipStats(innerView);
-            this.bridge.authorshipStatsUpdated(stats);
+            this.bridge?.authorshipStatsUpdated?.(stats);
           });
         }
         captureEvent('suggestion_accepted', { count: 1 });
@@ -8549,11 +8821,42 @@ class ProofEditorImpl implements ProofEditor {
       if (success) {
         captureEvent('suggestion_accepted', { count: 1 });
         const stats = getAuthorshipStats(view);
-        this.bridge.authorshipStatsUpdated(stats);
+        this.bridge?.authorshipStatsUpdated?.(stats);
       }
     });
 
     return success;
+  }
+
+  async markAcceptPersisted(markId: string): Promise<boolean> {
+    if (!this.editor) {
+      console.warn('[markAcceptPersisted] Editor not initialized');
+      return false;
+    }
+    if (!this.isShareMode) {
+      return this.markAccept(markId);
+    }
+
+    return this.runSerializedShareReviewMutation(async () => {
+      await this.flushShareReviewMutationState();
+      const actor = getCurrentActor();
+      const result = await shareClient.acceptSuggestion(markId, actor);
+      if (!result || 'error' in result || result.success !== true) {
+        console.error('[markAcceptPersisted] Failed to persist suggestion acceptance via share mutation:', result);
+        return false;
+      }
+
+      const success = await this.applyShareMutationDocumentResult(result);
+      if (success && this.editor) {
+        captureEvent('suggestion_accepted', { count: 1 });
+        this.editor.action((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          const stats = getAuthorshipStats(view);
+          this.bridge?.authorshipStatsUpdated?.(stats);
+        });
+      }
+      return success;
+    });
   }
 
   /**
@@ -8602,6 +8905,37 @@ class ProofEditorImpl implements ProofEditor {
     return success;
   }
 
+  async markRejectPersisted(markId: string): Promise<boolean> {
+    if (!this.editor) {
+      console.warn('[markRejectPersisted] Editor not initialized');
+      return false;
+    }
+    if (!this.isShareMode) {
+      return this.markReject(markId);
+    }
+
+    return this.runSerializedShareReviewMutation(async () => {
+      await this.flushShareReviewMutationState();
+      const actor = getCurrentActor();
+      const result = await shareClient.rejectSuggestion(markId, actor);
+      if (!result || 'error' in result || result.success !== true) {
+        console.error('[markRejectPersisted] Failed to persist suggestion rejection via share mutation:', result);
+        return false;
+      }
+
+      const success = await this.applyShareMutationDocumentResult(result);
+      if (success && this.editor) {
+        captureEvent('suggestion_rejected', { count: 1 });
+        this.editor.action((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          const stats = getAuthorshipStats(view);
+          this.bridge?.authorshipStatsUpdated?.(stats);
+        });
+      }
+      return success;
+    });
+  }
+
   /**
    * Accept all pending suggestions
    */
@@ -8619,33 +8953,9 @@ class ProofEditorImpl implements ProofEditor {
       });
       if (acceptedIds.length === 0) return 0;
 
-      const actor = getCurrentActor();
       void (async () => {
-        let latestServerMarks: Record<string, StoredMark> | null = null;
-        let acceptedCount = 0;
         for (const suggestionId of acceptedIds) {
-          const result = await shareClient.acceptSuggestion(suggestionId, actor);
-          if (!result || 'error' in result || result.success !== true) continue;
-          const serverMarks = (result.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
-            ? result.marks as Record<string, StoredMark>
-            : null;
-          if (!serverMarks) continue;
-          latestServerMarks = serverMarks;
-          acceptedCount += 1;
-        }
-        if (!latestServerMarks) return;
-        this.lastReceivedServerMarks = { ...latestServerMarks };
-        this.initialMarksSynced = true;
-        if (this.editor) {
-          this.editor.action((innerCtx) => {
-            const innerView = innerCtx.get(editorViewCtx);
-            applyRemoteMarks(innerView, latestServerMarks!, { hydrateAnchors: this.collabCanEdit });
-            const stats = getAuthorshipStats(innerView);
-            this.bridge.authorshipStatsUpdated(stats);
-          });
-        }
-        if (acceptedCount > 0) {
-          captureEvent('suggestion_accepted', { count: acceptedCount });
+          await this.markAcceptPersisted(suggestionId);
         }
       })().catch((error) => {
         console.error('[markAcceptAll] Failed to persist suggestion acceptance via share mutation:', error);
@@ -8694,7 +9004,7 @@ class ProofEditorImpl implements ProofEditor {
       if (count > 0) {
         captureEvent('suggestion_accepted', { count });
         const stats = getAuthorshipStats(view);
-        this.bridge.authorshipStatsUpdated(stats);
+        this.bridge?.authorshipStatsUpdated?.(stats);
       }
     });
 
@@ -8710,13 +9020,30 @@ class ProofEditorImpl implements ProofEditor {
       return 0;
     }
 
+    if (this.isShareMode) {
+      let rejectedIds: string[] = [];
+      this.editor.action((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        rejectedIds = getPendingSuggestions(getMarks(view.state)).map((mark) => mark.id);
+      });
+      if (rejectedIds.length === 0) return 0;
+
+      void (async () => {
+        for (const suggestionId of rejectedIds) {
+          await this.markRejectPersisted(suggestionId);
+        }
+      })().catch((error) => {
+        console.error('[markRejectAll] Failed to persist suggestion rejection via share mutation:', error);
+      });
+      return rejectedIds.length;
+    }
+
     let count = 0;
     let rejectedIds: string[] = [];
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
       rejectedIds = getPendingSuggestions(getMarks(view.state)).map((mark) => mark.id);
       count = rejectAll(view);
-      console.log('[markRejectAll] Rejected:', count);
       if (count > 0 && this.isShareMode && rejectedIds.length > 0) {
         const metadata = getMarkMetadataWithQuotes(view.state);
         this.lastReceivedServerMarks = { ...metadata };
@@ -8751,7 +9078,7 @@ class ProofEditorImpl implements ProofEditor {
       if (count > 0) {
         captureEvent('suggestion_rejected', { count });
         const stats = getAuthorshipStats(view);
-        this.bridge.authorshipStatsUpdated(stats);
+        this.bridge?.authorshipStatsUpdated?.(stats);
       }
     });
     return count;
@@ -9307,6 +9634,7 @@ class ProofEditorImpl implements ProofEditor {
     this.reviewLockCount += 1;
     this.ensureReviewLockBanner();
     this.updateEditableState();
+    this.updateShareBannerTrackChangesDisplay();
     this.scheduleBannerLayoutUpdate();
 
     return this.getReviewLockState();
@@ -9326,6 +9654,7 @@ class ProofEditorImpl implements ProofEditor {
     }
 
     this.updateEditableState();
+    this.updateShareBannerTrackChangesDisplay();
     const { locked, lockCount } = this.getReviewLockState();
     return { locked, lockCount };
   }

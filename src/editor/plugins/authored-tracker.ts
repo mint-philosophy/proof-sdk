@@ -3,6 +3,7 @@ import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
 import type { MarkType, Slice, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 
 import { marksPluginKey } from './marks';
+import { suggestionsPluginKey } from './suggestions';
 import { getCurrentActor } from '../actor';
 
 type PendingRange = { from: number; to: number; by: string };
@@ -50,6 +51,11 @@ function mergeRanges(ranges: PendingRange[]): PendingRange[] {
   return merged;
 }
 
+export function shouldTrackHumanAuthorship(state: { schema?: unknown }): boolean {
+  const suggestionsState = suggestionsPluginKey.getState(state as never);
+  return !(suggestionsState?.enabled ?? false);
+}
+
 export const authoredTrackerPlugin = $prose(() => {
   let pendingHumanRanges: PendingRange[] = [];
 
@@ -60,6 +66,7 @@ export const authoredTrackerPlugin = $prose(() => {
       handleTextInput(view, from, _to, text) {
         const markType = getAuthoredMarkType(view.state);
         if (!markType || !text) return false;
+        if (!shouldTrackHumanAuthorship(view.state)) return false;
 
         const actor = getCurrentActor();
         pendingHumanRanges.push({ from, to: from + text.length, by: actor });
@@ -69,6 +76,7 @@ export const authoredTrackerPlugin = $prose(() => {
       handlePaste(view, _event, slice) {
         const markType = getAuthoredMarkType(view.state);
         if (!markType) return false;
+        if (!shouldTrackHumanAuthorship(view.state)) return false;
 
         if (sliceHasAuthoredMarks(slice, markType)) {
           return false;
@@ -100,7 +108,11 @@ export const authoredTrackerPlugin = $prose(() => {
       }
 
       const docChanged = transactions.some(tr => tr.docChanged);
-      const skipAuthored = transactions.some(tr => tr.getMeta('ai-authored') || tr.getMeta('document-load'));
+      const skipAuthored = transactions.some(tr =>
+        tr.getMeta('ai-authored')
+        || tr.getMeta('document-load')
+        || tr.getMeta('suggestions-wrapped')
+      ) || !shouldTrackHumanAuthorship(newState);
 
       if (!docChanged || skipAuthored) {
         pendingHumanRanges = [];

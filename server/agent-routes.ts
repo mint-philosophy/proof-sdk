@@ -3490,59 +3490,57 @@ agentRoutes.post('/:slug/marks/accept', async (req: Request, res: Response) => {
   const payload = asPayload(req.body);
   const mutationContext = await enforceMutationPrecondition(res, slug, mutationRoute, 'suggestion.accept', payload, replay);
   if (!mutationContext) return;
-  const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/accept', payload, mutationContext);
-  maybeLogMarkHydrationMismatch(mutationRoute, slug, payload, mutationContext, result);
-  if (result.status >= 200 && result.status < 300) {
-    const collabStatus = await notifyCollabMutation(
-      slug,
-      buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.accept' }),
-      {
-        verify: true,
-        source: 'marks.accept',
-        stabilityMs: EDIT_COLLAB_STABILITY_MS,
-        strictLiveDoc: true,
-        apply: false,
-      },
-    );
-    if (isRecord(result.body)) {
-      result.body = {
-        ...result.body,
-        collab: {
-          status: collabStatus.confirmed ? 'confirmed' : 'pending',
-          reason: collabStatus.reason ?? (collabStatus.confirmed ? 'confirmed' : 'sync_timeout'),
-          markdownConfirmed: collabStatus.markdownConfirmed ?? null,
-          fragmentConfirmed: collabStatus.fragmentConfirmed ?? null,
-          canonicalConfirmed: collabStatus.canonicalConfirmed ?? null,
+  let keepRewriteLockCooldown = false;
+  acquireRewriteLock(slug);
+  try {
+    const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/accept', payload, mutationContext);
+    maybeLogMarkHydrationMismatch(mutationRoute, slug, payload, mutationContext, result);
+    let responseStatus = result.status;
+    if (result.status >= 200 && result.status < 300) {
+      keepRewriteLockCooldown = true;
+      const collabStatus = await notifyCollabMutation(
+        slug,
+        buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.accept' }),
+        {
+          verify: true,
+          source: 'marks.accept',
+          stabilityMs: EDIT_COLLAB_STABILITY_MS,
+          fallbackBarrier: true,
+          strictLiveDoc: true,
+          apply: false,
         },
-      };
-    }
-    if (!collabStatus.confirmed) {
-      const failureBody = {
-        success: false,
-        code: 'COLLAB_SYNC_FAILED',
-        error: 'Suggestion acceptance did not converge to live collaboration state',
-        reason: collabStatus.reason ?? 'sync_timeout',
-        retryWithState: `/api/agent/${slug}/state`,
-        collab: {
-          status: 'pending',
-          reason: collabStatus.reason ?? 'sync_timeout',
-          markdownConfirmed: collabStatus.markdownConfirmed ?? null,
-          fragmentConfirmed: collabStatus.fragmentConfirmed ?? null,
-          canonicalConfirmed: collabStatus.canonicalConfirmed ?? null,
-        },
-      } satisfies Record<string, unknown>;
-      storeIdempotentMutationResult(replay, mutationRoute, slug, 409, failureBody);
-      sendMutationResponse(
-        res,
-        409,
-        failureBody,
-        { route: mutationRoute, slug, retryWithState: `/api/agent/${slug}/state` },
       );
-      return;
+      if (isRecord(result.body)) {
+        result.body = {
+          ...result.body,
+          collab: {
+            status: collabStatus.confirmed ? 'confirmed' : 'pending',
+            reason: collabStatus.reason ?? (collabStatus.confirmed ? 'confirmed' : 'sync_timeout'),
+            markdownConfirmed: collabStatus.markdownConfirmed ?? null,
+            fragmentConfirmed: collabStatus.fragmentConfirmed ?? null,
+            canonicalConfirmed: collabStatus.canonicalConfirmed ?? null,
+          },
+        };
+      }
+      if (!collabStatus.confirmed) {
+        responseStatus = 202;
+        try {
+          await invalidateLoadedCollabDocumentAndWait(slug);
+        } catch (error) {
+          console.warn('[agent-routes] failed to invalidate loaded collab room after pending accept verification', {
+            slug,
+            error,
+          });
+        }
+      }
+    }
+    storeIdempotentMutationResult(replay, mutationRoute, slug, responseStatus, result.body);
+    sendMutationResponse(res, responseStatus, result.body, { route: mutationRoute, slug });
+  } finally {
+    if (!keepRewriteLockCooldown) {
+      releaseRewriteLockImmediately(slug);
     }
   }
-  storeIdempotentMutationResult(replay, mutationRoute, slug, result.status, result.body);
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/reject', async (req: Request, res: Response) => {
@@ -3559,13 +3557,22 @@ agentRoutes.post('/:slug/marks/reject', async (req: Request, res: Response) => {
   const payload = asPayload(req.body);
   const mutationContext = await enforceMutationPrecondition(res, slug, mutationRoute, 'suggestion.reject', payload, replay);
   if (!mutationContext) return;
-  const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/reject', payload, mutationContext);
-  maybeLogMarkHydrationMismatch(mutationRoute, slug, payload, mutationContext, result);
-  storeIdempotentMutationResult(replay, mutationRoute, slug, result.status, result.body);
-  if (result.status >= 200 && result.status < 300) {
-    notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.reject' }), { apply: false });
+  let keepRewriteLockCooldown = false;
+  acquireRewriteLock(slug);
+  try {
+    const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/reject', payload, mutationContext);
+    maybeLogMarkHydrationMismatch(mutationRoute, slug, payload, mutationContext, result);
+    storeIdempotentMutationResult(replay, mutationRoute, slug, result.status, result.body);
+    if (result.status >= 200 && result.status < 300) {
+      keepRewriteLockCooldown = true;
+      notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.reject' }), { apply: false });
+    }
+    sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  } finally {
+    if (!keepRewriteLockCooldown) {
+      releaseRewriteLockImmediately(slug);
+    }
   }
-  sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
 });
 
 agentRoutes.post('/:slug/marks/reply', async (req: Request, res: Response) => {

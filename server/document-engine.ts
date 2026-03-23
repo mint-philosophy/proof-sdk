@@ -48,7 +48,7 @@ import {
   finalizeSuggestionThroughRehydration,
   type ProofMarkRehydrationFailure,
 } from './proof-mark-rehydration.js';
-import { stripAllProofSpanTags } from './proof-span-strip.js';
+import { stripAllProofSpanTags, stripProofSpanTags } from './proof-span-strip.js';
 import {
   recordEditAnchorAmbiguous,
   recordEditAnchorNotFound,
@@ -738,7 +738,6 @@ function expandMarkdownSpan(markdown: string, start: number, end: number): { sta
   }
 
   const htmlTagLookahead = 30;
-  const htmlTagLookbehind = 50;
   changed = true;
   while (changed) {
     changed = false;
@@ -746,13 +745,15 @@ function expandMarkdownSpan(markdown: string, start: number, end: number): { sta
     const closeMatch = afterSlice.match(/^<\/([a-zA-Z][a-zA-Z0-9]*)>/);
     if (closeMatch) {
       const tagName = closeMatch[1];
-      const beforeSlice = markdown.slice(Math.max(0, expandedStart - htmlTagLookbehind), expandedStart);
-      const openPattern = new RegExp(`<${tagName}\\b[^>]*>$`);
-      const openMatch = beforeSlice.match(openPattern);
-      if (openMatch) {
-        expandedStart -= openMatch[0].length;
-        expandedEnd += closeMatch[0].length;
-        changed = true;
+      const openStart = markdown.lastIndexOf('<', expandedStart - 1);
+      if (openStart >= 0) {
+        const openTag = markdown.slice(openStart, expandedStart);
+        const openPattern = new RegExp(`^<${tagName}\\b[^>]*>$`);
+        if (openPattern.test(openTag)) {
+          expandedStart = openStart;
+          expandedEnd += closeMatch[0].length;
+          changed = true;
+        }
       }
     }
   }
@@ -894,8 +895,25 @@ function canRejectSuggestionWithoutHydration(markdown: string, mark: StoredMark)
   return true;
 }
 
+function canAcceptDeleteSuggestionWithoutHydration(markdown: string, mark: StoredMark): boolean {
+  if (mark.kind !== 'delete') return false;
+  if (!canRejectSuggestionWithoutHydration(markdown, mark)) return false;
+  return buildAcceptedSuggestionMarkdown(markdown, mark) !== null;
+}
+
 export function __canRejectSuggestionWithoutHydrationForTests(markdown: string, mark: StoredMark): boolean {
   return canRejectSuggestionWithoutHydration(markdown, mark);
+}
+
+export function __buildAcceptedSuggestionMarkdownForTests(markdown: string, suggestion: StoredMark): string | null {
+  return buildAcceptedSuggestionMarkdown(markdown, suggestion);
+}
+
+function getDeleteSuggestionCleanupOffsets(markdown: string, suggestion: StoredMark): number[] {
+  if (suggestion.kind !== 'delete') return [];
+  const quote = typeof suggestion.quote === 'string' ? suggestion.quote : '';
+  const span = quote ? findRawQuoteSpanInMarkdown(markdown, quote) : null;
+  return span ? [span.start] : [];
 }
 
 function replaceFirstOccurrence(source: string, find: string, replace: string): string | null {
@@ -942,6 +960,93 @@ function buildAcceptedSuggestionMarkdown(markdown: string, suggestion: StoredMar
   }
 
   return markdown;
+}
+
+function getStoredMarkRange(mark: StoredMark): { from: number; to: number } | null {
+  if (!isRecord(mark.range)) return null;
+  const from = mark.range.from;
+  const to = mark.range.to;
+  if (
+    typeof from !== 'number'
+    || !Number.isFinite(from)
+    || typeof to !== 'number'
+    || !Number.isFinite(to)
+  ) {
+    return null;
+  }
+  return { from, to };
+}
+
+function rebaseCollapsedInsertPositionForAcceptedSuggestion(
+  pos: number,
+  acceptedMark: StoredMark,
+): number {
+  const acceptedRange = getStoredMarkRange(acceptedMark);
+  if (!acceptedRange) return pos;
+
+  if (acceptedMark.kind === 'insert') {
+    const content = typeof acceptedMark.content === 'string' ? acceptedMark.content : '';
+    if (content.length <= 0) return pos;
+    return pos >= acceptedRange.from ? pos + content.length : pos;
+  }
+
+  if (acceptedMark.kind === 'delete') {
+    const removedWidth = Math.max(0, acceptedRange.to - acceptedRange.from);
+    if (removedWidth <= 0) return pos;
+    if (pos <= acceptedRange.from) return pos;
+    if (pos >= acceptedRange.to) return Math.max(acceptedRange.from, pos - removedWidth);
+    return acceptedRange.from;
+  }
+
+  return pos;
+}
+
+function rebasePendingInsertMarksAfterAcceptedSuggestion(
+  marks: Record<string, StoredMark>,
+  acceptedMarkId: string,
+  acceptedMark: StoredMark,
+): Record<string, StoredMark> {
+  if (acceptedMark.kind !== 'insert' && acceptedMark.kind !== 'delete') {
+    return marks;
+  }
+
+  let changed = false;
+  const nextMarks: Record<string, StoredMark> = {};
+  for (const [id, mark] of Object.entries(marks)) {
+    if (
+      id === acceptedMarkId
+      || mark.kind !== 'insert'
+      || mark.status === 'accepted'
+      || mark.status === 'rejected'
+    ) {
+      nextMarks[id] = mark;
+      continue;
+    }
+
+    const range = getStoredMarkRange(mark);
+    if (!range) {
+      nextMarks[id] = mark;
+      continue;
+    }
+
+    const rebasedPos = rebaseCollapsedInsertPositionForAcceptedSuggestion(range.from, acceptedMark);
+    if (rebasedPos === range.from && range.to === rebasedPos && !mark.quote && !mark.startRel && !mark.endRel) {
+      nextMarks[id] = mark;
+      continue;
+    }
+
+    changed = true;
+    const nextMark: StoredMark = {
+      ...mark,
+      range: { from: rebasedPos, to: rebasedPos },
+    };
+    delete nextMark.quote;
+    delete nextMark.startRel;
+    delete nextMark.endRel;
+    nextMarks[id] = nextMark;
+  }
+
+  return changed ? canonicalizeStoredMarks(nextMarks) : marks;
 }
 
 function toStructuredMutationFailureResult(
@@ -1933,13 +2038,7 @@ function updateSuggestionStatus(
     if (acceptedMarkdown === null) {
       return { status: 409, body: { success: false, error: 'Cannot accept suggestion without quote anchor' } };
     }
-    const deleteCleanupOffsets = existing.kind === 'delete'
-      ? (() => {
-          const quote = typeof existingForApply.mark.quote === 'string' ? existingForApply.mark.quote : '';
-          const span = quote ? findRawQuoteSpanInMarkdown(doc.markdown, quote) : null;
-          return span ? [span.start] : [];
-        })()
-      : [];
+    const deleteCleanupOffsets = getDeleteSuggestionCleanupOffsets(doc.markdown, existingForApply.mark);
     nextMarkdown = applyMutationCleanup(
       'POST /marks/accept',
       acceptedMarkdown,
@@ -2338,7 +2437,73 @@ async function updateSuggestionStatusAsync(
     markId,
     action: status === 'accepted' ? 'accept' : 'reject',
   });
+  const directAcceptMark = marksForRehydration[markId] ?? existingForApply.mark;
   if (!structuredResult.ok) {
+    const fallbackMark = directAcceptMark;
+    if (
+      status === 'accepted'
+      && structuredResult.code === 'MARK_NOT_HYDRATED'
+      && canAcceptDeleteSuggestionWithoutHydration(doc.markdown, fallbackMark)
+    ) {
+      const acceptedMarkdown = buildAcceptedSuggestionMarkdown(doc.markdown, fallbackMark);
+      if (acceptedMarkdown !== null) {
+        const deleteCleanupOffsets = getDeleteSuggestionCleanupOffsets(doc.markdown, fallbackMark);
+        const nextMarks = { ...marks };
+        delete nextMarks[markId];
+        const mutation = await mutateCanonicalDocument({
+          slug,
+          nextMarkdown: applyMutationCleanup('POST /marks/accept', acceptedMarkdown, deleteCleanupOffsets),
+          nextMarks: nextMarks as unknown as Record<string, unknown>,
+          source: `engine:${status}:${actor}:fallback`,
+          baseRevision: doc.revision,
+          strictLiveDoc: true,
+          guardPathologicalGrowth: true,
+        });
+        if (!mutation.ok) {
+          return {
+            status: mutation.status,
+            body: {
+              success: false,
+              code: mutation.code,
+              error: mutation.error,
+              ...(mutation.retryWithState ? { retryWithState: mutation.retryWithState } : {}),
+            },
+          };
+        }
+
+        const eventId = addDocumentEvent(
+          slug,
+          `suggestion.${status}`,
+          { markId, status, by: actor },
+          actor,
+          mutationContextIdempotencyKey(context),
+          mutationContextIdempotencyRoute(context),
+        );
+        upsertMarkTombstone(slug, markId, status, mutation.document.revision);
+        const updatedMarks = parseMarks(mutation.document.marks);
+        const responseMarks: Record<string, StoredMark> = {
+          ...updatedMarks,
+          [markId]: {
+            ...fallbackMark,
+            ...(updatedMarks[markId] ?? {}),
+            status,
+          },
+        };
+
+        return {
+          status: 200,
+          body: {
+            success: true,
+            eventId,
+            shareState: mutation.document.share_state,
+            updatedAt: mutation.document.updated_at,
+            content: mutation.document.markdown,
+            markdown: mutation.document.markdown,
+            marks: responseMarks,
+          },
+        };
+      }
+    }
     if (
       status === 'rejected'
       && structuredResult.code === 'MARK_NOT_HYDRATED'
@@ -2406,10 +2571,37 @@ async function updateSuggestionStatusAsync(
     return toStructuredMutationFailureResult(structuredResult, 'Suggestion anchor quote not found in document');
   }
 
+  let nextMarkdown = structuredResult.markdown;
+  let nextMarks = (
+    status === 'accepted'
+      ? rebasePendingInsertMarksAfterAcceptedSuggestion(structuredResult.marks, markId, directAcceptMark)
+      : structuredResult.marks
+  ) as unknown as Record<string, unknown>;
+  if (
+    status === 'accepted'
+    && directAcceptMark.kind === 'insert'
+    && nextMarkdown === doc.markdown
+  ) {
+    const acceptedMarkdown = buildAcceptedSuggestionMarkdown(doc.markdown, directAcceptMark);
+    if (acceptedMarkdown !== null) {
+      const acceptedMarks = { ...marks };
+      delete acceptedMarks[markId];
+      nextMarkdown = applyMutationCleanup('POST /marks/accept', acceptedMarkdown);
+      nextMarks = rebasePendingInsertMarksAfterAcceptedSuggestion(
+        acceptedMarks,
+        markId,
+        directAcceptMark,
+      ) as unknown as Record<string, unknown>;
+    }
+  }
+  if (status === 'accepted' && directAcceptMark.kind === 'insert') {
+    nextMarkdown = applyMutationCleanup('POST /marks/accept', stripProofSpanTags(nextMarkdown));
+  }
+
   const mutation = await mutateCanonicalDocument({
     slug,
-    nextMarkdown: structuredResult.markdown,
-    nextMarks: structuredResult.marks as unknown as Record<string, unknown>,
+    nextMarkdown,
+    nextMarks,
     source: `engine:${status}:${actor}`,
     ...buildCanonicalMutationBaseArgs(doc, context),
     strictLiveDoc: true,

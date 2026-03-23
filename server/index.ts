@@ -43,7 +43,8 @@ async function main(): Promise<void> {
   const allowedCorsOrigins = parseAllowedCorsOrigins();
 
   app.use(express.json({ limit: '10mb' }));
-  app.use(express.static(path.join(__dirname, '..', 'public')));
+  app.use(express.static(path.join(__dirname, '..', 'public'), { maxAge: 0, etag: false }));
+  app.use(express.static(path.join(__dirname, '..', 'dist'), { maxAge: 0, etag: false }));
 
   app.use((req, res, next) => {
     const originHeader = req.header('origin');

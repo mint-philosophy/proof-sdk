@@ -8963,6 +8963,21 @@ class ProofEditorImpl implements ProofEditor {
       serverHasMarkId: Object.prototype.hasOwnProperty.call(serverMarks, markId),
     });
 
+    resetSuggestionsInsertCoalescing();
+    this.pendingCollabReconnectTemplateOverride = expectedMarkdown;
+    this.suppressTrackChangesDuringCollabReconnect = true;
+    this.traceShareReview('mutation.local-resolve.disconnect-old-room', {
+      action,
+      markId,
+      expectedMarkdown: this.summarizeTraceMarkdown(expectedMarkdown),
+    }, 'warn');
+    if (this.collabEnabled) {
+      this.collabConnectionStatus = 'connecting';
+      this.collabIsSynced = false;
+      this.disconnectCollabService();
+      collabClient.disconnect();
+    }
+
     let matchedServerResult = false;
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
@@ -9005,20 +9020,6 @@ class ProofEditorImpl implements ProofEditor {
     });
 
     if (matchedServerResult) {
-      resetSuggestionsInsertCoalescing();
-      this.pendingCollabReconnectTemplateOverride = expectedMarkdown;
-      this.suppressTrackChangesDuringCollabReconnect = true;
-      this.traceShareReview('mutation.local-resolve.disconnect-old-room', {
-        action,
-        markId,
-        expectedMarkdown: this.summarizeTraceMarkdown(expectedMarkdown),
-      }, 'warn');
-      if (this.collabEnabled) {
-        this.collabConnectionStatus = 'connecting';
-        this.collabIsSynced = false;
-        this.disconnectCollabService();
-        collabClient.disconnect();
-      }
       if (this.collabEnabled && this.activeCollabSession) {
         void this.refreshCollabSessionAndReconnect(false);
       }

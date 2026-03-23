@@ -102,6 +102,7 @@ function run(): void {
   );
   assert(
     localResolveBlock.includes("if (markdown === null || collabStatus !== 'pending') return false;")
+      && localResolveBlock.indexOf('this.disconnectCollabService();') < localResolveBlock.indexOf("acceptMark(view, markId, parser)")
       && localResolveBlock.includes("resolved = action === 'accept'")
       && localResolveBlock.includes("acceptMark(view, markId, parser)")
       && localResolveBlock.includes(': rejectMark(view, markId);')

@@ -15,7 +15,9 @@ async function run(): Promise<void> {
   );
   assert(
     engineSource.includes('const originalMark = marks[markId];')
-      && engineSource.includes("&& isMaterializedInsertMark(baseMarkdown, originalMark)")
+      && engineSource.includes('const stabilizedOriginalMark = originalMark')
+      && engineSource.includes('stabilizeCollapsedMaterializedInsertMark(baseMarkdown, originalMark)')
+      && engineSource.includes("&& isMaterializedInsertMark(baseMarkdown, stabilizedOriginalMark)")
       && engineSource.includes("nextMarkdown = applyMutationCleanup('POST /marks/accept', stripAllProofSpanTags(nextMarkdown));"),
     'Expected accept-all batch loop to preserve originally materialized insert marks instead of replaying them as fresh inserts',
   );
@@ -730,6 +732,64 @@ async function run(): Promise<void> {
     assert(
       String(acceptedCapturedParagraph.body.markdown ?? '') === capturedParagraphVisibleMarkdown,
       `Expected captured paragraph batch accept not to duplicate already-materialized insert text with mismatched content/quote whitespace, got ${JSON.stringify(acceptedCapturedParagraph.body.markdown)}`,
+    );
+
+    const run43VisibleMarkdown = '# Run 43 P1P2 Accept All Test\n\nBaseline paragraph one for testing accept all operations.TC edit one. \n\nBaseline paragraph two for multi-block verification. TC edit two.\n\n';
+    const run43PersistedMarkdown = '# Run 43 P1P2 Accept All Test\n\nBaseline paragraph one for testing accept all operations<span data-proof="suggestion" data-kind="insert" data-id="m1774383326491_1">TC edit one.</span>&#x20;\n\nBaseline paragraph two for multi-block verification.<span data-proof="suggestion" data-kind="insert" data-id="m1774383335441_2"> TC edit two.</span>\n\n';
+    const run43Marks = {
+      m1774383326491_1: {
+        kind: 'insert',
+        by: 'human:Test Editor',
+        status: 'pending',
+        content: ' TC edit one.',
+        range: { from: 87, to: 87 },
+      },
+      m1774383335441_2: {
+        kind: 'insert',
+        by: 'human:Test Editor',
+        status: 'pending',
+        content: ' TC edit two.',
+        range: { from: 141, to: 141 },
+      },
+    } as const;
+    const run43Slug = `captured-run43-${Date.now()}`;
+    db.createDocument(
+      run43Slug,
+      run43PersistedMarkdown,
+      run43Marks as unknown as Record<string, unknown>,
+      'Captured run 43 collapsed-range accept-all regression',
+    );
+    const run43Doc = db.getDocumentBySlug(run43Slug);
+    assert(Boolean(run43Doc), 'Expected captured run 43 doc to exist');
+    const acceptedRun43 = await executeDocumentOperationAsync(
+      run43Slug,
+      'POST',
+      '/marks/accept-all',
+      {
+        markIds: ['m1774383335441_2', 'm1774383326491_1'],
+        by: 'human:test',
+      },
+      {
+        doc: run43Doc!,
+        mutationBase: {
+          token: 'mt1:captured-run43-test',
+          source: 'live_yjs',
+          schemaVersion: 'mt1',
+          markdown: run43VisibleMarkdown,
+          marks: run43Marks as unknown as Record<string, unknown>,
+          accessEpoch: 1,
+        },
+        precondition: { mode: 'revision', baseRevision: run43Doc!.revision },
+      },
+    );
+    assert(acceptedRun43.status === 200, `Expected run 43 collapsed-range batch accept status 200, got ${acceptedRun43.status}`);
+    assert(
+      !String(acceptedRun43.body.markdown ?? '').includes('TC edit one.TC edit one.'),
+      `Expected run 43 collapsed-range batch accept not to duplicate paragraph-one insert text, got ${JSON.stringify(acceptedRun43.body.markdown)}`,
+    );
+    assert(
+      String(acceptedRun43.body.markdown ?? '').includes('Baseline paragraph one for testing accept all operations.TC edit one.'),
+      `Expected run 43 collapsed-range batch accept to preserve the paragraph-one insertion text once, got ${JSON.stringify(acceptedRun43.body.markdown)}`,
     );
 
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');

@@ -1025,6 +1025,48 @@ function stabilizeCollapsedMaterializedInsertMark(markdown: string, mark: Stored
       };
     }
   }
+
+  const rawVisibleText = getRawVisibleMutationText(markdown);
+  const target = normalizedQuote.length > 0 ? normalizedQuote : normalizedContent;
+  if (target.length > 0) {
+    const candidateStarts = Array.from(new Set([
+      range.from - content.length,
+      range.from - target.length,
+      range.from - 1,
+      range.from,
+      range.from + 1,
+    ]));
+    const candidateLengths = Array.from(new Set([
+      content.length,
+      target.length,
+      target.length + 1,
+      target.length + 2,
+    ].filter((value) => value > 0)));
+    let bestCandidate: { from: number; to: number; score: number } | null = null;
+    for (const start of candidateStarts) {
+      for (const length of candidateLengths) {
+        const end = start + length;
+        if (start < 0 || end > rawVisibleText.length || end <= start) continue;
+        const slice = rawVisibleText.slice(start, end);
+        if (normalizeQuote(slice) !== target) continue;
+        const score = Math.abs(start - range.from) + Math.abs(end - range.from) + Math.abs(length - target.length);
+        if (!bestCandidate || score < bestCandidate.score) {
+          bestCandidate = { from: start, to: end, score };
+        }
+      }
+    }
+    if (bestCandidate) {
+      const candidateText = rawVisibleText.slice(bestCandidate.from, bestCandidate.to);
+      return {
+        ...mark,
+        range: { from: bestCandidate.from, to: bestCandidate.to },
+        quote: normalizeQuote(candidateText),
+        startRel: `char:${bestCandidate.from}`,
+        endRel: `char:${bestCandidate.to}`,
+      };
+    }
+  }
+
   if (
     normalizedQuote.length > 0
     && normalizedContent.length > 0
@@ -1063,6 +1105,10 @@ function isCollapsedMaterializedInsertMark(markdown: string, mark: StoredMark): 
   const content = typeof mark.content === 'string' ? mark.content : '';
   if (content.length === 0) return false;
   return stripAllProofSpanTags(markdown).includes(content);
+}
+
+function getRawVisibleMutationText(markdown: string): string {
+  return stripAllProofSpanTags(markdown).replace(/\r\n/g, '\n');
 }
 
 function getCanonicalVisibleText(markdown: string): string {
@@ -1179,9 +1225,9 @@ function isMaterializedInsertMark(markdown: string, mark: StoredMark): boolean {
   if (normalizedContent.length === 0) return false;
   if (isCollapsedMaterializedInsertMark(markdown, mark)) return true;
 
-  const canonicalText = getCanonicalVisibleText(markdown);
+  const rawVisibleText = getRawVisibleMutationText(markdown);
   const range = getStoredMarkRange(mark);
-  if (range && range.to > range.from && doesCanonicalSliceMatchInsertContent(canonicalText, range.from, range.to, normalizedContent)) {
+  if (range && range.to > range.from && doesCanonicalSliceMatchInsertContent(rawVisibleText, range.from, range.to, normalizedContent)) {
     return true;
   }
 
@@ -1190,10 +1236,11 @@ function isMaterializedInsertMark(markdown: string, mark: StoredMark): boolean {
   if (
     startRel !== null
     && endRel !== null
-    && doesCanonicalSliceMatchInsertContent(canonicalText, startRel, endRel, normalizedContent)
+    && doesCanonicalSliceMatchInsertContent(rawVisibleText, startRel, endRel, normalizedContent)
   ) {
     return true;
   }
+  const canonicalText = getCanonicalVisibleText(markdown);
   if (
     endRel !== null
     && endRel + content.length <= canonicalText.length
@@ -3165,9 +3212,12 @@ async function acceptAllSuggestionsAsync(
     const markId = currentPendingIds[0];
     if (!markId) break;
     const originalMark = marks[markId];
+    const stabilizedOriginalMark = originalMark
+      ? stabilizeCollapsedMaterializedInsertMark(baseMarkdown, originalMark)
+      : undefined;
     if (
-      originalMark?.kind === 'insert'
-      && isMaterializedInsertMark(baseMarkdown, originalMark)
+      stabilizedOriginalMark?.kind === 'insert'
+      && isMaterializedInsertMark(baseMarkdown, stabilizedOriginalMark)
     ) {
       const currentMarks = { ...nextMarks };
       delete currentMarks[markId];

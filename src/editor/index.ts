@@ -9212,14 +9212,127 @@ class ProofEditorImpl implements ProofEditor {
     }, 'warn');
   }
 
-  private async flushShareReviewMutationState(): Promise<void> {
-    if (!this.isShareMode || !this.editor || this.suppressMarksSync) return;
+  private getCurrentShareReviewPersistSnapshot(): {
+    pendingIds: string[];
+    markdown: string;
+    marks: Record<string, StoredMark>;
+  } | null {
+    if (!this.isShareMode || !this.editor) return null;
+
+    let snapshot: {
+      pendingIds: string[];
+      markdown: string;
+      marks: Record<string, StoredMark>;
+    } | null = null;
+
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const serializer = ctx.get(serializerCtx);
+      const localMetadata = getMarkMetadataWithQuotes(view.state);
+      const liveMetadata = mergePendingServerMarks(localMetadata, this.lastReceivedServerMarks);
+      const persistedMetadata = buildCanonicalShareMarkMetadata(view.state, liveMetadata);
+      const markdown = this.normalizeMarkdownForRuntime(serializer(view.state.doc));
+      const pendingIds = Object.entries(persistedMetadata)
+        .filter(([, mark]) => {
+          const kind = mark?.kind;
+          return (kind === 'insert' || kind === 'delete' || kind === 'replace') && mark.status === 'pending';
+        })
+        .map(([id]) => id);
+      snapshot = {
+        pendingIds,
+        markdown,
+        marks: persistedMetadata,
+      };
+    });
+
+    return snapshot;
+  }
+
+  private storedMarksContainPendingIds(marks: Record<string, unknown> | null | undefined, expectedIds: string[]): boolean {
+    if (expectedIds.length === 0) return true;
+    if (!marks || typeof marks !== 'object' || Array.isArray(marks)) return false;
+    return expectedIds.every((markId) => {
+      const candidate = marks[markId];
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+      const record = candidate as Partial<StoredMark>;
+      const kind = record.kind;
+      return (kind === 'insert' || kind === 'delete' || kind === 'replace') && record.status === 'pending';
+    });
+  }
+
+  private async waitForAuthoritativeShareReviewMarks(expectedIds: string[]): Promise<boolean> {
+    if (!this.isShareMode || expectedIds.length === 0) return true;
+
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline) {
+      const context = await shareClient.fetchOpenContext();
+      if (context && !('error' in context)) {
+        const serverMarks = (context.doc?.marks && typeof context.doc.marks === 'object' && !Array.isArray(context.doc.marks))
+          ? context.doc.marks as Record<string, unknown>
+          : null;
+        if (this.storedMarksContainPendingIds(serverMarks, expectedIds)) {
+          this.lastReceivedServerMarks = serverMarks
+            ? { ...(serverMarks as Record<string, StoredMark>) }
+            : {};
+          this.initialMarksSynced = true;
+          return true;
+        }
+      }
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 50);
+      });
+    }
+
+    return false;
+  }
+
+  private async forcePersistCurrentShareReviewState(expectedIds: string[]): Promise<boolean> {
+    const snapshot = this.getCurrentShareReviewPersistSnapshot();
+    if (!snapshot) return false;
+    const persisted = await shareClient.pushUpdate(snapshot.markdown, snapshot.marks, getCurrentActor());
+    if (!persisted) return false;
+    return this.waitForAuthoritativeShareReviewMarks(
+      expectedIds.length > 0 ? expectedIds : snapshot.pendingIds,
+    );
+  }
+
+  private async flushShareReviewMutationState(expectedMarkIds: string[] = []): Promise<boolean> {
+    if (!this.isShareMode || !this.editor || this.suppressMarksSync) return true;
     this.flushShareMarks({ persistContent: false, forcePersistMarks: true });
     const pendingPersist = this.pendingSharePersistPromise;
+    let pendingPersistSucceeded = true;
     if (pendingPersist) {
-      await pendingPersist.catch(() => false);
+      pendingPersistSucceeded = await pendingPersist.catch(() => false);
     }
-    if (!this.collabEnabled || !this.collabCanEdit) return;
+
+    const expectedPendingIds = expectedMarkIds.length > 0
+      ? expectedMarkIds
+      : (this.getCurrentShareReviewPersistSnapshot()?.pendingIds ?? []);
+    if (expectedPendingIds.length > 0) {
+      const authoritativeMarksReady = pendingPersistSucceeded
+        ? await this.waitForAuthoritativeShareReviewMarks(expectedPendingIds)
+        : false;
+      if (!authoritativeMarksReady) {
+        const forcedPersistSucceeded = await this.forcePersistCurrentShareReviewState(expectedPendingIds);
+        if (!forcedPersistSucceeded) {
+          this.traceShareReview('mutation.preflush-failed', {
+            expectedMarkIds: expectedPendingIds,
+            pendingPersistSucceeded,
+          }, 'error');
+          return false;
+        }
+      }
+    } else if (!pendingPersistSucceeded) {
+      const forcedPersistSucceeded = await this.forcePersistCurrentShareReviewState([]);
+      if (!forcedPersistSucceeded) {
+        this.traceShareReview('mutation.preflush-failed', {
+          expectedMarkIds: expectedPendingIds,
+          pendingPersistSucceeded,
+        }, 'error');
+        return false;
+      }
+    }
+    if (!this.collabEnabled || !this.collabCanEdit) return true;
 
     const deadline = Date.now() + 500;
     while (Date.now() < deadline) {
@@ -9228,12 +9341,13 @@ class ProofEditorImpl implements ProofEditor {
         && this.collabUnsyncedChanges === 0
         && this.collabPendingLocalUpdates === 0;
       if (synced) {
-        return;
+        return true;
       }
       await new Promise<void>((resolve) => {
         window.setTimeout(resolve, 20);
       });
     }
+    return true;
   }
 
   markAccept(markId: string): boolean {
@@ -9328,7 +9442,8 @@ class ProofEditorImpl implements ProofEditor {
     }
 
     return this.runSerializedShareReviewMutation(async () => {
-      await this.flushShareReviewMutationState();
+      const ready = await this.flushShareReviewMutationState([markId]);
+      if (!ready) return false;
       const actor = getCurrentActor();
       this.beginShareReviewTrace('accept', markId);
       const result = await shareClient.acceptSuggestion(markId, actor);
@@ -9423,7 +9538,8 @@ class ProofEditorImpl implements ProofEditor {
     }
 
     return this.runSerializedShareReviewMutation(async () => {
-      await this.flushShareReviewMutationState();
+      const ready = await this.flushShareReviewMutationState([markId]);
+      if (!ready) return false;
       const actor = getCurrentActor();
       this.beginShareReviewTrace('reject', markId);
       const result = await shareClient.rejectSuggestion(markId, actor);
@@ -9507,7 +9623,11 @@ class ProofEditorImpl implements ProofEditor {
       if (initialIds.length === 0) return 0;
 
       void this.runSerializedShareReviewMutation(async () => {
-        await this.flushShareReviewMutationState();
+        const ready = await this.flushShareReviewMutationState(initialIds);
+        if (!ready) {
+          console.error('[markAcceptAll] Failed to persist current tracked changes before batch accept');
+          return;
+        }
         const actor = getCurrentActor();
         const result = await shareClient.acceptSuggestions(initialIds, actor);
         if (!result || 'error' in result || result.success !== true) {
@@ -9565,7 +9685,11 @@ class ProofEditorImpl implements ProofEditor {
       if (initialIds.length === 0) return 0;
 
       void this.runSerializedShareReviewMutation(async () => {
-        await this.flushShareReviewMutationState();
+        const ready = await this.flushShareReviewMutationState(initialIds);
+        if (!ready) {
+          console.error('[markRejectAll] Failed to persist current tracked changes before batch reject');
+          return;
+        }
         const actor = getCurrentActor();
         const rejectedIds: string[] = [];
         let pendingIds = [...initialIds];

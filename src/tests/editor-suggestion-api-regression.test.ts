@@ -40,6 +40,11 @@ function run(): void {
   );
 
   const markAcceptAllBlock = sliceBetween(editorSource, '  markAcceptAll(): number {', '\n  /**\n   * Reject all pending suggestions\n   */');
+  const flushShareReviewMutationStateBlock = sliceBetween(
+    editorSource,
+    '  private async flushShareReviewMutationState(expectedMarkIds: string[] = []): Promise<boolean> {',
+    '\n  markAccept(markId: string): boolean {',
+  );
   const sortedPendingIdsBlock = sliceBetween(
     editorSource,
     '  private getSortedPendingSuggestionIdsForShareReview(): string[] {',
@@ -63,8 +68,18 @@ function run(): void {
     'Expected share Accept All to recompute pending suggestion order from the latest server marks after each persisted accept',
   );
   assert(
+    flushShareReviewMutationStateBlock.includes('this.flushShareMarks({ persistContent: false, forcePersistMarks: true });')
+      && flushShareReviewMutationStateBlock.includes('await this.waitForAuthoritativeShareReviewMarks(expectedPendingIds)')
+      && flushShareReviewMutationStateBlock.includes('await this.forcePersistCurrentShareReviewState(expectedPendingIds)')
+      && flushShareReviewMutationStateBlock.includes("this.traceShareReview('mutation.preflush-failed'")
+      && flushShareReviewMutationStateBlock.includes('return false;'),
+    'Expected persisted review mutations to verify that pending marks are present in authoritative share state and to fall back to a full pushUpdate before accept/reject proceeds',
+  );
+  assert(
     markAcceptAllBlock.includes('const initialIds = this.getSortedPendingSuggestionIdsForShareReview();')
       && markAcceptAllBlock.includes('void this.runSerializedShareReviewMutation(async () => {')
+      && markAcceptAllBlock.includes('const ready = await this.flushShareReviewMutationState(initialIds);')
+      && markAcceptAllBlock.includes('if (!ready) {')
       && markAcceptAllBlock.includes('const result = await shareClient.acceptSuggestions(initialIds, actor);')
       && markAcceptAllBlock.includes('const success = await this.applyShareMutationDocumentResult(result, {')
       && markAcceptAllBlock.includes('skipReconnectTemplateSeed: true,')
@@ -78,6 +93,8 @@ function run(): void {
   assert(
     markRejectAllBlock.includes('const initialIds = this.getSortedPendingSuggestionIdsForShareReview();')
       && markRejectAllBlock.includes('void this.runSerializedShareReviewMutation(async () => {')
+      && markRejectAllBlock.includes('const ready = await this.flushShareReviewMutationState(initialIds);')
+      && markRejectAllBlock.includes('if (!ready) {')
       && markRejectAllBlock.includes('const result = await shareClient.rejectSuggestion(suggestionId, actor);')
       && markRejectAllBlock.includes('pendingIds = this.getSortedPendingSuggestionIdsFromStoredMarks(serverMarks)')
       && markRejectAllBlock.includes('const success = await this.applyShareMutationDocumentResult(latestSuccessfulResult);')

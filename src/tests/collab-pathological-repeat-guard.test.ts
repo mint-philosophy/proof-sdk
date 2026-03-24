@@ -15,6 +15,15 @@ function createFragmentDoc(text: string): Y.Doc {
   return doc;
 }
 
+function buildRichSuggestionProjection(text: string): string {
+  return text
+    .split('')
+    .map((char, index) => (
+      `<span data-proof="suggestion" data-id="m-rich-${index}" data-by="human:Test Editor" data-kind="insert">${char}</span>`
+    ))
+    .join('');
+}
+
 async function run(): Promise<void> {
   const {
     detectPathologicalProjectionRepeat,
@@ -41,7 +50,8 @@ async function run(): Promise<void> {
   assert(maxCharsSafety.safe === false, 'Expected max chars guard to block oversized projection');
   assert(maxCharsSafety.reason === 'max_chars_exceeded', `Expected max chars reason, got ${String(maxCharsSafety.reason)}`);
 
-  const growthSafety = evaluateProjectionSafety(base, base.repeat(9), fragmentDoc);
+  const explosiveGrowthCandidate = `${base}${'x'.repeat(base.length * 8)}`;
+  const growthSafety = evaluateProjectionSafety(base, explosiveGrowthCandidate, fragmentDoc);
   assert(growthSafety.safe === false, 'Expected growth multiplier guard to block explosive projection');
   assert(growthSafety.reason === 'growth_multiplier_exceeded', `Expected growth reason, got ${String(growthSafety.reason)}`);
 
@@ -58,6 +68,20 @@ async function run(): Promise<void> {
   const safeCandidate = 'alpha beta gamma';
   const safeSafety = evaluateProjectionSafety('alpha beta gamma', safeCandidate, fragmentDoc);
   assert(safeSafety.safe === true, `Expected matching fragment/markdown to be safe, got ${String(safeSafety.reason)}`);
+
+  const richVisibleText = 'Baseline paragraph one for testing accept all operations. TC edit one.';
+  const richCandidate = buildRichSuggestionProjection(richVisibleText);
+  assert(
+    richCandidate.length > (richVisibleText.length * 8),
+    'Expected rich candidate to exceed the raw growth multiplier threshold',
+  );
+  const richFragmentDoc = createFragmentDoc(richVisibleText);
+  const richSafety = evaluateProjectionSafety(richVisibleText, richCandidate, richFragmentDoc);
+  assert(
+    richSafety.safe === true,
+    `Expected rich projection with identical visible text to be safe, got ${String(richSafety.reason)}`,
+  );
+  richFragmentDoc.destroy();
 
   const cooldownState = new Map<string, {
     fingerprint: string;

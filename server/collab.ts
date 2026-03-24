@@ -2067,6 +2067,11 @@ function hasRichProjectionStructure(markdown: string): boolean {
     || /data-proof\s*=/.test(markdown);
 }
 
+function normalizeProjectionSafetyComparableText(markdown: string): string {
+  if (!hasRichProjectionStructure(markdown)) return markdown;
+  return normalizeRichProjectionVisibleText(markdown);
+}
+
 function hasAuthoredMarks(marks: Record<string, unknown>): boolean {
   return Object.values(marks).some((value) => (
     value
@@ -2813,22 +2818,32 @@ export function evaluateProjectionSafety(
     process.env.COLLAB_PROJECTION_GUARD_MIN_TOKEN_OVERLAP,
     DEFAULT_PROJECTION_GUARD_MIN_TOKEN_OVERLAP,
   );
-  const repeatCount = detectPathologicalProjectionRepeat(baselineMarkdown, candidateMarkdown);
+  const comparableBaselineMarkdown = normalizeProjectionSafetyComparableText(baselineMarkdown);
+  const comparableCandidateMarkdown = normalizeProjectionSafetyComparableText(candidateMarkdown);
+  const usingRichComparableText = comparableBaselineMarkdown !== baselineMarkdown
+    || comparableCandidateMarkdown !== candidateMarkdown;
+  const repeatCount = detectPathologicalProjectionRepeat(comparableBaselineMarkdown, comparableCandidateMarkdown);
 
-  if (candidateMarkdown.length > maxChars) {
+  if (comparableCandidateMarkdown.length > maxChars) {
     return {
       safe: false,
       reason: 'max_chars_exceeded',
       details: {
         baselineChars: baselineMarkdown.length,
         candidateChars: candidateMarkdown.length,
+        comparableBaselineChars: comparableBaselineMarkdown.length,
+        comparableCandidateChars: comparableCandidateMarkdown.length,
+        usingRichComparableText,
         maxChars,
         repeatCount: repeatCount > 0 ? repeatCount : undefined,
       },
     };
   }
 
-  const canonicalReplayRepeatCount = detectCanonicalReplayRepeatCount(baselineMarkdown, candidateMarkdown);
+  const canonicalReplayRepeatCount = detectCanonicalReplayRepeatCount(
+    comparableBaselineMarkdown,
+    comparableCandidateMarkdown,
+  );
   if (canonicalReplayRepeatCount >= CANONICAL_REPLAY_MIN_REPEATS) {
     return {
       safe: false,
@@ -2836,16 +2851,22 @@ export function evaluateProjectionSafety(
       details: {
         baselineChars: baselineMarkdown.length,
         candidateChars: candidateMarkdown.length,
+        comparableBaselineChars: comparableBaselineMarkdown.length,
+        comparableCandidateChars: comparableCandidateMarkdown.length,
+        usingRichComparableText,
         repeatCount: canonicalReplayRepeatCount,
         canonicalReplay: true,
       },
     };
   }
 
-  if (baselineMarkdown.length > 0 && candidateMarkdown.length > (baselineMarkdown.length * maxGrowthMultiplier)) {
-    const absoluteGrowthChars = candidateMarkdown.length - baselineMarkdown.length;
+  if (
+    comparableBaselineMarkdown.length > 0
+    && comparableCandidateMarkdown.length > (comparableBaselineMarkdown.length * maxGrowthMultiplier)
+  ) {
+    const absoluteGrowthChars = comparableCandidateMarkdown.length - comparableBaselineMarkdown.length;
     const allowSmallBaselineGrowth = smallBaselineBypassEnabled
-      && baselineMarkdown.length < minBaselineChars
+      && comparableBaselineMarkdown.length < minBaselineChars
       && absoluteGrowthChars <= maxSmallBaselineGrowthChars;
     if (!allowSmallBaselineGrowth) {
       return {
@@ -2854,6 +2875,9 @@ export function evaluateProjectionSafety(
         details: {
           baselineChars: baselineMarkdown.length,
           candidateChars: candidateMarkdown.length,
+          comparableBaselineChars: comparableBaselineMarkdown.length,
+          comparableCandidateChars: comparableCandidateMarkdown.length,
+          usingRichComparableText,
           absoluteGrowthChars,
           maxGrowthMultiplier,
           smallBaselineBypassEnabled,
@@ -2872,6 +2896,9 @@ export function evaluateProjectionSafety(
       details: {
         baselineChars: baselineMarkdown.length,
         candidateChars: candidateMarkdown.length,
+        comparableBaselineChars: comparableBaselineMarkdown.length,
+        comparableCandidateChars: comparableCandidateMarkdown.length,
+        usingRichComparableText,
         repeatCount,
       },
     };

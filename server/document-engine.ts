@@ -2855,7 +2855,7 @@ async function acceptAllSuggestionsAsync(
   for (const markId of pendingIds) {
     const computed = await computeSuggestionStatusTransition(nextMarkdown, nextMarks, markId, 'accepted');
     if (!computed.ok) return computed.result;
-    nextMarkdown = computed.nextMarkdown;
+    nextMarkdown = stripAllProofSpanTags(computed.nextMarkdown);
     nextMarks = computed.nextMarks;
     acceptedIds.push(markId);
   }

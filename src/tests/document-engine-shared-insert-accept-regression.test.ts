@@ -170,6 +170,58 @@ async function run(): Promise<void> {
       `Expected stored inline batch markdown without duplicated inserts, got ${JSON.stringify(storedInlineBatch?.markdown)}`,
     );
 
+    const multiBlockBatchSlug = `shared-multiblock-batch-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(
+      multiBlockBatchSlug,
+      '# Untitled Tracked insertion at end.\n\nHello baseline text. Paragraph insertion.\n\nSecond paragraph baseline. Third tracked insertion here.\n',
+      {
+        'heading-insert': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: 'Tracked insertion at end.',
+          content: 'Tracked insertion at end.',
+          range: { from: 11, to: 35 },
+        },
+        'paragraph-one-insert': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: 'Paragraph insertion.',
+          content: ' Paragraph insertion.',
+          range: { from: 59, to: 79 },
+        },
+        'paragraph-two-insert': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: 'Third tracked insertion here.',
+          content: ' Third tracked insertion here.',
+          range: { from: 108, to: 137 },
+        },
+      },
+      'Shared multi-block insert batch accept regression',
+    );
+
+    const acceptedMultiBlockBatch = await executeDocumentOperationAsync(multiBlockBatchSlug, 'POST', '/marks/accept-all', {
+      markIds: ['heading-insert', 'paragraph-one-insert', 'paragraph-two-insert'],
+      by: 'human:test',
+    });
+    assert(acceptedMultiBlockBatch.status === 200, `Expected multi-block batch accept status 200, got ${acceptedMultiBlockBatch.status}`);
+    assert(
+      String(acceptedMultiBlockBatch.body.markdown ?? '')
+        === '# Untitled Tracked insertion at end.\n\nHello baseline text. Paragraph insertion.\n\nSecond paragraph baseline. Third tracked insertion here.\n',
+      `Expected multi-block batch accept not to duplicate heading inserts or bleed paragraph text, got ${JSON.stringify(acceptedMultiBlockBatch.body.markdown)}`,
+    );
+    const acceptedMultiBlockMarks = (acceptedMultiBlockBatch.body.marks ?? {}) as Record<string, { kind?: string }>;
+    assert(Object.keys(acceptedMultiBlockMarks).length === 0, 'Expected multi-block batch accept to clear all accepted insert marks');
+
+    const storedMultiBlockBatch = db.getDocumentBySlug(multiBlockBatchSlug);
+    assert(
+      storedMultiBlockBatch?.markdown === '# Untitled Tracked insertion at end.\n\nHello baseline text. Paragraph insertion.\n\nSecond paragraph baseline. Third tracked insertion here.\n',
+      `Expected stored multi-block batch markdown without duplicated or garbled accepted inserts, got ${JSON.stringify(storedMultiBlockBatch?.markdown)}`,
+    );
+
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

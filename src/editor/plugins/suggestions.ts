@@ -165,6 +165,40 @@ function findEditableInsertSuggestionAtPosition(
   };
 }
 
+function resolveTrackedTextInputRange(
+  state: EditorState,
+  from: number,
+  to: number,
+): { from: number; to: number } {
+  const selection = state.selection;
+  const actor = getCurrentActor();
+  const domInsert = from === to
+    ? findEditableInsertSuggestionAtPosition(state.doc, from, actor)
+    : null;
+  const selectionInsert = selection.empty
+    ? findEditableInsertSuggestionAtPosition(state.doc, selection.from, actor)
+    : null;
+
+  if (
+    domInsert
+    && selectionInsert
+    && domInsert.id === selectionInsert.id
+    && (from !== selection.from || to !== selection.to)
+  ) {
+    return { from: selection.from, to: selection.to };
+  }
+
+  return { from, to };
+}
+
+export function __debugResolveTrackedTextInputRange(
+  state: EditorState,
+  from: number,
+  to: number,
+): { from: number; to: number } {
+  return resolveTrackedTextInputRange(state, from, to);
+}
+
 function findTrailingDeleteRangeForInsert(
   doc: ProseMirrorNode,
   insertRange: MarkRange,
@@ -443,6 +477,10 @@ function buildCollapsedInsertAnchorMetadata(pos: number): Pick<StoredMark, 'rang
   return {
     range: { from: safePos, to: safePos },
   };
+}
+
+function setSelectionAfterInsertedText(tr: Transaction, pos: number): void {
+  tr.setSelection(TextSelection.create(tr.doc, Math.max(0, Math.min(pos, tr.doc.content.size))));
 }
 
 function detectSelectionReplacement(
@@ -944,6 +982,7 @@ export function wrapTransactionForSuggestions(
             by: actor,
             updatedAt: now,
           });
+          setSelectionAfterInsertedText(newTr, candidate.insertPos + insertedText.length);
         } else if (candidate) {
           // Non-whitespace with active candidate: coalesce into existing mark
           const existingMeta = metadata[candidate.id];
@@ -980,6 +1019,7 @@ export function wrapTransactionForSuggestions(
             by: actor,
             updatedAt: now,
           });
+          setSelectionAfterInsertedText(newTr, candidate.insertPos + insertedText.length);
         } else {
           const editableInsert = findEditableInsertSuggestionAtPosition(newTr.doc, safeFrom, actor);
           if (editableInsert) {
@@ -1020,6 +1060,7 @@ export function wrapTransactionForSuggestions(
               by: actor,
               updatedAt: now,
             });
+            setSelectionAfterInsertedText(newTr, safeFrom + insertedText.length);
           } else if (whitespaceOnly) {
             // Standalone whitespace, no active candidate: create a tracked suggestion mark.
             const suggestionId = generateMarkId();
@@ -1049,6 +1090,7 @@ export function wrapTransactionForSuggestions(
               by: actor,
               updatedAt: now,
             });
+            setSelectionAfterInsertedText(newTr, safeFrom + insertedText.length);
           } else {
             // New non-whitespace text, no candidate: create fresh suggestion mark
             const suggestionId = generateMarkId();
@@ -1078,6 +1120,7 @@ export function wrapTransactionForSuggestions(
               by: actor,
               updatedAt: now,
             });
+            setSelectionAfterInsertedText(newTr, safeFrom + insertedText.length);
           }
         }
       }
@@ -1347,7 +1390,8 @@ export const suggestionsPlugin = $prose(() => {
         // as ordinary typing. If we opt out here, ProseMirror's DOM observer
         // emits intermediate composition transactions that get tracked as
         // separate char-level edits in shared docs.
-        view.dispatch(view.state.tr.insertText(text, from, to));
+        const range = resolveTrackedTextInputRange(view.state, from, to);
+        view.dispatch(view.state.tr.insertText(text, range.from, range.to));
         return true;
       },
 

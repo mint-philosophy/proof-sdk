@@ -6,6 +6,7 @@ import {
   __debugResolveTrackedDeleteIntentFromBeforeInput,
   __debugResolveTrackedDeleteIntentForBeforeInput,
   __debugResolveTrackedDeleteRange,
+  __debugResolveTrackedTextInputRange,
   wrapTransactionForSuggestions,
 } from '../editor/plugins/suggestions.js';
 import type { InsertData } from '../formats/marks.js';
@@ -164,6 +165,42 @@ function run(): void {
       'Coalesced insert suggestion should preserve the full inserted content after short pauses',
     );
 
+    let staleDomState = createState({ from: 18, to: 18 });
+    for (const char of [' ', 'b', 'r', 'a', 'v', 'e']) {
+      const pos = staleDomState.selection.from;
+      staleDomState = staleDomState.apply(
+        wrapTransactionForSuggestions(staleDomState.tr.insertText(char, pos, pos), staleDomState, true)
+      );
+      now += 900;
+    }
+
+    const coalescedInsert = getMarks(staleDomState).find((mark) => mark.kind === 'insert');
+    assert(coalescedInsert?.range, 'Expected tracked insert range after coalesced typing');
+    staleDomState = staleDomState.apply(
+      staleDomState.tr.setSelection(TextSelection.create(staleDomState.doc, coalescedInsert.range!.to))
+    );
+    for (const char of ' wow') {
+      const staleDomPos = coalescedInsert.range!.from;
+      const resolvedRange = __debugResolveTrackedTextInputRange(staleDomState, staleDomPos, staleDomPos);
+      staleDomState = staleDomState.apply(
+        wrapTransactionForSuggestions(staleDomState.tr.insertText(char, resolvedRange.from, resolvedRange.to), staleDomState, true)
+      );
+      now += 900;
+    }
+
+    const staleDomInsertMarks = getMarks(staleDomState).filter((mark) => mark.kind === 'insert');
+    assertEqual(staleDomInsertMarks.length, 1, 'Stale DOM text-input positions inside a pending insert should still extend the same insert suggestion');
+    assertEqual(
+      staleDomState.doc.textContent,
+      'Alpha beta gamma. brave wow',
+      'Typing with stale DOM insert positions should append text in forward order instead of reversing it',
+    );
+    assertEqual(
+      (staleDomInsertMarks[0]?.data as InsertData | undefined)?.content,
+      ' brave wow',
+      'Stale DOM text-input positions should keep insert metadata aligned with the forward-typed content',
+    );
+
     const deletePos = state.selection.from;
     state = state.apply(
       wrapTransactionForSuggestions(state.tr.delete(deletePos - 1, deletePos), state, true)
@@ -206,6 +243,43 @@ function run(): void {
       resumedInsertAttrContent,
       ' brave',
       'Typing after backspace should also keep the underlying insert mark attrs in sync with the live insert text',
+    );
+
+    state = createState({ from: 18, to: 18 });
+    for (const char of ['a', 'b']) {
+      const pos = state.selection.from;
+      state = state.apply(wrapTransactionForSuggestions(state.tr.insertText(char, pos, pos), state, true));
+      now += 100;
+    }
+
+    const appendPos = state.selection.from;
+    state = state.apply(state.tr.setSelection(TextSelection.create(state.doc, appendPos - 2)));
+    state = state.apply(
+      wrapTransactionForSuggestions(state.tr.insertText('c', appendPos, appendPos), state, true)
+    );
+
+    assertEqual(
+      state.selection.from,
+      appendPos + 1,
+      'Tracked append should move the cursor to the end of the coalesced insert even if the prior editor selection was stale',
+    );
+
+    const continuePos = state.selection.from;
+    state = state.apply(
+      wrapTransactionForSuggestions(state.tr.insertText('d', continuePos, continuePos), state, true)
+    );
+
+    const staleSelectionInsertMarks = getMarks(state).filter((mark) => mark.kind === 'insert');
+    assertEqual(
+      state.doc.textContent,
+      'Alpha beta gamma.abcd',
+      'Typing after a stale-selection append should continue at the end of the insert instead of prepending and reversing characters',
+    );
+    assertEqual(staleSelectionInsertMarks.length, 1, 'Stale-selection typing should keep a single coalesced insert suggestion');
+    assertEqual(
+      (staleSelectionInsertMarks[0]?.data as InsertData | undefined)?.content,
+      'abcd',
+      'Stale-selection typing should preserve insert content in forward typing order',
     );
 
     state = createState({ from: 18, to: 18 });

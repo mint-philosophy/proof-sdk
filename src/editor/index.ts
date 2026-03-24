@@ -1118,6 +1118,7 @@ class ProofEditorImpl implements ProofEditor {
   private shareDocumentUpdatedTimer: ReturnType<typeof setTimeout> | null = null;
   private shareMarksRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shareMarksFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingSharePersistPromise: Promise<boolean> | null = null;
   private pendingShareMarksRefresh: boolean = false;
   private pendingCommentDraftRestoreTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCommentDraftSnapshot: CommentPopoverDraftSnapshot | null = null;
@@ -5158,7 +5159,7 @@ class ProofEditorImpl implements ProofEditor {
     }, 0);
   }
 
-  private flushShareMarks(_options?: { keepalive?: boolean; persistContent?: boolean }): void {
+  private flushShareMarks(_options?: { keepalive?: boolean; persistContent?: boolean; forcePersistMarks?: boolean }): void {
     if (!this.isShareMode || !this.editor || this.suppressMarksSync) return;
     if (this.shareMarksFlushTimer !== null) {
       clearTimeout(this.shareMarksFlushTimer);
@@ -5197,6 +5198,7 @@ class ProofEditorImpl implements ProofEditor {
           collabUnsyncedChanges: this.collabUnsyncedChanges,
           collabPendingLocalUpdates: this.collabPendingLocalUpdates,
         });
+        const forcePersistMarks = _options?.forcePersistMarks === true;
         if (this.collabEnabled && this.collabCanEdit) {
           this.publishProjectionMarkdown(view, markdown, 'marks-flush');
           collabClient.setMarksMetadata(liveMetadata);
@@ -5211,17 +5213,31 @@ class ProofEditorImpl implements ProofEditor {
             collabUnsyncedChanges: this.collabUnsyncedChanges,
             collabPendingLocalUpdates: this.collabPendingLocalUpdates,
           });
-          void shareClient.pushUpdate(markdown, persistedMetadata, getCurrentActor(), {
+          const persistPromise = shareClient.pushUpdate(markdown, persistedMetadata, getCurrentActor(), {
             keepalive: Boolean(_options?.keepalive),
             allowLocalKeepaliveBaseToken,
           });
+          this.pendingSharePersistPromise = persistPromise;
+          void persistPromise.finally(() => {
+            if (this.pendingSharePersistPromise === persistPromise) {
+              this.pendingSharePersistPromise = null;
+            }
+          });
           return;
         }
-        if (!shouldPersistMarks) {
+        if (!shouldPersistMarks && !forcePersistMarks) {
           return;
         }
-        if (!this.collabEnabled || !this.collabCanEdit || LEGACY_REST_FALLBACK) {
-          void shareClient.pushMarks(persistedMetadata, getCurrentActor(), { keepalive: Boolean(_options?.keepalive) });
+        if (forcePersistMarks || !this.collabEnabled || !this.collabCanEdit || LEGACY_REST_FALLBACK) {
+          const persistPromise = shareClient.pushMarks(persistedMetadata, getCurrentActor(), {
+            keepalive: Boolean(_options?.keepalive),
+          });
+          this.pendingSharePersistPromise = persistPromise;
+          void persistPromise.finally(() => {
+            if (this.pendingSharePersistPromise === persistPromise) {
+              this.pendingSharePersistPromise = null;
+            }
+          });
         }
       } catch (error) {
         console.error('[flushShareMarks] Failed to push marks via collab runtime:', error);
@@ -9198,7 +9214,11 @@ class ProofEditorImpl implements ProofEditor {
 
   private async flushShareReviewMutationState(): Promise<void> {
     if (!this.isShareMode || !this.editor || this.suppressMarksSync) return;
-    this.flushShareMarks({ persistContent: false });
+    this.flushShareMarks({ persistContent: false, forcePersistMarks: true });
+    const pendingPersist = this.pendingSharePersistPromise;
+    if (pendingPersist) {
+      await pendingPersist.catch(() => false);
+    }
     if (!this.collabEnabled || !this.collabCanEdit) return;
 
     const deadline = Date.now() + 500;

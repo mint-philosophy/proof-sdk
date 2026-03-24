@@ -147,6 +147,19 @@ function run(): void {
     'Expected persisted review mutations to wait for the post-mutation collab reconnect to become stable before another accept/reject can start',
   );
 
+  const flushReviewMutationStateBlock = sliceBetween(
+    editorSource,
+    '  private async flushShareReviewMutationState(): Promise<void> {',
+    '\n  async markAcceptPersisted(markId: string): Promise<boolean> {',
+  );
+  assert(
+    editorSource.includes('private pendingSharePersistPromise: Promise<boolean> | null = null;')
+      && flushReviewMutationStateBlock.includes("this.flushShareMarks({ persistContent: false, forcePersistMarks: true });")
+      && flushReviewMutationStateBlock.includes('const pendingPersist = this.pendingSharePersistPromise;')
+      && flushReviewMutationStateBlock.includes('await pendingPersist.catch(() => false);'),
+    'Expected persisted review mutations to force a canonical mark persist and wait for it before issuing share accept/reject mutations',
+  );
+
   const localResolveBlock = sliceBetween(
     editorSource,
     '  private tryResolveShareReviewMutationLocally(',

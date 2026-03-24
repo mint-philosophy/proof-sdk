@@ -1886,9 +1886,21 @@ export function buildCanonicalShareMarkMetadata(
       } else {
         delete nextEntry.range;
       }
-      delete nextEntry.quote;
-      delete nextEntry.startRel;
-      delete nextEntry.endRel;
+      const preserveBlockStartAnchors = Boolean(
+        liveRange
+        && (() => {
+          try {
+            return state.doc.resolve(liveRange.from).parentOffset === 0;
+          } catch {
+            return false;
+          }
+        })()
+      );
+      if (!preserveBlockStartAnchors) {
+        delete nextEntry.quote;
+        delete nextEntry.startRel;
+        delete nextEntry.endRel;
+      }
       canonicalMetadata[id] = nextEntry;
       continue;
     }

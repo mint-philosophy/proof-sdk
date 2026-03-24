@@ -168,6 +168,87 @@ async function run(): Promise<void> {
       `Expected stored later insert to stay rebased after persistence, got ${JSON.stringify(storedMarks[insertTwoId]?.range)}`,
     );
 
+    const prependInsertId = 'prepend-insert';
+    const appendInsertId = 'append-insert';
+    const crossBlockLiveDoc = schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('First baseline paragraph with enough text to test cross-block offset calculations properly.'),
+        schema.text(' TC insertion in paragraph one.', [schema.marks.proofSuggestion.create({ id: appendInsertId, kind: 'insert', by: 'human:editor' })]),
+      ]),
+      schema.node('paragraph', null, [
+        schema.text('TC insertion in paragraph two. ', [schema.marks.proofSuggestion.create({ id: prependInsertId, kind: 'insert', by: 'human:editor' })]),
+        schema.text('Second baseline paragraph for multi-block accept all verification testing.'),
+      ]),
+    ]);
+
+    const crossBlockState = EditorState.create({
+      schema,
+      doc: crossBlockLiveDoc,
+      plugins: [marksStatePlugin],
+    });
+
+    const crossBlockLiveMetadata = getMarkMetadataWithQuotes(crossBlockState);
+    const crossBlockPersistedMetadata = buildCanonicalShareMarkMetadata(crossBlockState, crossBlockLiveMetadata);
+
+    assertEqual(
+      crossBlockPersistedMetadata[appendInsertId]?.range?.from,
+      92,
+      `Expected appended paragraph insert to persist at its canonical insertion point, got ${JSON.stringify(crossBlockPersistedMetadata[appendInsertId]?.range)}`,
+    );
+    assertEqual(
+      crossBlockPersistedMetadata[appendInsertId]?.range?.to,
+      92,
+      'Expected appended paragraph insert to stay collapsed in persisted metadata',
+    );
+    assertEqual(
+      crossBlockPersistedMetadata[prependInsertId]?.range?.from,
+      94,
+      `Expected prepended next-paragraph insert to persist as its own canonical insertion point, got ${JSON.stringify(crossBlockPersistedMetadata[prependInsertId]?.range)}`,
+    );
+    assertEqual(
+      crossBlockPersistedMetadata[prependInsertId]?.range?.to,
+      94,
+      'Expected prepended next-paragraph insert to stay collapsed in persisted metadata',
+    );
+    assertEqual(
+      crossBlockPersistedMetadata[prependInsertId]?.quote,
+      'TC insertion in paragraph two.',
+      'Expected prepended next-paragraph insert to preserve its quote for block-level resolution',
+    );
+    assertEqual(
+      crossBlockPersistedMetadata[prependInsertId]?.startRel,
+      'char:123',
+      'Expected prepended next-paragraph insert to preserve its startRel anchor',
+    );
+    assertEqual(
+      crossBlockPersistedMetadata[prependInsertId]?.endRel,
+      'char:154',
+      'Expected prepended next-paragraph insert to preserve its endRel anchor',
+    );
+    assert(
+      !crossBlockPersistedMetadata[appendInsertId]?.quote,
+      'Expected appended paragraph insert to remain quote-less after canonicalization',
+    );
+
+    const crossBlockSlug = `share-track-changes-cross-block-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(
+      crossBlockSlug,
+      'First baseline paragraph with enough text to test cross-block offset calculations properly. TC insertion in paragraph one.\n\nTC insertion in paragraph two. Second baseline paragraph for multi-block accept all verification testing.\n',
+      crossBlockPersistedMetadata as Record<string, StoredMark>,
+      'Share track changes cross-block prepend regression',
+    );
+
+    const crossBlockAccepted = await executeDocumentOperationAsync(crossBlockSlug, 'POST', '/marks/accept-all', {
+      markIds: [appendInsertId, prependInsertId],
+      by: 'human:test',
+    });
+    assertEqual(crossBlockAccepted.status, 200, `Expected cross-block accept-all to succeed, got ${crossBlockAccepted.status}`);
+    assertEqual(
+      String(crossBlockAccepted.body.markdown ?? ''),
+      'First baseline paragraph with enough text to test cross-block offset calculations properly. TC insertion in paragraph one.\n\nTC insertion in paragraph two. Second baseline paragraph for multi-block accept all verification testing.\n',
+      `Expected cross-block accept-all not to drift the prepended second-paragraph insert into the first paragraph, got ${JSON.stringify(crossBlockAccepted.body.markdown)}`,
+    );
+
     console.log('share-track-changes-multi-insert-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

@@ -998,9 +998,40 @@ function stabilizeCollapsedMaterializedInsertMark(markdown: string, mark: Stored
   if (mark.kind !== 'insert') return mark;
   const range = getStoredMarkRange(mark);
   if (!range || range.to !== range.from) return mark;
-  if (typeof mark.quote === 'string' && normalizeQuote(mark.quote).length > 0) return mark;
   const content = typeof mark.content === 'string' ? mark.content : '';
   if (content.length === 0) return mark;
+  const normalizedContent = normalizeQuote(content);
+  const normalizedQuote = typeof mark.quote === 'string' ? normalizeQuote(mark.quote) : '';
+  const startRel = parseRelativeCharOffset(mark.startRel);
+  const endRel = parseRelativeCharOffset(mark.endRel);
+  if (
+    normalizedQuote.length > 0
+    && normalizedContent.length > 0
+    && normalizedQuote === normalizedContent
+    && startRel !== null
+    && endRel !== null
+    && endRel > startRel
+  ) {
+    const { stripped, map } = stripMarkdownWithMapping(markdown);
+    const canonical = canonicalizeVisibleTextWithMapping(stripped, map);
+    const anchoredText = normalizeQuote(canonical.text.slice(startRel, endRel));
+    if (anchoredText === normalizedContent) {
+      return {
+        ...mark,
+        range: { from: startRel, to: endRel },
+        quote: normalizedContent,
+        startRel: `char:${startRel}`,
+        endRel: `char:${endRel}`,
+      };
+    }
+  }
+  if (
+    normalizedQuote.length > 0
+    && normalizedContent.length > 0
+    && normalizedQuote !== normalizedContent
+  ) {
+    return mark;
+  }
 
   const { stripped } = stripMarkdownWithMapping(markdown);
   const candidates = [

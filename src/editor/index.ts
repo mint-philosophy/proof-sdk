@@ -55,10 +55,10 @@ import {
 import {
   suggestionsPlugins,
   suggestionsPluginKey,
-  enableSuggestions,
-  disableSuggestions,
-  toggleSuggestions,
-  isSuggestionsEnabled,
+  enableSuggestions as enableSuggestionsPlugin,
+  disableSuggestions as disableSuggestionsPlugin,
+  toggleSuggestions as toggleSuggestionsPlugin,
+  isSuggestionsEnabled as isSuggestionsEnabledPlugin,
   resetSuggestionsInsertCoalescing,
   wrapTransactionForSuggestions,
 } from './plugins/suggestions';
@@ -3655,10 +3655,10 @@ class ProofEditorImpl implements ProofEditor {
     };
 
     const editButton = makeSegment('Edit', () => {
-      this.disableSuggestions();
+      this.setSuggestionsEnabled(false);
     });
     const trackChangesButton = makeSegment('Track Changes', () => {
-      this.enableSuggestions();
+      this.setSuggestionsEnabled(true);
     });
 
     this.shareBannerEditModeButtonEl = editButton;
@@ -6947,38 +6947,42 @@ class ProofEditorImpl implements ProofEditor {
    * Enable suggestion mode (track changes)
    */
   enableSuggestions(): void {
-    if (!this.editor) {
-      console.warn('[enableSuggestions] Editor not initialized');
-      return;
-    }
-
-    this.editor.action((ctx) => {
-      const view = ctx.get(editorViewCtx);
-      if (getSuggestionDisplayMode(view.state) === 'all') {
-        setSuggestionDisplayMode(view, 'simple');
-        view.dom.dataset.trackChangesView = 'simple';
-      }
-      enableSuggestions(view);
-      console.log('[enableSuggestions] Suggestions enabled');
-    });
-    this.updateShareBannerTrackChangesDisplay();
+    this.setSuggestionsEnabled(true);
   }
 
   /**
    * Disable suggestion mode
    */
   disableSuggestions(): void {
+    this.setSuggestionsEnabled(false);
+  }
+
+  private setSuggestionsEnabled(enabled: boolean): boolean {
     if (!this.editor) {
-      console.warn('[disableSuggestions] Editor not initialized');
-      return;
+      console.warn('[setSuggestionsEnabled] Editor not initialized');
+      return false;
     }
 
+    let currentEnabled = false;
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      disableSuggestions(view);
-      console.log('[disableSuggestions] Suggestions disabled');
+      currentEnabled = isSuggestionsEnabledPlugin(view.state);
+      if (currentEnabled !== enabled) {
+        if (enabled) {
+          enableSuggestionsPlugin(view);
+        } else {
+          disableSuggestionsPlugin(view);
+        }
+      }
+      currentEnabled = isSuggestionsEnabledPlugin(view.state);
+      if (currentEnabled && getSuggestionDisplayMode(view.state) === 'all') {
+        setSuggestionDisplayMode(view, 'simple');
+        view.dom.dataset.trackChangesView = 'simple';
+      }
+      console.log('[setSuggestionsEnabled]', currentEnabled ? 'enabled' : 'disabled');
     });
     this.updateShareBannerTrackChangesDisplay();
+    return currentEnabled;
   }
 
   /**
@@ -6993,7 +6997,7 @@ class ProofEditorImpl implements ProofEditor {
     let enabled = false;
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      enabled = toggleSuggestions(view);
+      enabled = toggleSuggestionsPlugin(view);
       if (enabled && getSuggestionDisplayMode(view.state) === 'all') {
         setSuggestionDisplayMode(view, 'simple');
         view.dom.dataset.trackChangesView = 'simple';
@@ -7013,7 +7017,7 @@ class ProofEditorImpl implements ProofEditor {
     let enabled = false;
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      enabled = isSuggestionsEnabled(view.state);
+      enabled = isSuggestionsEnabledPlugin(view.state);
     });
     return enabled;
   }

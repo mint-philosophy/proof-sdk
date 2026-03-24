@@ -71,8 +71,24 @@ function run(): void {
       && createTrackChangesToggleBlock.includes('pointerActivated = true;')
       && createTrackChangesToggleBlock.includes('button.onclick = (event) => {')
       && createTrackChangesToggleBlock.includes('if (pointerActivated) {')
-      && createTrackChangesToggleBlock.includes('button.onblur = () => {'),
-    'Expected the Track Changes pill to activate on pointerdown so immediate typing cannot outrun the toggle click handler',
+      && createTrackChangesToggleBlock.includes('button.onblur = () => {')
+      && createTrackChangesToggleBlock.includes('this.setSuggestionsEnabled(false);')
+      && createTrackChangesToggleBlock.includes('this.setSuggestionsEnabled(true);'),
+    'Expected the Track Changes pill to activate on pointerdown and route through the canonical suggestions state setter',
+  );
+
+  const setSuggestionsEnabledBlock = sliceBetween(
+    editorSource,
+    '  private setSuggestionsEnabled(enabled: boolean): boolean {',
+    '\n  /**\n   * Toggle suggestion mode\n   */',
+  );
+  assert(
+    setSuggestionsEnabledBlock.includes('currentEnabled = isSuggestionsEnabledPlugin(view.state);')
+      && setSuggestionsEnabledBlock.includes('if (currentEnabled !== enabled) {')
+      && setSuggestionsEnabledBlock.includes('enableSuggestionsPlugin(view);')
+      && setSuggestionsEnabledBlock.includes('disableSuggestionsPlugin(view);')
+      && setSuggestionsEnabledBlock.includes("console.log('[setSuggestionsEnabled]', currentEnabled ? 'enabled' : 'disabled');"),
+    'Expected the shared suggestions setter to dispatch the plugin enable/disable transaction and verify the resulting state',
   );
 
   assert(

@@ -66,11 +66,13 @@ function run(): void {
     markAcceptAllBlock.includes('const initialIds = this.getSortedPendingSuggestionIdsForShareReview();')
       && markAcceptAllBlock.includes('void this.runSerializedShareReviewMutation(async () => {')
       && markAcceptAllBlock.includes('const result = await shareClient.acceptSuggestions(initialIds, actor);')
-      && markAcceptAllBlock.includes('const success = await this.applyShareMutationDocumentResult(result);')
+      && markAcceptAllBlock.includes('const success = await this.applyShareMutationDocumentResult(result, {')
+      && markAcceptAllBlock.includes('skipReconnectTemplateSeed: true,')
+      && markAcceptAllBlock.includes('preserveEditorStateDuringReconnect: true,')
       && markAcceptAllBlock.includes("tombstoneResolvedMarkIds(initialIds, { reason: 'deleted' });")
       && !markAcceptAllBlock.includes('await this.markAcceptPersisted(suggestionId);')
       && !markAcceptAllBlock.includes('await shareClient.acceptSuggestion(suggestionId, actor);'),
-    'Expected share-mode markAcceptAll to use the server-side batch accept mutation and perform a single final authoritative apply/reconnect',
+    'Expected share-mode markAcceptAll to use the server-side batch accept mutation and perform a single final authoritative apply/reconnect without replaying the reconnect template over accepted content',
   );
   const markRejectAllBlock = sliceBetween(editorSource, '  markRejectAll(): number {', '\n  /**\n   * Delete a mark by ID\n   */');
   assert(

@@ -1056,6 +1056,8 @@ class ProofEditorImpl implements ProofEditor {
   private collabLastRecoveryAttemptMs: number = 0;
   private pendingCollabTemplateMarkdown: string | null = null;
   private pendingCollabReconnectTemplateOverride: string | null = null;
+  private skipNextCollabTemplateSeed: boolean = false;
+  private preserveEditorStateOnNextCollabReconnect: boolean = false;
   // During session refresh we defer rebinding Milkdown collab until the new provider is synced.
   // This prevents transient empty-doc renders while reconnecting to a fresh Yjs room.
   private pendingCollabRebindOnSync: boolean = false;
@@ -1740,6 +1742,8 @@ class ProofEditorImpl implements ProofEditor {
     this.collabUnhealthySinceMs = null;
     this.collabLastRecoveryAttemptMs = 0;
     this.collabSessionRefreshInFlight = false;
+    this.skipNextCollabTemplateSeed = false;
+    this.preserveEditorStateOnNextCollabReconnect = false;
     this.resetPendingCollabTemplateState(true);
     this.resetShareMarksSyncState();
     this.resetProjectionPublishState();
@@ -2583,7 +2587,10 @@ class ProofEditorImpl implements ProofEditor {
       this.collabCanComment = Boolean(refreshed.capabilities.canComment);
       this.collabCanEdit = Boolean(refreshed.capabilities.canEdit);
       this.resetShareMarksSyncState();
-      const shouldPreserveLocalState = preserveLocalState && this.shouldPreservePendingLocalCollabState();
+      const forcePreserveEditorState = this.preserveEditorStateOnNextCollabReconnect;
+      this.preserveEditorStateOnNextCollabReconnect = false;
+      const shouldPreserveLocalState = forcePreserveEditorState
+        || (preserveLocalState && this.shouldPreservePendingLocalCollabState());
       let reconnectTemplate: string | null = null;
       if (shouldPreserveLocalState) {
         if (this.lastMarkdown.trim().length > 0) {
@@ -2604,11 +2611,16 @@ class ProofEditorImpl implements ProofEditor {
         }
       }
       this.pendingCollabReconnectTemplateOverride = null;
+      if (this.skipNextCollabTemplateSeed) {
+        reconnectTemplate = null;
+        this.skipNextCollabTemplateSeed = false;
+      }
       if (!this.shouldAllowCollabTemplateSeed(refreshed.session)) {
         reconnectTemplate = null;
       }
       this.traceShareReview('collab.refresh.ready', {
         preserveLocalState,
+        forcePreserveEditorState,
         previousAccessEpoch,
         nextAccessEpoch: refreshed.session.accessEpoch ?? null,
         reconnectTemplate: this.summarizeTraceMarkdown(reconnectTemplate),
@@ -8981,20 +8993,32 @@ class ProofEditorImpl implements ProofEditor {
       marks?: Record<string, unknown> | null;
       collab?: { status?: string; reason?: string };
     },
+    options?: {
+      skipReconnectTemplateSeed?: boolean;
+      preserveEditorStateDuringReconnect?: boolean;
+    },
   ): Promise<boolean> {
     const markdown = typeof result?.markdown === 'string' ? result.markdown : null;
     const marks = (result?.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
       ? result.marks as Record<string, StoredMark>
       : {};
     const collabStatus = typeof result?.collab?.status === 'string' ? result.collab.status : '';
+    const skipReconnectTemplateSeed = options?.skipReconnectTemplateSeed === true;
+    const preserveEditorStateDuringReconnect = options?.preserveEditorStateDuringReconnect === true;
     this.traceShareReview('mutation.apply-result', {
       collabStatus,
       markdown: this.summarizeTraceMarkdown(markdown),
       markCount: Object.keys(marks).length,
+      skipReconnectTemplateSeed,
+      preserveEditorStateDuringReconnect,
     });
     resetSuggestionsInsertCoalescing();
     if (markdown !== null && collabStatus === 'pending') {
-      this.pendingCollabReconnectTemplateOverride = this.normalizeMarkdownForCollab(markdown);
+      this.pendingCollabReconnectTemplateOverride = skipReconnectTemplateSeed
+        ? null
+        : this.normalizeMarkdownForCollab(markdown);
+      this.skipNextCollabTemplateSeed = skipReconnectTemplateSeed;
+      this.preserveEditorStateOnNextCollabReconnect = preserveEditorStateDuringReconnect;
       this.suppressTrackChangesDuringCollabReconnect = true;
       if (this.collabEnabled) {
         this.collabConnectionStatus = 'connecting';
@@ -9004,6 +9028,8 @@ class ProofEditorImpl implements ProofEditor {
       }
     } else if (collabStatus !== 'pending') {
       this.pendingCollabReconnectTemplateOverride = null;
+      this.skipNextCollabTemplateSeed = false;
+      this.preserveEditorStateOnNextCollabReconnect = false;
       this.suppressTrackChangesDuringCollabReconnect = false;
     }
     if (markdown === null) {
@@ -9470,7 +9496,10 @@ class ProofEditorImpl implements ProofEditor {
         }
 
         tombstoneResolvedMarkIds(initialIds, { reason: 'deleted' });
-        const success = await this.applyShareMutationDocumentResult(result);
+        const success = await this.applyShareMutationDocumentResult(result, {
+          skipReconnectTemplateSeed: true,
+          preserveEditorStateDuringReconnect: true,
+        });
         if (success && this.editor) {
           await this.waitForStableShareReviewMutationState();
           captureEvent('suggestion_accepted', { count: initialIds.length });

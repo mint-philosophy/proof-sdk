@@ -34,10 +34,15 @@ function run(): void {
   assert(
     applyResultBlock.includes("const collabStatus = typeof result?.collab?.status === 'string' ? result.collab.status : '';")
       && applyResultBlock.includes('resetSuggestionsInsertCoalescing();')
-      && applyResultBlock.includes("this.pendingCollabReconnectTemplateOverride = this.normalizeMarkdownForCollab(markdown);")
+      && applyResultBlock.includes("const skipReconnectTemplateSeed = options?.skipReconnectTemplateSeed === true;")
+      && applyResultBlock.includes("const preserveEditorStateDuringReconnect = options?.preserveEditorStateDuringReconnect === true;")
+      && applyResultBlock.includes('this.pendingCollabReconnectTemplateOverride = skipReconnectTemplateSeed')
+      && applyResultBlock.includes(': this.normalizeMarkdownForCollab(markdown);')
+      && applyResultBlock.includes('this.skipNextCollabTemplateSeed = skipReconnectTemplateSeed;')
+      && applyResultBlock.includes('this.preserveEditorStateOnNextCollabReconnect = preserveEditorStateDuringReconnect;')
       && applyResultBlock.includes("this.collabConnectionStatus = 'connecting';")
       && applyResultBlock.includes('this.collabIsSynced = false;'),
-    'Expected share review mutation results with pending collab status to clear tracked-insert coalescing, seed the next reconnect from canonical server markdown, and mark collab as unstable before the reconnect finishes',
+    'Expected share review mutation results with pending collab status to clear tracked-insert coalescing, mark collab as unstable, and optionally skip reconnect template replay when the canonical result is already loaded in the editor',
   );
 
   const reconnectBlock = sliceBetween(
@@ -50,6 +55,14 @@ function run(): void {
       && reconnectBlock.includes('reconnectTemplate = this.pendingCollabReconnectTemplateOverride;')
       && reconnectBlock.includes('this.pendingCollabReconnectTemplateOverride = null;'),
     'Expected collab reconnect to prefer the authoritative share mutation template over a stale fetchDocument fallback',
+  );
+  assert(
+    reconnectBlock.includes('const forcePreserveEditorState = this.preserveEditorStateOnNextCollabReconnect;')
+      && reconnectBlock.includes('const shouldPreserveLocalState = forcePreserveEditorState')
+      && reconnectBlock.includes('if (this.skipNextCollabTemplateSeed) {')
+      && reconnectBlock.includes('reconnectTemplate = null;')
+      && reconnectBlock.includes('this.skipNextCollabTemplateSeed = false;'),
+    'Expected collab reconnect to support preserving the current canonical editor state while skipping a redundant reconnect template replay',
   );
 
   const editGateBlock = sliceBetween(

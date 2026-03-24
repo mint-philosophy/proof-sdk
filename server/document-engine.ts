@@ -1105,6 +1105,73 @@ function isTargetMaterializedInsertMark(markdown: string, mark: StoredMark): boo
   return canonicalText.slice(anchorEnd, anchorEnd + content.length) === content;
 }
 
+type RefreshedTargetSuggestionResult =
+  | { ok: true; mark: StoredMark }
+  | { ok: false; result: EngineExecutionResult };
+
+function refreshSuggestionMarkFromTarget(
+  route: 'POST /marks/accept' | 'POST /marks/reject',
+  markdown: string,
+  mark: StoredMark,
+): RefreshedTargetSuggestionResult {
+  if (!isRecord(mark.target) || shouldPreserveMaterializedInsertForRehydration(mark)) {
+    return { ok: true, mark };
+  }
+
+  const parsedTarget = parseAnchorTarget(mark.target);
+  if (!parsedTarget.ok) {
+    return { ok: false, result: { status: 409, body: { success: false, code: 'ANCHOR_NOT_FOUND', error: 'Suggestion target metadata is invalid' } } };
+  }
+  const resolved = resolveMutationAnchor(
+    route,
+    markdown,
+    parsedTarget.target,
+    'Suggestion anchor quote not found in document',
+  );
+  if (!resolved.ok) return { ok: false, result: resolved.result };
+  const stabilizedTarget = stabilizeAnchorTarget(
+    resolved.logicalSource,
+    resolved.normalizedTarget,
+    resolved.resolved,
+  );
+  const selectionMetadata = buildStoredSelectionMetadata(
+    markdown,
+    resolved.resolved.selection,
+    typeof mark.quote === 'string' ? mark.quote : resolved.normalizedTarget.anchor,
+  );
+
+  const refreshedMark: StoredMark = {
+    ...mark,
+    target: stabilizedTarget,
+    quote: selectionMetadata.quote,
+  };
+
+  if (selectionMetadata.startRel) refreshedMark.startRel = selectionMetadata.startRel;
+  else delete refreshedMark.startRel;
+  if (selectionMetadata.endRel) refreshedMark.endRel = selectionMetadata.endRel;
+  else delete refreshedMark.endRel;
+
+  if (mark.kind === 'insert') {
+    const anchorPos = parseRelativeCharOffset(selectionMetadata.endRel)
+      ?? parseRelativeCharOffset(selectionMetadata.startRel);
+    if (anchorPos !== null) {
+      refreshedMark.range = { from: anchorPos, to: anchorPos };
+    } else {
+      delete refreshedMark.range;
+    }
+  } else {
+    const startRel = parseRelativeCharOffset(selectionMetadata.startRel);
+    const endRel = parseRelativeCharOffset(selectionMetadata.endRel);
+    if (startRel !== null && endRel !== null && endRel > startRel) {
+      refreshedMark.range = { from: startRel, to: endRel };
+    } else {
+      delete refreshedMark.range;
+    }
+  }
+
+  return { ok: true, mark: refreshedMark };
+}
+
 function isMaterializedInsertMark(markdown: string, mark: StoredMark): boolean {
   if (mark.kind !== 'insert') return false;
   const content = typeof mark.content === 'string' ? mark.content : '';
@@ -2632,42 +2699,65 @@ async function updateSuggestionStatusAsync(
     return result;
   }
 
-  let marksForRehydration = stabilizedExisting === existing
-    ? marks
-    : { ...marks, [markId]: stabilizedExisting };
-  if (isRecord(stabilizedExisting.target) && !shouldPreserveMaterializedInsertForRehydration(stabilizedExisting)) {
-    const parsedTarget = parseAnchorTarget(stabilizedExisting.target);
-    if (!parsedTarget.ok) {
-      return { status: 409, body: { success: false, code: 'ANCHOR_NOT_FOUND', error: 'Suggestion target metadata is invalid' } };
+  const refreshedFromTarget = refreshSuggestionMarkFromTarget(
+    status === 'accepted' ? 'POST /marks/accept' : 'POST /marks/reject',
+    doc.markdown,
+    stabilizedExisting,
+  );
+  if (!refreshedFromTarget.ok) return refreshedFromTarget.result;
+  const rehydrationMark = refreshedFromTarget.mark;
+  if (status === 'accepted' && isMaterializedInsertMark(doc.markdown, rehydrationMark)) {
+    const nextMarks = { ...marks };
+    delete nextMarks[markId];
+    const mutation = await mutateCanonicalDocument({
+      slug,
+      nextMarkdown: applyMutationCleanup('POST /marks/accept', stripAllProofSpanTags(doc.markdown)),
+      nextMarks: nextMarks as unknown as Record<string, unknown>,
+      source: `engine:${status}:${actor}:materialized`,
+      baseRevision: doc.revision,
+      strictLiveDoc: true,
+      guardPathologicalGrowth: true,
+    });
+    if (!mutation.ok) {
+      return {
+        status: mutation.status,
+        body: {
+          success: false,
+          code: mutation.code,
+          error: mutation.error,
+          ...(mutation.retryWithState ? { retryWithState: mutation.retryWithState } : {}),
+        },
+      };
     }
-    const resolved = resolveMutationAnchor(
-      status === 'accepted' ? 'POST /marks/accept' : 'POST /marks/reject',
-      doc.markdown,
-      parsedTarget.target,
-      'Suggestion anchor quote not found in document',
+    const updated = getDocumentBySlug(slug);
+    const resolvedRevision = typeof updated?.revision === 'number' ? updated.revision : (doc.revision + 1);
+    upsertMarkTombstone(slug, markId, status, resolvedRevision);
+    const eventId = addDocumentEvent(
+      slug,
+      `suggestion.${status}`,
+      { markId, status, by: actor },
+      actor,
+      mutationContextIdempotencyKey(context),
+      mutationContextIdempotencyRoute(context),
     );
-    if (!resolved.ok) return resolved.result;
-    const stabilizedTarget = stabilizeAnchorTarget(
-      resolved.logicalSource,
-      resolved.normalizedTarget,
-      resolved.resolved,
-    );
-    const selectionMetadata = buildStoredSelectionMetadata(
-      doc.markdown,
-      resolved.resolved.selection,
-      typeof stabilizedExisting.quote === 'string' ? stabilizedExisting.quote : resolved.normalizedTarget.anchor,
-    );
-    marksForRehydration = {
-      ...marks,
-      [markId]: {
-        ...stabilizedExisting,
-        target: stabilizedTarget,
-        quote: selectionMetadata.quote,
-        ...(selectionMetadata.startRel ? { startRel: selectionMetadata.startRel } : {}),
-        ...(selectionMetadata.endRel ? { endRel: selectionMetadata.endRel } : {}),
+    await finalizeCollabInvalidation(doc.access_epoch, updated?.access_epoch);
+    return {
+      status: 200,
+      body: {
+        success: true,
+        eventId,
+        shareState: mutation.document.share_state,
+        updatedAt: mutation.document.updated_at,
+        content: mutation.document.markdown,
+        markdown: mutation.document.markdown,
+        marks: nextMarks,
       },
     };
   }
+
+  let marksForRehydration = rehydrationMark === existing
+    ? marks
+    : { ...marks, [markId]: rehydrationMark };
 
   const structuredResult = await finalizeSuggestionThroughRehydration({
     markdown: doc.markdown,
@@ -2675,7 +2765,7 @@ async function updateSuggestionStatusAsync(
     markId,
     action: status === 'accepted' ? 'accept' : 'reject',
   });
-  const directAcceptMark = marksForRehydration[markId] ?? stabilizedExisting;
+  const directAcceptMark = marksForRehydration[markId] ?? rehydrationMark;
   if (!structuredResult.ok) {
     const fallbackMark = directAcceptMark;
     if (
@@ -2917,42 +3007,26 @@ async function computeSuggestionStatusTransition(
     };
   }
 
-  let marksForRehydration = stabilizedExisting === existing
-    ? marks
-    : { ...marks, [markId]: stabilizedExisting };
-  if (isRecord(stabilizedExisting.target) && !shouldPreserveMaterializedInsertForRehydration(stabilizedExisting)) {
-    const parsedTarget = parseAnchorTarget(stabilizedExisting.target);
-    if (!parsedTarget.ok) {
-      return { ok: false, result: { status: 409, body: { success: false, code: 'ANCHOR_NOT_FOUND', error: 'Suggestion target metadata is invalid' } } };
-    }
-    const resolved = resolveMutationAnchor(
-      status === 'accepted' ? 'POST /marks/accept' : 'POST /marks/reject',
-      markdown,
-      parsedTarget.target,
-      'Suggestion anchor quote not found in document',
-    );
-    if (!resolved.ok) return { ok: false, result: resolved.result };
-    const stabilizedTarget = stabilizeAnchorTarget(
-      resolved.logicalSource,
-      resolved.normalizedTarget,
-      resolved.resolved,
-    );
-    const selectionMetadata = buildStoredSelectionMetadata(
-      markdown,
-      resolved.resolved.selection,
-      typeof stabilizedExisting.quote === 'string' ? stabilizedExisting.quote : resolved.normalizedTarget.anchor,
-    );
-    marksForRehydration = {
-      ...marks,
-      [markId]: {
-        ...stabilizedExisting,
-        target: stabilizedTarget,
-        quote: selectionMetadata.quote,
-        ...(selectionMetadata.startRel ? { startRel: selectionMetadata.startRel } : {}),
-        ...(selectionMetadata.endRel ? { endRel: selectionMetadata.endRel } : {}),
-      },
+  const refreshedFromTarget = refreshSuggestionMarkFromTarget(
+    status === 'accepted' ? 'POST /marks/accept' : 'POST /marks/reject',
+    markdown,
+    stabilizedExisting,
+  );
+  if (!refreshedFromTarget.ok) return { ok: false, result: refreshedFromTarget.result };
+  const rehydrationMark = refreshedFromTarget.mark;
+  if (status === 'accepted' && isMaterializedInsertMark(markdown, rehydrationMark)) {
+    const nextMarks = { ...marks };
+    delete nextMarks[markId];
+    return {
+      ok: true,
+      nextMarkdown: applyMutationCleanup('POST /marks/accept', stripAllProofSpanTags(markdown)),
+      nextMarks,
     };
   }
+
+  let marksForRehydration = rehydrationMark === existing
+    ? marks
+    : { ...marks, [markId]: rehydrationMark };
 
   const structuredResult = await finalizeSuggestionThroughRehydration({
     markdown,
@@ -2960,7 +3034,7 @@ async function computeSuggestionStatusTransition(
     markId,
     action: status === 'accepted' ? 'accept' : 'reject',
   });
-  const directAcceptMark = marksForRehydration[markId] ?? stabilizedExisting;
+  const directAcceptMark = marksForRehydration[markId] ?? rehydrationMark;
   if (!structuredResult.ok) {
     const fallbackMark = directAcceptMark;
     if (

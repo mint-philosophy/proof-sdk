@@ -383,6 +383,74 @@ async function run(): Promise<void> {
       `Expected stored materialized anchor batch markdown without duplication or cross-block bleed, got ${JSON.stringify(storedMaterializedAnchorBatch?.markdown)}`,
     );
 
+    const materializedTargetSpanSlug = `shared-materialized-target-span-${Math.random().toString(36).slice(2, 10)}`;
+    const materializedTargetSpanMarkdown = [
+      '# Run 36 Accept Test<span data-proof="suggestion" data-id="target-heading" data-by="human:test" data-kind="insert"> TC heading edit</span>',
+      '',
+      'First baseline paragraph with calculations for offset testing.<span data-proof="suggestion" data-id="target-p1" data-by="human:test" data-kind="insert"> TC insertion in paragraph one.</span>',
+      '',
+      'Second baseline for multi-block accept all verification.<span data-proof="suggestion" data-id="target-p2" data-by="human:test" data-kind="insert"> TC insertion in paragraph two.</span>',
+      '',
+    ].join('\n');
+    db.createDocument(
+      materializedTargetSpanSlug,
+      materializedTargetSpanMarkdown,
+      {
+        'target-heading': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: 'Run 36 Accept Test',
+          content: ' TC heading edit',
+          startRel: 'char:0',
+          endRel: 'char:18',
+          range: { from: 18, to: 18 },
+          target: { anchor: 'Run 36 Accept Test', mode: 'normalized', occurrence: 'first' },
+        },
+        'target-p1': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: 'offset testing.',
+          content: ' TC insertion in paragraph one.',
+          startRel: 'char:67',
+          endRel: 'char:82',
+          range: { from: 82, to: 82 },
+          target: { anchor: 'offset testing.', mode: 'normalized', occurrence: 'first' },
+        },
+        'target-p2': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: 'verification.',
+          content: ' TC insertion in paragraph two.',
+          startRel: 'char:127',
+          endRel: 'char:140',
+          range: { from: 140, to: 140 },
+          target: { anchor: 'verification.', mode: 'normalized', occurrence: 'first' },
+        },
+      },
+      'Shared materialized target insert batch accept regression',
+    );
+
+    const acceptedMaterializedTargetSpanBatch = await executeDocumentOperationAsync(materializedTargetSpanSlug, 'POST', '/marks/accept-all', {
+      markIds: ['target-heading', 'target-p1', 'target-p2'],
+      by: 'human:test',
+    });
+    assert(acceptedMaterializedTargetSpanBatch.status === 200, `Expected materialized target span batch accept status 200, got ${acceptedMaterializedTargetSpanBatch.status}`);
+    assert(
+      String(acceptedMaterializedTargetSpanBatch.body.markdown ?? '')
+        === '# Run 36 Accept Test TC heading edit\n\nFirst baseline paragraph with calculations for offset testing. TC insertion in paragraph one.\n\nSecond baseline for multi-block accept all verification. TC insertion in paragraph two.\n',
+      `Expected target-bearing materialized span batch accept not to duplicate or drift already-materialized inserts, got ${JSON.stringify(acceptedMaterializedTargetSpanBatch.body.markdown)}`,
+    );
+
+    const storedMaterializedTargetSpanBatch = db.getDocumentBySlug(materializedTargetSpanSlug);
+    assert(
+      storedMaterializedTargetSpanBatch?.markdown
+        === '# Run 36 Accept Test TC heading edit\n\nFirst baseline paragraph with calculations for offset testing. TC insertion in paragraph one.\n\nSecond baseline for multi-block accept all verification. TC insertion in paragraph two.\n',
+      `Expected stored target-bearing materialized span batch markdown without duplication or cross-block bleed, got ${JSON.stringify(storedMaterializedTargetSpanBatch?.markdown)}`,
+    );
+
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

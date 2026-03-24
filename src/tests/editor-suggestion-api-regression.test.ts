@@ -51,14 +51,26 @@ function run(): void {
       && sortedPendingIdsBlock.includes('return bMax - aMax;'),
     'Expected share review batch actions to sort pending suggestions from the live document by descending position before each mutation pass',
   );
+  const sortedServerPendingIdsBlock = sliceBetween(
+    editorSource,
+    '  private getSortedPendingSuggestionIdsFromStoredMarks(marks: Record<string, StoredMark>): string[] {',
+    '\n  /**\n   * Accept all pending suggestions\n   */',
+  );
+  assert(
+    sortedServerPendingIdsBlock.includes("return (kind === 'insert' || kind === 'delete' || kind === 'replace') && mark.status === 'pending';")
+      && sortedServerPendingIdsBlock.includes("const aMax = a.range?.to ?? a.range?.from ?? -1;")
+      && sortedServerPendingIdsBlock.includes('return bMax - aMax;'),
+    'Expected share Accept All to recompute pending suggestion order from the latest server marks after each persisted accept',
+  );
   assert(
     markAcceptAllBlock.includes('const initialIds = this.getSortedPendingSuggestionIdsForShareReview();')
-      && markAcceptAllBlock.includes('const pendingIds = this.getSortedPendingSuggestionIdsForShareReview();')
-      && markAcceptAllBlock.includes('const latestPendingIds = this.getSortedPendingSuggestionIdsForShareReview();')
-      && markAcceptAllBlock.includes('const success = await this.markAcceptPersisted(suggestionId);')
-      && markAcceptAllBlock.includes('const maxPasses = 8;')
-      && markAcceptAllBlock.includes('if (acceptedInPass === 0) break;'),
-    'Expected share-mode markAcceptAll to recompute live pending suggestion order after each accept instead of replaying a stale snapshot',
+      && markAcceptAllBlock.includes('void this.runSerializedShareReviewMutation(async () => {')
+      && markAcceptAllBlock.includes('const result = await shareClient.acceptSuggestion(suggestionId, actor);')
+      && markAcceptAllBlock.includes('pendingIds = this.getSortedPendingSuggestionIdsFromStoredMarks(serverMarks)')
+      && markAcceptAllBlock.includes('const success = await this.applyShareMutationDocumentResult(latestSuccessfulResult);')
+      && markAcceptAllBlock.includes("tombstoneResolvedMarkIds(acceptedIds, { reason: 'deleted' });")
+      && !markAcceptAllBlock.includes('await this.markAcceptPersisted(suggestionId);'),
+    'Expected share-mode markAcceptAll to batch persisted accepts server-side and perform a single final authoritative apply/reconnect',
   );
 
   const handleMarksChangeBlock = sliceBetween(editorSource, '  private handleMarksChange(', '\n  private serializeMarkdown(');

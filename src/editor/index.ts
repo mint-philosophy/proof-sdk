@@ -9433,6 +9433,20 @@ class ProofEditorImpl implements ProofEditor {
     return sortedIds;
   }
 
+  private getSortedPendingSuggestionIdsFromStoredMarks(marks: Record<string, StoredMark>): string[] {
+    return Object.entries(marks)
+      .filter(([, mark]) => {
+        const kind = mark?.kind;
+        return (kind === 'insert' || kind === 'delete' || kind === 'replace') && mark.status === 'pending';
+      })
+      .sort(([, a], [, b]) => {
+        const aMax = a.range?.to ?? a.range?.from ?? -1;
+        const bMax = b.range?.to ?? b.range?.from ?? -1;
+        return bMax - aMax;
+      })
+      .map(([id]) => id);
+  }
+
   /**
    * Accept all pending suggestions
    */
@@ -9446,25 +9460,49 @@ class ProofEditorImpl implements ProofEditor {
       const initialIds = this.getSortedPendingSuggestionIdsForShareReview();
       if (initialIds.length === 0) return 0;
 
-      void (async () => {
-        const maxPasses = 8;
-        for (let pass = 0; pass < maxPasses; pass += 1) {
-          const pendingIds = this.getSortedPendingSuggestionIdsForShareReview();
-          if (pendingIds.length === 0) break;
+      void this.runSerializedShareReviewMutation(async () => {
+        await this.flushShareReviewMutationState();
+        const actor = getCurrentActor();
+        const acceptedIds: string[] = [];
+        let pendingIds = [...initialIds];
+        let latestSuccessfulResult: {
+          markdown?: string;
+          marks?: Record<string, unknown> | null;
+          collab?: { status?: string; reason?: string };
+        } | null = null;
 
-          let acceptedInPass = 0;
-          for (const suggestionId of pendingIds) {
-            const latestPendingIds = this.getSortedPendingSuggestionIdsForShareReview();
-            if (!latestPendingIds.includes(suggestionId)) continue;
-            const success = await this.markAcceptPersisted(suggestionId);
-            if (success) {
-              acceptedInPass += 1;
-            }
+        while (pendingIds.length > 0) {
+          const suggestionId = pendingIds[0];
+          const result = await shareClient.acceptSuggestion(suggestionId, actor);
+          if (!result || 'error' in result || result.success !== true) {
+            console.error('[markAcceptAll] Failed to persist suggestion acceptance via share mutation:', result);
+            break;
           }
 
-          if (acceptedInPass === 0) break;
+          acceptedIds.push(suggestionId);
+          latestSuccessfulResult = result;
+
+          const serverMarks = (result.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
+            ? result.marks as Record<string, StoredMark>
+            : {};
+          pendingIds = this.getSortedPendingSuggestionIdsFromStoredMarks(serverMarks)
+            .filter((id) => !acceptedIds.includes(id));
         }
-      })().catch((error) => {
+
+        if (!latestSuccessfulResult || acceptedIds.length === 0) return;
+
+        tombstoneResolvedMarkIds(acceptedIds, { reason: 'deleted' });
+        const success = await this.applyShareMutationDocumentResult(latestSuccessfulResult);
+        if (success && this.editor) {
+          await this.waitForStableShareReviewMutationState();
+          captureEvent('suggestion_accepted', { count: acceptedIds.length });
+          this.editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            const stats = getAuthorshipStats(view);
+            this.bridge?.authorshipStatsUpdated?.(stats);
+          });
+        }
+      }).catch((error) => {
         console.error('[markAcceptAll] Failed to persist suggestion acceptance via share mutation:', error);
       });
       return initialIds.length;

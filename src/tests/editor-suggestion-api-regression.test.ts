@@ -65,12 +65,12 @@ function run(): void {
   assert(
     markAcceptAllBlock.includes('const initialIds = this.getSortedPendingSuggestionIdsForShareReview();')
       && markAcceptAllBlock.includes('void this.runSerializedShareReviewMutation(async () => {')
-      && markAcceptAllBlock.includes('const result = await shareClient.acceptSuggestion(suggestionId, actor);')
-      && markAcceptAllBlock.includes('pendingIds = this.getSortedPendingSuggestionIdsFromStoredMarks(serverMarks)')
-      && markAcceptAllBlock.includes('const success = await this.applyShareMutationDocumentResult(latestSuccessfulResult);')
-      && markAcceptAllBlock.includes("tombstoneResolvedMarkIds(acceptedIds, { reason: 'deleted' });")
-      && !markAcceptAllBlock.includes('await this.markAcceptPersisted(suggestionId);'),
-    'Expected share-mode markAcceptAll to batch persisted accepts server-side and perform a single final authoritative apply/reconnect',
+      && markAcceptAllBlock.includes('const result = await shareClient.acceptSuggestions(initialIds, actor);')
+      && markAcceptAllBlock.includes('const success = await this.applyShareMutationDocumentResult(result);')
+      && markAcceptAllBlock.includes("tombstoneResolvedMarkIds(initialIds, { reason: 'deleted' });")
+      && !markAcceptAllBlock.includes('await this.markAcceptPersisted(suggestionId);')
+      && !markAcceptAllBlock.includes('await shareClient.acceptSuggestion(suggestionId, actor);'),
+    'Expected share-mode markAcceptAll to use the server-side batch accept mutation and perform a single final authoritative apply/reconnect',
   );
   const markRejectAllBlock = sliceBetween(editorSource, '  markRejectAll(): number {', '\n  /**\n   * Delete a mark by ID\n   */');
   assert(
@@ -196,9 +196,10 @@ function run(): void {
 
   assert(
     shareClientSource.includes('async acceptSuggestion(')
+      && shareClientSource.includes('async acceptSuggestions(')
       && shareClientSource.includes("path: 'accept' | 'reject';")
       && shareClientSource.includes("/agent/${encodeURIComponent(this.slug as string)}/marks/${args.path}"),
-    'Expected ShareClient to expose a dedicated acceptSuggestion mutation',
+    'Expected ShareClient to expose dedicated single-mark and batch accept mutations',
   );
 
   const acceptRouteBlock = sliceBetween(

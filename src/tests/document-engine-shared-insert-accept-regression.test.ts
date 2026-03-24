@@ -60,6 +60,65 @@ async function run(): Promise<void> {
     const stored = db.getDocumentBySlug(slug);
     assert(stored?.markdown === 'Alpha beta gamma.\n', `Expected stored markdown to include inserted text, got ${JSON.stringify(stored?.markdown)}`);
 
+    const batchSlug = `shared-insert-batch-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(batchSlug, 'Alpha.\nGamma.\n', {}, 'Shared insert batch accept regression');
+
+    const firstSuggest = await executeDocumentOperationAsync(batchSlug, 'POST', '/marks/suggest-insert', {
+      quote: 'Alpha',
+      content: ' beta',
+      by: 'ai:test',
+    });
+    assert(firstSuggest.status === 200, `Expected first batch insert suggestion status 200, got ${firstSuggest.status}`);
+
+    const firstMarks = (firstSuggest.body.marks ?? {}) as Record<string, { kind?: string }>;
+    const firstMarkId = Object.entries(firstMarks).find(([, mark]) => mark?.kind === 'insert')?.[0] ?? '';
+    assert(firstMarkId.length > 0, 'Expected first batch insert suggestion mark id');
+
+    const secondSuggest = await executeDocumentOperationAsync(batchSlug, 'POST', '/marks/suggest-insert', {
+      quote: 'Gamma',
+      content: ' delta',
+      by: 'ai:test',
+    });
+    assert(secondSuggest.status === 200, `Expected second batch insert suggestion status 200, got ${secondSuggest.status}`);
+
+    const secondMarks = (secondSuggest.body.marks ?? {}) as Record<string, { kind?: string }>;
+    const secondMarkId = Object.keys(secondMarks).find((markId) => markId !== firstMarkId) ?? '';
+    assert(secondMarkId.length > 0, 'Expected second batch insert suggestion mark id');
+
+    const acceptedAll = await executeDocumentOperationAsync(batchSlug, 'POST', '/marks/accept-all', {
+      markIds: [firstMarkId, secondMarkId],
+      by: 'human:test',
+    });
+    assert(acceptedAll.status === 200, `Expected batch accept status 200, got ${acceptedAll.status}`);
+    const acceptedAllMarkdown = String(acceptedAll.body.markdown ?? '');
+    assert(
+      acceptedAllMarkdown.includes('Alpha beta.'),
+      `Expected batch accepted markdown to keep the first insert once, got ${JSON.stringify(acceptedAll.body.markdown)}`,
+    );
+    assert(
+      (acceptedAllMarkdown.match(/beta/g) ?? []).length === 1,
+      `Expected batch accepted markdown not to duplicate the first insert, got ${JSON.stringify(acceptedAll.body.markdown)}`,
+    );
+    assert(
+      (acceptedAllMarkdown.match(/delta/g) ?? []).length === 1,
+      `Expected batch accepted markdown not to duplicate the second insert, got ${JSON.stringify(acceptedAll.body.markdown)}`,
+    );
+    assert(
+      (acceptedAllMarkdown.match(/Alpha\./g) ?? []).length <= 1
+        && (acceptedAllMarkdown.match(/Gamma\./g) ?? []).length <= 1,
+      `Expected batch accepted markdown not to duplicate the original paragraphs, got ${JSON.stringify(acceptedAll.body.markdown)}`,
+    );
+    const acceptedAllMarks = (acceptedAll.body.marks ?? {}) as Record<string, { kind?: string }>;
+    assert(Object.keys(acceptedAllMarks).length === 0, 'Expected batch accept to clear the accepted insert marks');
+
+    const storedBatch = db.getDocumentBySlug(batchSlug);
+    const storedBatchMarkdown = String(storedBatch?.markdown ?? '');
+    assert(
+      (storedBatchMarkdown.match(/beta/g) ?? []).length === 1
+        && (storedBatchMarkdown.match(/delta/g) ?? []).length === 1,
+      `Expected stored batch markdown without duplicated accepted inserts, got ${JSON.stringify(storedBatch?.markdown)}`,
+    );
+
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

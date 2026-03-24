@@ -2643,6 +2643,257 @@ async function updateSuggestionStatusAsync(
   };
 }
 
+type SuggestionStatusComputation =
+  | {
+      ok: true;
+      nextMarkdown: string;
+      nextMarks: Record<string, StoredMark>;
+    }
+  | {
+      ok: false;
+      result: EngineExecutionResult;
+    };
+
+async function computeSuggestionStatusTransition(
+  markdown: string,
+  marks: Record<string, StoredMark>,
+  markId: string,
+  status: 'accepted' | 'rejected',
+): Promise<SuggestionStatusComputation> {
+  const existing = marks[markId];
+  if (!existing) {
+    return { ok: false, result: { status: 404, body: { success: false, error: 'Mark not found' } } };
+  }
+  if (existing.status === status) {
+    return { ok: true, nextMarkdown: markdown, nextMarks: marks };
+  }
+
+  if (existing.kind !== 'insert' && existing.kind !== 'delete' && existing.kind !== 'replace') {
+    return {
+      ok: true,
+      nextMarkdown: markdown,
+      nextMarks: {
+        ...marks,
+        [markId]: { ...existing, status },
+      },
+    };
+  }
+
+  let marksForRehydration = marks;
+  if (isRecord(existing.target)) {
+    const parsedTarget = parseAnchorTarget(existing.target);
+    if (!parsedTarget.ok) {
+      return { ok: false, result: { status: 409, body: { success: false, code: 'ANCHOR_NOT_FOUND', error: 'Suggestion target metadata is invalid' } } };
+    }
+    const resolved = resolveMutationAnchor(
+      status === 'accepted' ? 'POST /marks/accept' : 'POST /marks/reject',
+      markdown,
+      parsedTarget.target,
+      'Suggestion anchor quote not found in document',
+    );
+    if (!resolved.ok) return { ok: false, result: resolved.result };
+    const stabilizedTarget = stabilizeAnchorTarget(
+      resolved.logicalSource,
+      resolved.normalizedTarget,
+      resolved.resolved,
+    );
+    const selectionMetadata = buildStoredSelectionMetadata(
+      markdown,
+      resolved.resolved.selection,
+      typeof existing.quote === 'string' ? existing.quote : resolved.normalizedTarget.anchor,
+    );
+    marksForRehydration = {
+      ...marks,
+      [markId]: {
+        ...existing,
+        target: stabilizedTarget,
+        quote: selectionMetadata.quote,
+        ...(selectionMetadata.startRel ? { startRel: selectionMetadata.startRel } : {}),
+        ...(selectionMetadata.endRel ? { endRel: selectionMetadata.endRel } : {}),
+      },
+    };
+  }
+
+  const structuredResult = await finalizeSuggestionThroughRehydration({
+    markdown,
+    marks: marksForRehydration,
+    markId,
+    action: status === 'accepted' ? 'accept' : 'reject',
+  });
+  const directAcceptMark = marksForRehydration[markId] ?? existing;
+  if (!structuredResult.ok) {
+    const fallbackMark = directAcceptMark;
+    if (
+      status === 'accepted'
+      && structuredResult.code === 'MARK_NOT_HYDRATED'
+      && canAcceptDeleteSuggestionWithoutHydration(markdown, fallbackMark)
+    ) {
+      const acceptedMarkdown = buildAcceptedSuggestionMarkdown(markdown, fallbackMark);
+      if (acceptedMarkdown !== null) {
+        const deleteCleanupOffsets = getDeleteSuggestionCleanupOffsets(markdown, fallbackMark);
+        const nextMarks = { ...marks };
+        delete nextMarks[markId];
+        return {
+          ok: true,
+          nextMarkdown: applyMutationCleanup('POST /marks/accept', acceptedMarkdown, deleteCleanupOffsets),
+          nextMarks,
+        };
+      }
+    }
+    if (
+      status === 'rejected'
+      && structuredResult.code === 'MARK_NOT_HYDRATED'
+      && canRejectSuggestionWithoutHydration(markdown, existing)
+    ) {
+      const nextMarks = { ...marks };
+      delete nextMarks[markId];
+      return { ok: true, nextMarkdown: markdown, nextMarks };
+    }
+    return { ok: false, result: toStructuredMutationFailureResult(structuredResult, 'Suggestion anchor quote not found in document') };
+  }
+
+  let nextMarkdown = structuredResult.markdown;
+  let nextMarks = (
+    status === 'accepted'
+      ? rebasePendingInsertMarksAfterAcceptedSuggestion(structuredResult.marks, markId, directAcceptMark)
+      : structuredResult.marks
+  ) as Record<string, StoredMark>;
+  if (
+    status === 'accepted'
+    && directAcceptMark.kind === 'insert'
+    && nextMarkdown === markdown
+  ) {
+    const acceptedMarkdown = buildAcceptedSuggestionMarkdown(markdown, directAcceptMark);
+    if (acceptedMarkdown !== null) {
+      const acceptedMarks = { ...marks };
+      delete acceptedMarks[markId];
+      nextMarkdown = applyMutationCleanup('POST /marks/accept', acceptedMarkdown);
+      nextMarks = rebasePendingInsertMarksAfterAcceptedSuggestion(
+        acceptedMarks,
+        markId,
+        directAcceptMark,
+      ) as Record<string, StoredMark>;
+    }
+  }
+  if (status === 'accepted' && directAcceptMark.kind === 'insert') {
+    nextMarkdown = applyMutationCleanup('POST /marks/accept', stripProofSpanTags(nextMarkdown));
+  }
+
+  return {
+    ok: true,
+    nextMarkdown,
+    nextMarks,
+  };
+}
+
+async function acceptAllSuggestionsAsync(
+  slug: string,
+  body: JsonRecord,
+  context?: AsyncDocumentMutationContext,
+): Promise<EngineExecutionResult> {
+  const ready = await getAsyncMutationReadyDocumentWithVisibleFallback(slug, context);
+  if (ready.error) return ready.error;
+  const doc = ready.doc;
+  const actor = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : 'owner';
+  const marks = parseMarks(doc.marks);
+  const requestedMarkIds = Array.isArray(body.markIds)
+    ? body.markIds.filter((markId): markId is string => typeof markId === 'string' && markId.trim().length > 0).map((markId) => markId.trim())
+    : [];
+  const pendingIds = (requestedMarkIds.length > 0
+    ? requestedMarkIds
+    : Object.keys(marks)
+  )
+    .filter((markId, index, ids) => ids.indexOf(markId) === index)
+    .filter((markId) => {
+      const mark = marks[markId];
+      const kind = mark?.kind;
+      return Boolean(mark) && (kind === 'insert' || kind === 'delete' || kind === 'replace') && mark.status === 'pending';
+    })
+    .sort((a, b) => {
+      const aMark = marks[a];
+      const bMark = marks[b];
+      const aMax = aMark?.range?.to ?? aMark?.range?.from ?? -1;
+      const bMax = bMark?.range?.to ?? bMark?.range?.from ?? -1;
+      return bMax - aMax;
+    });
+  if (pendingIds.length === 0) {
+    return {
+      status: 200,
+      body: {
+        success: true,
+        acceptedCount: 0,
+        shareState: doc.share_state,
+        updatedAt: doc.updated_at,
+        markdown: doc.markdown,
+        content: doc.markdown,
+        marks,
+      },
+    };
+  }
+
+  let nextMarkdown = doc.markdown;
+  let nextMarks = marks;
+  const acceptedIds: string[] = [];
+  for (const markId of pendingIds) {
+    const computed = await computeSuggestionStatusTransition(nextMarkdown, nextMarks, markId, 'accepted');
+    if (!computed.ok) return computed.result;
+    nextMarkdown = computed.nextMarkdown;
+    nextMarks = computed.nextMarks;
+    acceptedIds.push(markId);
+  }
+
+  const mutation = await mutateCanonicalDocument({
+    slug,
+    nextMarkdown,
+    nextMarks: nextMarks as unknown as Record<string, unknown>,
+    source: `engine:accepted.batch:${actor}`,
+    ...buildCanonicalMutationBaseArgs(doc, context),
+    strictLiveDoc: true,
+    guardPathologicalGrowth: true,
+  });
+  if (!mutation.ok) {
+    return {
+      status: mutation.status,
+      body: {
+        success: false,
+        code: mutation.code,
+        error: mutation.error,
+        ...(mutation.retryWithState ? { retryWithState: mutation.retryWithState } : {}),
+      },
+    };
+  }
+
+  const eventIds = acceptedIds.map((markId) => addDocumentEvent(
+    slug,
+    'suggestion.accepted',
+    { markId, status: 'accepted', by: actor },
+    actor,
+    mutationContextIdempotencyKey(context),
+    mutationContextIdempotencyRoute(context),
+  ));
+  for (const markId of acceptedIds) {
+    upsertMarkTombstone(slug, markId, 'accepted', mutation.document.revision);
+  }
+  if ((mutation.document.access_epoch ?? doc.access_epoch) === doc.access_epoch) {
+    bumpDocumentAccessEpoch(slug);
+  }
+  await invalidateCollabDocumentAndWait(slug);
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      acceptedCount: acceptedIds.length,
+      eventIds,
+      shareState: mutation.document.share_state,
+      updatedAt: mutation.document.updated_at,
+      content: mutation.document.markdown,
+      markdown: mutation.document.markdown,
+      marks: parseMarks(mutation.document.marks),
+    },
+  };
+}
+
 function resolveComment(
   slug: string,
   body: JsonRecord,
@@ -2852,6 +3103,9 @@ export async function executeDocumentOperationAsync(
   }
   if (method === 'POST' && routePath === '/marks/accept') {
     return updateSuggestionStatusAsync(slug, body, 'accepted', context);
+  }
+  if (method === 'POST' && routePath === '/marks/accept-all') {
+    return acceptAllSuggestionsAsync(slug, body, context);
   }
   if (method === 'POST' && routePath === '/marks/reject') {
     return updateSuggestionStatusAsync(slug, body, 'rejected', context);

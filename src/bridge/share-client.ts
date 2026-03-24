@@ -5,7 +5,10 @@
 
 import { executeBridgeCall } from './bridge-executor';
 import { buildShareMutationBaseToken } from './share-mutation-base.js';
-import { createShareMutationIdempotencyKey } from './share-mutation-idempotency.js';
+import {
+  createShareBatchMutationIdempotencyKey,
+  createShareMutationIdempotencyKey,
+} from './share-mutation-idempotency.js';
 
 export interface ShareDocument {
   slug: string;
@@ -448,6 +451,27 @@ export class ShareClient {
     return null;
   }
 
+  private resolveRecoveredBatchMarkMutation(
+    context: ShareOpenContext | ShareRequestError | null,
+    markIds: string[],
+  ): ShareMarkMutationResponse | null {
+    if (!context || 'error' in context) return null;
+    const marks = (context.doc?.marks && typeof context.doc.marks === 'object' && !Array.isArray(context.doc.marks))
+      ? context.doc.marks as Record<string, unknown>
+      : null;
+    if (!marks) return null;
+
+    const allResolved = markIds.every((markId) => !(markId in marks));
+    if (!allResolved) return null;
+
+    return {
+      success: true,
+      marks,
+      markdown: typeof context.doc?.markdown === 'string' ? context.doc.markdown : undefined,
+      updatedAt: typeof context.doc?.updatedAt === 'string' ? context.doc.updatedAt : undefined,
+    };
+  }
+
   private async performMarkMutationWithRetry(args: {
     path: 'accept' | 'reject';
     markId: string;
@@ -515,6 +539,60 @@ export class ShareClient {
     return this.resolveRecoveredMarkMutation(await this.fetchOpenContext(args.options), args.markId, finalStatus)
       ?? lastError
       ?? this.createLocalRequestError(409, 'mark_mutation_failed', 'Tracked change mutation did not complete');
+  }
+
+  private async performBatchMarkMutationWithRetry(args: {
+    path: 'accept-all';
+    markIds: string[];
+    by: string;
+    idempotencyKey: string;
+    options?: { token?: string };
+  }): Promise<ShareMarkMutationResponse | ShareRequestError | null> {
+    const submit = async (base: ShareMutationBase): Promise<ShareMarkMutationResponse | ShareRequestError> => {
+      const response = await fetch(`${this.getApiBase()}/agent/${encodeURIComponent(this.slug as string)}/marks/${args.path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': args.idempotencyKey,
+          ...this.getShareAuthHeaders(args.options?.token),
+        },
+        body: JSON.stringify({ markIds: args.markIds, by: args.by, ...base }),
+      });
+      const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+      if (!response.ok) {
+        return this.buildRequestError(
+          response.status,
+          response.statusText,
+          this.readRequestId(response),
+          payload ?? {},
+        );
+      }
+      this.rememberObservedDocument(payload);
+      this.rememberObservedMutationBase(payload);
+      return this.parseShareMarkMutationResponse(payload);
+    };
+
+    let lastError: ShareRequestError | null = null;
+    for (let attempt = 0; attempt < MARK_MUTATION_RETRY_ATTEMPTS; attempt += 1) {
+      const base = await this.getMutationBase(args.options);
+      if ('error' in base) {
+        lastError = base;
+      } else {
+        const result = await submit(base);
+        if (!('error' in result) || !this.shouldRetryTransientMarkMutation(result)) {
+          return result;
+        }
+        lastError = result;
+      }
+
+      if (attempt < (MARK_MUTATION_RETRY_ATTEMPTS - 1)) {
+        await sleep(MUTATION_BASE_STATE_RETRY_DELAY_MS);
+      }
+    }
+
+    return this.resolveRecoveredBatchMarkMutation(await this.fetchOpenContext(args.options), args.markIds)
+      ?? lastError
+      ?? this.createLocalRequestError(409, 'mark_batch_mutation_failed', 'Tracked change batch mutation did not complete');
   }
 
   private extractMutationBase(payload: Record<string, unknown> | null): ShareMutationBase | null {
@@ -938,6 +1016,32 @@ export class ShareClient {
     return this.performMarkMutationWithRetry({
       path: 'accept',
       markId: trimmedMarkId,
+      by: actor,
+      idempotencyKey,
+      options,
+    });
+  }
+
+  async acceptSuggestions(
+    markIds: string[],
+    by: string,
+    options?: { token?: string }
+  ): Promise<ShareMarkMutationResponse | ShareRequestError | null> {
+    if (!this.slug) return null;
+    const trimmedIds = markIds
+      .map((markId) => (typeof markId === 'string' ? markId.trim() : ''))
+      .filter((markId) => markId.length > 0);
+    const actor = typeof by === 'string' ? by.trim() : '';
+    if (trimmedIds.length === 0 || !actor) return null;
+    const idempotencyKey = createShareBatchMutationIdempotencyKey({
+      path: 'accept-all',
+      slug: this.slug,
+      markIds: trimmedIds,
+      by: actor,
+    });
+    return this.performBatchMarkMutationWithRetry({
+      path: 'accept-all',
+      markIds: trimmedIds,
       by: actor,
       idempotencyKey,
       options,

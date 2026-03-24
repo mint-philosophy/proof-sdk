@@ -32,3 +32,21 @@ export function createShareMutationIdempotencyKey(args: {
     createNonce(),
   ].join(':');
 }
+
+export function createShareBatchMutationIdempotencyKey(args: {
+  path: 'accept-all';
+  slug: string;
+  markIds: string[];
+  by: string;
+}): string {
+  return [
+    'proof',
+    'share',
+    'mark-batch',
+    sanitizeKeyPart(args.path),
+    sanitizeKeyPart(args.slug),
+    sanitizeKeyPart(args.by),
+    sanitizeKeyPart(String(args.markIds.length)),
+    createNonce(),
+  ].join(':');
+}

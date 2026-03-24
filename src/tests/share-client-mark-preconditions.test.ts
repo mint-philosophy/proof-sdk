@@ -69,6 +69,9 @@ async function run(): Promise<void> {
     if (url.pathname === '/api/agent/test-doc/marks/accept') {
       return jsonResponse({ success: true, marks: {}, markdown: 'Accepted canonical markdown' });
     }
+    if (url.pathname === '/api/agent/test-doc/marks/accept-all') {
+      return jsonResponse({ success: true, marks: {}, markdown: 'Accepted all canonical markdown' });
+    }
     if (url.pathname === '/api/documents/test-doc/open-context') {
       return jsonResponse({
         success: true,
@@ -139,6 +142,14 @@ async function run(): Promise<void> {
       'acceptSuggestion should return the eventual canonical markdown after transient MARK_NOT_FOUND retries',
     );
 
+    const batchAccept = await shareClient.acceptSuggestions(['mark-1', 'mark-2'], 'human:editor');
+    assert.equal((batchAccept && 'error' in batchAccept) ? false : batchAccept?.success, true, 'acceptSuggestions should succeed');
+    assert.equal(
+      (batchAccept && 'error' in batchAccept) ? undefined : batchAccept?.markdown,
+      'Accepted all canonical markdown',
+      'acceptSuggestions should surface canonical markdown from the batch mutation response',
+    );
+
     const resolve = await shareClient.resolveComment('mark-resolve', 'human:editor');
     assert.equal((resolve && 'error' in resolve) ? false : resolve?.success, true, 'resolveComment should succeed');
 
@@ -176,14 +187,29 @@ async function run(): Promise<void> {
     );
 
     const rejectRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/reject');
+    const acceptAllRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/accept-all');
     assert.ok(
       rejectRequest?.headers.get('Idempotency-Key'),
       'rejectSuggestion should send an Idempotency-Key header when the server requires idempotent mutations',
     );
+    assert.ok(
+      acceptAllRequest?.headers.get('Idempotency-Key'),
+      'acceptSuggestions should send an Idempotency-Key header when the server requires idempotent mutations',
+    );
+    assert.deepEqual(
+      acceptAllRequest?.body?.markIds,
+      ['mark-1', 'mark-2'],
+      'acceptSuggestions should send the requested markIds in one batch payload',
+    );
     assert.equal(
       rejectRequest?.body?.baseRevision,
       43,
-      'rejectSuggestion should continue reading the latest base state after prior mark mutations',
+      'rejectSuggestion should continue reading the latest base state after prior mark mutations, including batch accept',
+    );
+    assert.equal(
+      acceptAllRequest?.body?.baseRevision,
+      47,
+      'acceptSuggestions should include the latest refreshed baseRevision',
     );
     assert.notEqual(
       acceptRequest?.headers.get('Idempotency-Key'),
@@ -192,13 +218,13 @@ async function run(): Promise<void> {
     );
 
     const resolveRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/resolve');
-    assert.equal(resolveRequest?.body?.baseRevision, 47, 'resolveComment should include the latest refreshed baseRevision after transient accept retries');
+    assert.equal(resolveRequest?.body?.baseRevision, 48, 'resolveComment should include the latest refreshed baseRevision after transient accept retries and batch accept');
 
     const unresolveRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/unresolve');
-    assert.equal(unresolveRequest?.body?.baseRevision, 48, 'unresolveComment should continue reading the latest baseRevision after prior retries');
+    assert.equal(unresolveRequest?.body?.baseRevision, 49, 'unresolveComment should continue reading the latest baseRevision after prior retries');
 
     const stateRequestCount = requests.filter((request) => request.path === '/api/agent/test-doc/state').length;
-    assert.equal(stateRequestCount, 8, 'share mark mutations should keep refreshing the mutation base across retries');
+    assert.equal(stateRequestCount, 9, 'share mark mutations should keep refreshing the mutation base across retries and batch accept');
 
     console.log('share-client-mark-preconditions.test.ts passed');
   } finally {

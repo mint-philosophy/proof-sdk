@@ -3550,6 +3550,79 @@ agentRoutes.post('/:slug/marks/accept', async (req: Request, res: Response) => {
   }
 });
 
+agentRoutes.post('/:slug/marks/accept-all', async (req: Request, res: Response) => {
+  const mutationRoute = 'POST /marks/accept-all';
+  const slug = getSlug(req);
+  if (!slug) {
+    sendMutationResponse(res, 400, { success: false, error: 'Invalid slug' }, { route: mutationRoute });
+    return;
+  }
+  if (!checkAuth(req, res, slug, ['editor', 'owner_bot'])) return;
+  const routeKey = mutationRoute;
+  const replay = await maybeReplayIdempotentMutation(req, res, slug, mutationRoute, routeKey);
+  if (replay.handled) return;
+  const payload = asPayload(req.body);
+  const mutationContext = await enforceMutationPrecondition(res, slug, mutationRoute, 'suggestion.accept', payload, replay);
+  if (!mutationContext) return;
+  let keepRewriteLockCooldown = false;
+  acquireRewriteLock(slug);
+  try {
+    const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/accept-all', payload, mutationContext);
+    if (result.status >= 200 && result.status < 300) {
+      keepRewriteLockCooldown = true;
+      if (isRecord(result.body)) {
+        result.body = {
+          ...result.body,
+          collab: {
+            status: 'pending',
+            reason: 'verification_deferred',
+            markdownConfirmed: null,
+            fragmentConfirmed: null,
+            canonicalConfirmed: null,
+          },
+        };
+      }
+      const participation = buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.accept_all' });
+      void notifyCollabMutation(
+        slug,
+        participation,
+        {
+          verify: true,
+          source: 'marks.accept_all',
+          stabilityMs: EDIT_COLLAB_STABILITY_MS,
+          fallbackBarrier: true,
+          strictLiveDoc: true,
+          apply: false,
+        },
+      ).then(async (collabStatus) => {
+        if (collabStatus.confirmed) return;
+        try {
+          await invalidateLoadedCollabDocumentAndWait(slug);
+        } catch (error) {
+          console.warn('[agent-routes] failed to invalidate loaded collab room after deferred accept-all verification', {
+            slug,
+            error,
+          });
+        }
+      }).catch((error) => {
+        console.warn('[agent-routes] deferred collab verification for accept-all failed', {
+          slug,
+          error,
+        });
+      });
+      storeIdempotentMutationResult(replay, mutationRoute, slug, 202, result.body);
+      sendMutationResponse(res, 202, result.body, { route: mutationRoute, slug });
+      return;
+    }
+    storeIdempotentMutationResult(replay, mutationRoute, slug, result.status, result.body);
+    sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
+  } finally {
+    if (!keepRewriteLockCooldown) {
+      releaseRewriteLockImmediately(slug);
+    }
+  }
+});
+
 agentRoutes.post('/:slug/marks/reject', async (req: Request, res: Response) => {
   const mutationRoute = 'POST /marks/reject';
   const slug = getSlug(req);

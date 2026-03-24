@@ -938,7 +938,10 @@ function buildAcceptedSuggestionMarkdown(markdown: string, suggestion: StoredMar
       range
       && range.to > range.from
       && normalizedQuote.length > 0
-      && normalizedQuote === normalizedContent
+      && (
+        normalizedQuote === normalizedContent
+        || (normalizedContent.length > 0 && normalizedQuote.includes(normalizedContent))
+      )
     ) {
       return markdown;
     }
@@ -989,6 +992,46 @@ function getStoredMarkRange(mark: StoredMark): { from: number; to: number } | nu
     return null;
   }
   return { from, to };
+}
+
+function stabilizeCollapsedMaterializedInsertMark(markdown: string, mark: StoredMark): StoredMark {
+  if (mark.kind !== 'insert') return mark;
+  const range = getStoredMarkRange(mark);
+  if (!range || range.to !== range.from) return mark;
+  if (typeof mark.quote === 'string' && normalizeQuote(mark.quote).length > 0) return mark;
+  const content = typeof mark.content === 'string' ? mark.content : '';
+  if (content.length === 0) return mark;
+
+  const { stripped } = stripMarkdownWithMapping(markdown);
+  const candidates = [
+    { from: range.from - content.length, to: range.from },
+    { from: range.from, to: range.from + content.length },
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate.from < 0 || candidate.to > stripped.length || candidate.to <= candidate.from) continue;
+    const candidateText = stripped.slice(candidate.from, candidate.to);
+    if (candidateText !== content) continue;
+    return {
+      ...mark,
+      range: candidate,
+      quote: normalizeQuote(candidateText),
+      startRel: `char:${candidate.from}`,
+      endRel: `char:${candidate.to}`,
+    };
+  }
+
+  return mark;
+}
+
+function isCollapsedMaterializedInsertMark(markdown: string, mark: StoredMark): boolean {
+  if (mark.kind !== 'insert') return false;
+  const range = getStoredMarkRange(mark);
+  if (!range || range.to !== range.from) return false;
+  if (typeof mark.quote === 'string' && normalizeQuote(mark.quote).length > 0) return false;
+  const content = typeof mark.content === 'string' ? mark.content : '';
+  if (content.length === 0) return false;
+  return stripAllProofSpanTags(markdown).includes(content);
 }
 
 function rebaseCollapsedInsertPositionForAcceptedSuggestion(
@@ -2390,6 +2433,8 @@ async function updateSuggestionStatusAsync(
     };
   }
 
+  const stabilizedExisting = stabilizeCollapsedMaterializedInsertMark(doc.markdown, existing);
+
   const finalizeCollabInvalidation = async (
     previousAccessEpoch: number | null | undefined,
     nextAccessEpoch: number | null | undefined,
@@ -2401,10 +2446,10 @@ async function updateSuggestionStatusAsync(
     await invalidateCollabDocumentAndWait(slug);
   };
 
-  if (existing.kind !== 'insert' && existing.kind !== 'delete' && existing.kind !== 'replace') {
+  if (stabilizedExisting.kind !== 'insert' && stabilizedExisting.kind !== 'delete' && stabilizedExisting.kind !== 'replace') {
     const nextMarks: Record<string, StoredMark> = {
       ...marks,
-      [markId]: { ...existing, status },
+      [markId]: { ...stabilizedExisting, status },
     };
     const result = await persistMarksAsync(
       slug,
@@ -2424,9 +2469,11 @@ async function updateSuggestionStatusAsync(
     return result;
   }
 
-  let marksForRehydration = marks;
-  if (isRecord(existing.target)) {
-    const parsedTarget = parseAnchorTarget(existing.target);
+  let marksForRehydration = stabilizedExisting === existing
+    ? marks
+    : { ...marks, [markId]: stabilizedExisting };
+  if (isRecord(stabilizedExisting.target)) {
+    const parsedTarget = parseAnchorTarget(stabilizedExisting.target);
     if (!parsedTarget.ok) {
       return { status: 409, body: { success: false, code: 'ANCHOR_NOT_FOUND', error: 'Suggestion target metadata is invalid' } };
     }
@@ -2445,12 +2492,12 @@ async function updateSuggestionStatusAsync(
     const selectionMetadata = buildStoredSelectionMetadata(
       doc.markdown,
       resolved.resolved.selection,
-      typeof existing.quote === 'string' ? existing.quote : resolved.normalizedTarget.anchor,
+      typeof stabilizedExisting.quote === 'string' ? stabilizedExisting.quote : resolved.normalizedTarget.anchor,
     );
     marksForRehydration = {
       ...marks,
       [markId]: {
-        ...existing,
+        ...stabilizedExisting,
         target: stabilizedTarget,
         quote: selectionMetadata.quote,
         ...(selectionMetadata.startRel ? { startRel: selectionMetadata.startRel } : {}),
@@ -2465,7 +2512,7 @@ async function updateSuggestionStatusAsync(
     markId,
     action: status === 'accepted' ? 'accept' : 'reject',
   });
-  const directAcceptMark = marksForRehydration[markId] ?? existingForApply.mark;
+  const directAcceptMark = marksForRehydration[markId] ?? stabilizedExisting;
   if (!structuredResult.ok) {
     const fallbackMark = directAcceptMark;
     if (
@@ -2526,7 +2573,7 @@ async function updateSuggestionStatusAsync(
     if (
       status === 'rejected'
       && structuredResult.code === 'MARK_NOT_HYDRATED'
-      && canRejectSuggestionWithoutHydration(doc.markdown, existing)
+      && canRejectSuggestionWithoutHydration(doc.markdown, stabilizedExisting)
     ) {
       const nextMarks = { ...marks };
       delete nextMarks[markId];
@@ -2683,20 +2730,33 @@ async function computeSuggestionStatusTransition(
     return { ok: true, nextMarkdown: markdown, nextMarks: marks };
   }
 
-  if (existing.kind !== 'insert' && existing.kind !== 'delete' && existing.kind !== 'replace') {
+  const stabilizedExisting = stabilizeCollapsedMaterializedInsertMark(markdown, existing);
+  if (status === 'accepted' && isCollapsedMaterializedInsertMark(markdown, stabilizedExisting)) {
+    const nextMarks = { ...marks };
+    delete nextMarks[markId];
+    return {
+      ok: true,
+      nextMarkdown: applyMutationCleanup('POST /marks/accept', stripAllProofSpanTags(markdown)),
+      nextMarks,
+    };
+  }
+
+  if (stabilizedExisting.kind !== 'insert' && stabilizedExisting.kind !== 'delete' && stabilizedExisting.kind !== 'replace') {
     return {
       ok: true,
       nextMarkdown: markdown,
       nextMarks: {
         ...marks,
-        [markId]: { ...existing, status },
+        [markId]: { ...stabilizedExisting, status },
       },
     };
   }
 
-  let marksForRehydration = marks;
-  if (isRecord(existing.target)) {
-    const parsedTarget = parseAnchorTarget(existing.target);
+  let marksForRehydration = stabilizedExisting === existing
+    ? marks
+    : { ...marks, [markId]: stabilizedExisting };
+  if (isRecord(stabilizedExisting.target)) {
+    const parsedTarget = parseAnchorTarget(stabilizedExisting.target);
     if (!parsedTarget.ok) {
       return { ok: false, result: { status: 409, body: { success: false, code: 'ANCHOR_NOT_FOUND', error: 'Suggestion target metadata is invalid' } } };
     }
@@ -2715,12 +2775,12 @@ async function computeSuggestionStatusTransition(
     const selectionMetadata = buildStoredSelectionMetadata(
       markdown,
       resolved.resolved.selection,
-      typeof existing.quote === 'string' ? existing.quote : resolved.normalizedTarget.anchor,
+      typeof stabilizedExisting.quote === 'string' ? stabilizedExisting.quote : resolved.normalizedTarget.anchor,
     );
     marksForRehydration = {
       ...marks,
       [markId]: {
-        ...existing,
+        ...stabilizedExisting,
         target: stabilizedTarget,
         quote: selectionMetadata.quote,
         ...(selectionMetadata.startRel ? { startRel: selectionMetadata.startRel } : {}),
@@ -2735,7 +2795,7 @@ async function computeSuggestionStatusTransition(
     markId,
     action: status === 'accepted' ? 'accept' : 'reject',
   });
-  const directAcceptMark = marksForRehydration[markId] ?? existing;
+  const directAcceptMark = marksForRehydration[markId] ?? stabilizedExisting;
   if (!structuredResult.ok) {
     const fallbackMark = directAcceptMark;
     if (
@@ -2758,7 +2818,7 @@ async function computeSuggestionStatusTransition(
     if (
       status === 'rejected'
       && structuredResult.code === 'MARK_NOT_HYDRATED'
-      && canRejectSuggestionWithoutHydration(markdown, existing)
+      && canRejectSuggestionWithoutHydration(markdown, stabilizedExisting)
     ) {
       const nextMarks = { ...marks };
       delete nextMarks[markId];

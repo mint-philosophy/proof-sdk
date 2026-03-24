@@ -3077,9 +3077,36 @@ function isAnchorBasedInsertSuggestion(mark: Mark, existingText: string): boolea
   // `existingText !== metadata.content` check falsely classifies them as anchor-only
   // and duplicates the accepted content. Only treat the suggestion as anchor-based
   // when the live marked text matches the anchor quote rather than the insert content.
+  // If a stale tracked-insert span has drifted wide enough to include neighboring
+  // authored text, the live marked text can still equal the stored quote while already
+  // containing the inserted content. In that case accept should preserve the live text
+  // and clear the mark rather than materializing the insert again.
   return normalizedQuote.length > 0
     && normalizedExisting === normalizedQuote
+    && !normalizedExisting.includes(normalizedContent)
     && normalizedExisting !== normalizedContent;
+}
+
+function insertAcceptShouldPreserveExistingText(mark: Mark, existingText: string): boolean {
+  if (mark.kind !== 'insert') return false;
+  const data = mark.data as InsertData | undefined;
+  const content = typeof data?.content === 'string' ? data.content : '';
+  if (content.length === 0) return false;
+
+  const normalizedExisting = normalizeQuote(existingText);
+  const normalizedQuote = normalizeQuote(mark.quote);
+  const normalizedContent = normalizeQuote(content);
+  if (
+    normalizedExisting.length === 0
+    || normalizedQuote.length === 0
+    || normalizedContent.length === 0
+  ) {
+    return false;
+  }
+
+  return normalizedExisting === normalizedQuote
+    && normalizedExisting !== normalizedContent
+    && normalizedExisting.includes(normalizedContent);
 }
 
 export function accept(view: EditorView, markId: string, parser?: MarkdownParser): boolean {
@@ -3102,6 +3129,11 @@ export function accept(view: EditorView, markId: string, parser?: MarkdownParser
       for (const range of ranges) {
         const existingText = getTextForRange(view.state.doc, range);
         const content = data?.content ?? existingText;
+        if (insertAcceptShouldPreserveExistingText(mark, existingText)) {
+          tr = removeSuggestionAnchors(tr, new Set([mark.id]));
+          applied = true;
+          continue;
+        }
         if (isAnchorBasedInsertSuggestion(mark, existingText)) {
           tr = tr.removeMark(range.from, range.to, markType);
           const insertionPoint = { from: range.to, to: range.to };

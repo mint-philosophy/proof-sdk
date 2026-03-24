@@ -222,6 +222,61 @@ async function run(): Promise<void> {
       `Expected stored multi-block batch markdown without duplicated or garbled accepted inserts, got ${JSON.stringify(storedMultiBlockBatch?.markdown)}`,
     );
 
+    const malformedInlineBatchSlug = `shared-malformed-inline-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(
+      malformedInlineBatchSlug,
+      '# Untitled\n\n Tracked insertion one.Baseline text for accept all test on build eafea47.\n\nSecond paragraph with more content here. Tracked insertion two.\n',
+      {
+        'paragraph-wide-insert': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: ' Tracked insertion one.Baseline text for accept all test on build eafea47.',
+          content: 'Tracked insertion one.',
+          range: { from: 12, to: 84 },
+        },
+        'second-paragraph-insert': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: ' Tracked insertion two.',
+          content: ' Tracked insertion two.',
+          range: { from: 125, to: 147 },
+        },
+      },
+      'Shared malformed inline insert batch accept regression',
+    );
+
+    const acceptedMalformedInlineBatch = await executeDocumentOperationAsync(malformedInlineBatchSlug, 'POST', '/marks/accept-all', {
+      markIds: ['paragraph-wide-insert', 'second-paragraph-insert'],
+      by: 'human:test',
+    });
+    assert(acceptedMalformedInlineBatch.status === 200, `Expected malformed inline batch accept status 200, got ${acceptedMalformedInlineBatch.status}`);
+    const acceptedMalformedInlineMarkdown = String(acceptedMalformedInlineBatch.body.markdown ?? '');
+    assert(
+      (acceptedMalformedInlineMarkdown.match(/Tracked insertion one\./g) ?? []).length === 1
+        && (acceptedMalformedInlineMarkdown.match(/Tracked insertion two\./g) ?? []).length === 1
+        && acceptedMalformedInlineMarkdown.includes('Baseline text for accept all test on build eafea47.')
+        && acceptedMalformedInlineMarkdown.includes('Second paragraph with more content here.')
+        && !acceptedMalformedInlineMarkdown.includes('Tracked insertion two.t')
+        && !acceptedMalformedInlineMarkdown.includes('accep Tracked insertion two.'),
+      `Expected malformed inline batch accept not to duplicate or bleed inline inserts, got ${JSON.stringify(acceptedMalformedInlineBatch.body.markdown)}`,
+    );
+    const acceptedMalformedInlineMarks = (acceptedMalformedInlineBatch.body.marks ?? {}) as Record<string, { kind?: string }>;
+    assert(Object.keys(acceptedMalformedInlineMarks).length === 0, 'Expected malformed inline batch accept to clear all accepted insert marks');
+
+    const storedMalformedInlineBatch = db.getDocumentBySlug(malformedInlineBatchSlug);
+    const storedMalformedInlineMarkdown = String(storedMalformedInlineBatch?.markdown ?? '');
+    assert(
+      (storedMalformedInlineMarkdown.match(/Tracked insertion one\./g) ?? []).length === 1
+        && (storedMalformedInlineMarkdown.match(/Tracked insertion two\./g) ?? []).length === 1
+        && storedMalformedInlineMarkdown.includes('Baseline text for accept all test on build eafea47.')
+        && storedMalformedInlineMarkdown.includes('Second paragraph with more content here.')
+        && !storedMalformedInlineMarkdown.includes('Tracked insertion two.t')
+        && !storedMalformedInlineMarkdown.includes('accep Tracked insertion two.'),
+      `Expected stored malformed inline batch markdown without duplication or bleed, got ${JSON.stringify(storedMalformedInlineBatch?.markdown)}`,
+    );
+
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

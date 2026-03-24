@@ -138,9 +138,11 @@ function run(): void {
     setupSuggestionsInterceptorBlock.includes('const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (')
       && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesSystemTransactionsDepth > 0')
       && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesDuringCollabReconnect')
+      && setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined;")
+      && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
-    'Expected the suggestions interceptor to pass through collab/template system transactions instead of wrapping them as tracked user edits',
+    'Expected the suggestions interceptor to pass through collab/template system transactions without treating generic addToHistory=false composition traffic as undo/redo history',
   );
 
   const applyPendingCollabTemplateBlock = sliceBetween(editorSource, '  private applyPendingCollabTemplate(): void {', '\n  private disconnectCollabService(): void {');

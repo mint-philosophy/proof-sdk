@@ -5623,7 +5623,7 @@ class ProofEditorImpl implements ProofEditor {
           || this.suppressTrackChangesDuringCollabReconnect
         );
         const isSuggestionMetaChange = tr?.getMeta?.(suggestionsPluginKey) !== undefined;
-        const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;
+        const isHistoryChange = tr?.getMeta?.('history$') !== undefined;
         const isLocalContentChange = Boolean(tr?.docChanged)
           && !isRemoteContentChange
           && !isMarksOnlyChange
@@ -5686,7 +5686,7 @@ class ProofEditorImpl implements ProofEditor {
           }
 
           // Don't intercept undo/redo transactions (from history plugin)
-          if (tr.getMeta('history$') !== undefined || tr.getMeta('addToHistory') === false) {
+          if (tr.getMeta('history$') !== undefined) {
             clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr);
             return;

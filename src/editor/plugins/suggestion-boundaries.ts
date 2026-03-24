@@ -2,6 +2,7 @@ import type { Mark as ProseMirrorMark, Node as ProseMirrorNode } from '@milkdown
 import type { EditorState, Transaction } from '@milkdown/kit/prose/state';
 
 import type { MarkRange, StoredMark } from '../../formats/marks';
+import { normalizeQuote } from '../../formats/marks.js';
 
 type SuggestionKind = 'insert' | 'delete' | 'replace';
 
@@ -144,12 +145,21 @@ export function syncInsertSuggestionMetadataFromDoc(
 
     const range = getSuggestionClusterRangeFromSegments(segments);
     const prevContent = typeof existing.content === 'string' ? existing.content : '';
-    if (prevContent !== content || !range || existing.range?.from !== range.from || existing.range?.to !== range.to) {
-      next[id] = {
+    const nextQuote = typeof existing.quote === 'string' ? normalizeQuote(content) : undefined;
+    if (
+      prevContent !== content
+      || !range
+      || existing.range?.from !== range.from
+      || existing.range?.to !== range.to
+      || (typeof existing.quote === 'string' && existing.quote !== nextQuote)
+    ) {
+      const nextEntry: StoredMark = {
         ...existing,
         content,
         ...(range ? { range: { from: range.from, to: range.to } } : {}),
       };
+      if (typeof nextQuote === 'string') nextEntry.quote = nextQuote;
+      next[id] = nextEntry;
       changed = true;
     }
   }

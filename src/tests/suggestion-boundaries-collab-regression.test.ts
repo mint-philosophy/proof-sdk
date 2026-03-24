@@ -118,6 +118,7 @@ function run(): void {
       by: 'user:test',
       status: 'pending',
       content: 'This REMOTE is a collab test insertion.',
+      quote: 'This REMOTE is a collab test insertion.',
     },
   }, ['insert-1']);
 
@@ -125,6 +126,11 @@ function run(): void {
     syncedMetadata['insert-1']?.content,
     'This is a collab test insertion.',
     'Expected metadata repair to preserve only the tracked insert text, not the interleaved remote text',
+  );
+  assert.equal(
+    syncedMetadata['insert-1']?.quote,
+    'This is a collab test insertion.',
+    'Expected metadata repair to keep the serialized insert quote aligned with the repaired live text',
   );
 
   console.log('suggestion-boundaries-collab-regression.test.ts passed');

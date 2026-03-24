@@ -61,6 +61,36 @@ function run(): void {
   );
 
   assert(
+    editorSource.includes('mergedIncomingMarks = mergePendingServerMarks(getMarkMetadataWithQuotes(view.state), incomingMarks);'),
+    'Expected collab.onMarks to merge incoming metadata against the quote-aware local snapshot',
+  );
+
+  const applyAuthoritativeShareMarksBlock = sliceBetween(
+    editorSource,
+    '  private applyAuthoritativeShareMarks(serverMarks: Record<string, StoredMark>): void {',
+    '\n  private applyLatestCollabMarksToEditor(): void {',
+  );
+  const resyncPendingInsertMetadataBlock = sliceBetween(
+    editorSource,
+    '  private resyncPendingInsertMetadataAfterRemoteApply(sourceMarks: Record<string, StoredMark>): void {',
+    '\n  private applyLatestCollabMarksToEditor(): void {',
+  );
+  const applyLatestCollabMarksBlock = sliceBetween(
+    editorSource,
+    '  private applyLatestCollabMarksToEditor(): void {',
+    '\n  private runWithTrackChangesSystemTransactionsSuppressed<T>(run: () => T): T {',
+  );
+  assert(
+    applyAuthoritativeShareMarksBlock.includes('this.resyncPendingInsertMetadataAfterRemoteApply(serverMarks);')
+      && resyncPendingInsertMetadataBlock.includes("filter(([, mark]) => mark?.kind === 'insert' && mark?.status === 'pending')")
+      && resyncPendingInsertMetadataBlock.includes('const localMetadata = getMarkMetadataWithQuotes(view.state);')
+      && resyncPendingInsertMetadataBlock.includes('const syncedMetadata = syncInsertSuggestionMetadataFromDoc(view.state.doc, localMetadata, insertIds);')
+      && resyncPendingInsertMetadataBlock.includes('setMarkMetadata(view, syncedMetadata);')
+      && applyLatestCollabMarksBlock.includes('this.resyncPendingInsertMetadataAfterRemoteApply(this.lastReceivedServerMarks);'),
+    'Expected remote collab mark application to resync pending insert metadata from the live doc before peer-local snapshots are reused',
+  );
+
+  assert(
     suggestionsSource.includes('export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {')
       && suggestionsSource.includes('export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {')
       && suggestionsSource.includes('resetSuggestionsInsertCoalescing();'),

@@ -1529,7 +1529,7 @@ class ProofEditorImpl implements ProofEditor {
             try {
               this.editor.action((ctx) => {
                 const view = ctx.get(editorViewCtx);
-                mergedIncomingMarks = mergePendingServerMarks(getMarkMetadata(view.state), incomingMarks);
+                mergedIncomingMarks = mergePendingServerMarks(getMarkMetadataWithQuotes(view.state), incomingMarks);
               });
             } catch (error) {
               console.warn('[collab.onMarks] Failed to merge incoming marks with local state:', error);
@@ -4966,10 +4966,40 @@ class ProofEditorImpl implements ProofEditor {
     this.suppressMarksSync = true;
     try {
       this.applyExternalMarks(serverMarks, { pruneMissingSuggestions: true });
+      this.resyncPendingInsertMetadataAfterRemoteApply(serverMarks);
     } finally {
       this.suppressMarksSync = false;
       this.applyingCollabRemote = false;
     }
+  }
+
+  private resyncPendingInsertMetadataAfterRemoteApply(sourceMarks: Record<string, StoredMark>): void {
+    if (!this.editor) return;
+
+    const insertIds = Object.entries(sourceMarks)
+      .filter(([, mark]) => mark?.kind === 'insert' && mark?.status === 'pending')
+      .map(([id]) => id);
+    if (insertIds.length === 0) return;
+
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const localMetadata = getMarkMetadataWithQuotes(view.state);
+      const syncedMetadata = syncInsertSuggestionMetadataFromDoc(view.state.doc, localMetadata, insertIds);
+      if (syncedMetadata === localMetadata) return;
+
+      setMarkMetadata(view, syncedMetadata);
+
+      const nextServerMarks = { ...this.lastReceivedServerMarks };
+      for (const id of insertIds) {
+        const synced = syncedMetadata[id];
+        if (synced?.kind === 'insert') {
+          nextServerMarks[id] = { ...nextServerMarks[id], ...synced };
+        } else {
+          delete nextServerMarks[id];
+        }
+      }
+      this.lastReceivedServerMarks = nextServerMarks;
+    });
   }
 
   private applyLatestCollabMarksToEditor(): void {
@@ -4987,6 +5017,7 @@ class ProofEditorImpl implements ProofEditor {
     this.suppressMarksSync = true;
     try {
       this.applyExternalMarks(this.lastReceivedServerMarks, { pruneMissingSuggestions: true });
+      this.resyncPendingInsertMetadataAfterRemoteApply(this.lastReceivedServerMarks);
     } finally {
       this.suppressMarksSync = false;
       this.applyingCollabRemote = false;

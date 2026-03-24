@@ -1065,6 +1065,112 @@ function isCollapsedMaterializedInsertMark(markdown: string, mark: StoredMark): 
   return stripAllProofSpanTags(markdown).includes(content);
 }
 
+function getCanonicalVisibleText(markdown: string): string {
+  const { stripped, map } = stripMarkdownWithMapping(markdown);
+  return canonicalizeVisibleTextWithMapping(stripped, map).text;
+}
+
+function doesCanonicalSliceMatchInsertContent(
+  canonicalText: string,
+  from: number,
+  to: number,
+  normalizedContent: string,
+): boolean {
+  if (from < 0 || to <= from || to > canonicalText.length || normalizedContent.length === 0) return false;
+  const normalizedSlice = normalizeQuote(canonicalText.slice(from, to));
+  return normalizedSlice === normalizedContent || normalizedSlice.includes(normalizedContent);
+}
+
+function isTargetMaterializedInsertMark(markdown: string, mark: StoredMark): boolean {
+  if (mark.kind !== 'insert' || !isRecord(mark.target)) return false;
+  const content = typeof mark.content === 'string' ? mark.content : '';
+  if (content.length === 0) return false;
+  const parsedTarget = parseAnchorTarget(mark.target);
+  if (!parsedTarget.ok) return false;
+  const resolved = resolveMutationAnchor(
+    'POST /marks/accept',
+    markdown,
+    parsedTarget.target,
+    'Suggestion anchor quote not found in document',
+  );
+  if (!resolved.ok) return false;
+  const selectionMetadata = buildStoredSelectionMetadata(
+    markdown,
+    resolved.resolved.selection,
+    typeof mark.quote === 'string' ? mark.quote : resolved.normalizedTarget.anchor,
+  );
+  const anchorEnd = parseRelativeCharOffset(selectionMetadata.endRel);
+  if (anchorEnd === null) return false;
+  const canonicalText = getCanonicalVisibleText(markdown);
+  return canonicalText.slice(anchorEnd, anchorEnd + content.length) === content;
+}
+
+function isMaterializedInsertMark(markdown: string, mark: StoredMark): boolean {
+  if (mark.kind !== 'insert') return false;
+  const content = typeof mark.content === 'string' ? mark.content : '';
+  const normalizedContent = normalizeQuote(content);
+  if (normalizedContent.length === 0) return false;
+  if (isCollapsedMaterializedInsertMark(markdown, mark)) return true;
+
+  const canonicalText = getCanonicalVisibleText(markdown);
+  const range = getStoredMarkRange(mark);
+  if (range && range.to > range.from && doesCanonicalSliceMatchInsertContent(canonicalText, range.from, range.to, normalizedContent)) {
+    return true;
+  }
+
+  const startRel = parseRelativeCharOffset(mark.startRel);
+  const endRel = parseRelativeCharOffset(mark.endRel);
+  if (
+    startRel !== null
+    && endRel !== null
+    && doesCanonicalSliceMatchInsertContent(canonicalText, startRel, endRel, normalizedContent)
+  ) {
+    return true;
+  }
+  if (
+    endRel !== null
+    && endRel + content.length <= canonicalText.length
+    && canonicalText.slice(endRel, endRel + content.length) === content
+  ) {
+    return true;
+  }
+  if (
+    startRel !== null
+    && startRel - content.length >= 0
+    && canonicalText.slice(startRel - content.length, startRel) === content
+  ) {
+    return true;
+  }
+
+  const quoteText = typeof mark.quote === 'string' ? mark.quote : '';
+  if (quoteText.length > 0) {
+    const quoteIndex = canonicalText.indexOf(quoteText);
+    if (
+      quoteIndex >= 0
+      && canonicalText.slice(quoteIndex + quoteText.length, quoteIndex + quoteText.length + content.length) === content
+    ) {
+      return true;
+    }
+    if (
+      quoteIndex >= content.length
+      && canonicalText.slice(quoteIndex - content.length, quoteIndex) === content
+    ) {
+      return true;
+    }
+  }
+
+  const normalizedQuote = normalizeQuote(mark.quote);
+  if (
+    normalizedQuote.length > 0
+    && (normalizedQuote === normalizedContent || normalizedQuote.includes(normalizedContent))
+    && normalizeQuote(canonicalText).includes(normalizedContent)
+  ) {
+    return true;
+  }
+
+  return isTargetMaterializedInsertMark(markdown, mark);
+}
+
 function shouldPreserveMaterializedInsertForRehydration(mark: StoredMark): boolean {
   if (mark.kind !== 'insert') return false;
   const range = getStoredMarkRange(mark);
@@ -2790,7 +2896,7 @@ async function computeSuggestionStatusTransition(
   }
 
   const stabilizedExisting = stabilizeCollapsedMaterializedInsertMark(markdown, existing);
-  if (status === 'accepted' && isCollapsedMaterializedInsertMark(markdown, stabilizedExisting)) {
+  if (status === 'accepted' && isMaterializedInsertMark(markdown, stabilizedExisting)) {
     const nextMarks = { ...marks };
     delete nextMarks[markId];
     return {
@@ -2899,18 +3005,22 @@ async function computeSuggestionStatusTransition(
     && directAcceptMark.kind === 'insert'
     && nextMarkdown === markdown
   ) {
-    const acceptedMarkdown = buildAcceptedSuggestionMarkdown(markdown, directAcceptMark);
-    if (acceptedMarkdown !== null) {
-      const acceptedMarks = { ...marks };
-      delete acceptedMarks[markId];
-      nextMarkdown = applyMutationCleanup('POST /marks/accept', acceptedMarkdown);
-      nextMarks = rebasePendingInserts && shouldRebasePendingInsertMarksForAcceptedSuggestion(markdown, nextMarkdown, directAcceptMark)
-        ? rebasePendingInsertMarksAfterAcceptedSuggestion(
-          acceptedMarks,
-          markId,
-          directAcceptMark,
-        ) as Record<string, StoredMark>
-        : acceptedMarks;
+    if (!nextMarks[markId] && isMaterializedInsertMark(markdown, directAcceptMark)) {
+      nextMarkdown = applyMutationCleanup('POST /marks/accept', stripProofSpanTags(markdown));
+    } else {
+      const acceptedMarkdown = buildAcceptedSuggestionMarkdown(markdown, directAcceptMark);
+      if (acceptedMarkdown !== null) {
+        const acceptedMarks = { ...marks };
+        delete acceptedMarks[markId];
+        nextMarkdown = applyMutationCleanup('POST /marks/accept', acceptedMarkdown);
+        nextMarks = rebasePendingInserts && shouldRebasePendingInsertMarksForAcceptedSuggestion(markdown, nextMarkdown, directAcceptMark)
+          ? rebasePendingInsertMarksAfterAcceptedSuggestion(
+            acceptedMarks,
+            markId,
+            directAcceptMark,
+          ) as Record<string, StoredMark>
+          : acceptedMarks;
+      }
     }
   }
   if (status === 'accepted' && directAcceptMark.kind === 'insert') {
@@ -2937,21 +3047,22 @@ async function acceptAllSuggestionsAsync(
   const requestedMarkIds = Array.isArray(body.markIds)
     ? body.markIds.filter((markId): markId is string => typeof markId === 'string' && markId.trim().length > 0).map((markId) => markId.trim())
     : [];
-  const pendingIds = (requestedMarkIds.length > 0
-    ? requestedMarkIds
-    : Object.keys(marks)
-  )
-    .filter((markId, index, ids) => ids.indexOf(markId) === index)
-    .filter((markId) => {
-      const mark = marks[markId];
-      const kind = mark?.kind;
-      return Boolean(mark) && (kind === 'insert' || kind === 'delete' || kind === 'replace') && mark.status === 'pending';
-    })
-    .sort((a, b) => {
-      const aPos = getPendingSuggestionSortPosition(doc.markdown, marks[a]);
-      const bPos = getPendingSuggestionSortPosition(doc.markdown, marks[b]);
-      return bPos - aPos;
-    });
+  const requestedIdSet = new Set((requestedMarkIds.length > 0 ? requestedMarkIds : Object.keys(marks))
+    .filter((markId, index, ids) => ids.indexOf(markId) === index));
+  const getPendingIds = (markdown: string, currentMarks: Record<string, StoredMark>): string[] => (
+    [...requestedIdSet]
+      .filter((markId) => {
+        const mark = currentMarks[markId];
+        const kind = mark?.kind;
+        return Boolean(mark) && (kind === 'insert' || kind === 'delete' || kind === 'replace') && mark.status === 'pending';
+      })
+      .sort((a, b) => {
+        const aPos = getPendingSuggestionSortPosition(markdown, currentMarks[a]);
+        const bPos = getPendingSuggestionSortPosition(markdown, currentMarks[b]);
+        return bPos - aPos;
+      })
+  );
+  const pendingIds = getPendingIds(doc.markdown, marks);
   if (pendingIds.length === 0) {
     return {
       status: 200,
@@ -2970,8 +3081,10 @@ async function acceptAllSuggestionsAsync(
   let nextMarkdown = doc.markdown;
   let nextMarks = marks;
   const acceptedIds: string[] = [];
-  for (const markId of pendingIds) {
-    if (!nextMarks[markId] || nextMarks[markId]?.status !== 'pending') continue;
+  while (true) {
+    const currentPendingIds = getPendingIds(nextMarkdown, nextMarks);
+    const markId = currentPendingIds[0];
+    if (!markId) break;
     const computed = await computeSuggestionStatusTransition(nextMarkdown, nextMarks, markId, 'accepted', {
       rebasePendingInserts: false,
     });

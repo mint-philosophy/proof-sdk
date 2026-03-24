@@ -328,6 +328,61 @@ async function run(): Promise<void> {
       `Expected stored cross-block anchor batch markdown without offset drift, got ${JSON.stringify(storedCrossBlockBatch?.markdown)}`,
     );
 
+    const materializedAnchorSeedSlug = `shared-materialized-anchor-seed-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(
+      materializedAnchorSeedSlug,
+      '# Run 35c Test\n\nFirst baseline paragraph for offset testing.\n\nSecond baseline for multi-block verification.\n',
+      {},
+      'Materialized anchor insert seed document',
+    );
+
+    const materializedHeadingSuggest = await executeDocumentOperationAsync(materializedAnchorSeedSlug, 'POST', '/marks/suggest-insert', {
+      quote: 'Run 35c Test',
+      content: ' TC heading edit',
+      by: 'human:test',
+    });
+    assert(materializedHeadingSuggest.status === 200, `Expected materialized heading suggest status 200, got ${materializedHeadingSuggest.status}`);
+
+    const materializedParagraphOneSuggest = await executeDocumentOperationAsync(materializedAnchorSeedSlug, 'POST', '/marks/suggest-insert', {
+      quote: 'offset testing.',
+      content: ' TC insertion in paragraph one.',
+      by: 'human:test',
+    });
+    assert(materializedParagraphOneSuggest.status === 200, `Expected materialized paragraph one suggest status 200, got ${materializedParagraphOneSuggest.status}`);
+
+    const materializedParagraphTwoSuggest = await executeDocumentOperationAsync(materializedAnchorSeedSlug, 'POST', '/marks/suggest-insert', {
+      quote: 'verification.',
+      content: ' TC insertion in paragraph two.',
+      by: 'human:test',
+    });
+    assert(materializedParagraphTwoSuggest.status === 200, `Expected materialized paragraph two suggest status 200, got ${materializedParagraphTwoSuggest.status}`);
+
+    const materializedAnchorMarks = JSON.parse(String(db.getDocumentBySlug(materializedAnchorSeedSlug)?.marks ?? '{}')) as Record<string, unknown>;
+    const materializedAnchorSlug = `shared-materialized-anchor-${Math.random().toString(36).slice(2, 10)}`;
+    const materializedAnchorMarkdown = '# Run 35c Test TC heading edit\n\nFirst baseline paragraph for offset testing. TC insertion in paragraph one.\n\nSecond baseline for multi-block verification. TC insertion in paragraph two.\n';
+    db.createDocument(
+      materializedAnchorSlug,
+      materializedAnchorMarkdown,
+      materializedAnchorMarks,
+      'Shared materialized anchor insert batch accept regression',
+    );
+
+    const acceptedMaterializedAnchorBatch = await executeDocumentOperationAsync(materializedAnchorSlug, 'POST', '/marks/accept-all', {
+      markIds: Object.keys(materializedAnchorMarks),
+      by: 'human:test',
+    });
+    assert(acceptedMaterializedAnchorBatch.status === 200, `Expected materialized anchor batch accept status 200, got ${acceptedMaterializedAnchorBatch.status}`);
+    assert(
+      String(acceptedMaterializedAnchorBatch.body.markdown ?? '') === materializedAnchorMarkdown,
+      `Expected materialized anchor batch accept not to duplicate or drift already-materialized inserts, got ${JSON.stringify(acceptedMaterializedAnchorBatch.body.markdown)}`,
+    );
+
+    const storedMaterializedAnchorBatch = db.getDocumentBySlug(materializedAnchorSlug);
+    assert(
+      storedMaterializedAnchorBatch?.markdown === materializedAnchorMarkdown,
+      `Expected stored materialized anchor batch markdown without duplication or cross-block bleed, got ${JSON.stringify(storedMaterializedAnchorBatch?.markdown)}`,
+    );
+
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

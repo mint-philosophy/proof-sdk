@@ -60,6 +60,21 @@ function run(): void {
     'Expected share-mode mark updates to resync live insert metadata from the document, then defer the share flush until after the dispatch cycle instead of pushing marks immediately during tracked typing',
   );
 
+  const createTrackChangesToggleBlock = sliceBetween(
+    editorSource,
+    '  private createTrackChangesToggle(): HTMLElement {',
+    '\n  private renderShareBannerContent(',
+  );
+  assert(
+    createTrackChangesToggleBlock.includes('let pointerActivated = false;')
+      && createTrackChangesToggleBlock.includes('button.onpointerdown = (event) => {')
+      && createTrackChangesToggleBlock.includes('pointerActivated = true;')
+      && createTrackChangesToggleBlock.includes('button.onclick = (event) => {')
+      && createTrackChangesToggleBlock.includes('if (pointerActivated) {')
+      && createTrackChangesToggleBlock.includes('button.onblur = () => {'),
+    'Expected the Track Changes pill to activate on pointerdown so immediate typing cannot outrun the toggle click handler',
+  );
+
   assert(
     editorSource.includes('mergedIncomingMarks = mergePendingServerMarks(getMarkMetadataWithQuotes(view.state), incomingMarks);'),
     'Expected collab.onMarks to merge incoming metadata against the quote-aware local snapshot',

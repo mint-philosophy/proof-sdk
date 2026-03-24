@@ -3611,6 +3611,7 @@ class ProofEditorImpl implements ProofEditor {
 
     const makeSegment = (label: string, onSelect: () => void): HTMLButtonElement => {
       const button = document.createElement('button');
+      let pointerActivated = false;
       button.type = 'button';
       button.className = 'share-pill-track-btn';
       button.textContent = label;
@@ -3627,10 +3628,28 @@ class ProofEditorImpl implements ProofEditor {
         if (button.getAttribute('aria-pressed') === 'true') return;
         button.style.background = 'transparent';
       };
-      button.onclick = () => {
+      const activate = () => {
         if (button.disabled) return;
         this.triggerHaptic('selection');
         onSelect();
+      };
+      button.onpointerdown = (event) => {
+        if (button.disabled) return;
+        pointerActivated = true;
+        event.preventDefault();
+        activate();
+      };
+      button.onclick = (event) => {
+        if (button.disabled) return;
+        if (pointerActivated) {
+          pointerActivated = false;
+          event.preventDefault();
+          return;
+        }
+        activate();
+      };
+      button.onblur = () => {
+        pointerActivated = false;
       };
       return button;
     };

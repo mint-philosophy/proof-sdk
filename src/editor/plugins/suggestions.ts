@@ -869,6 +869,9 @@ export function __debugResolveTrackedDeleteIntentForBeforeInput(
 ): TrackedDeleteIntent | null {
   const mappedIntent = __debugResolveTrackedDeleteIntentFromBeforeInput(inputType);
   if (!pendingIntent) return mappedIntent;
+  if (!mappedIntent) {
+    return inputType.startsWith('delete') ? pendingIntent : null;
+  }
   if (mappedIntent && mappedIntent.key !== pendingIntent.key) return mappedIntent;
   return pendingIntent;
 }

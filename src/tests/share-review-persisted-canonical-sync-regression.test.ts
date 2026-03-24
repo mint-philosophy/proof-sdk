@@ -97,8 +97,9 @@ function run(): void {
         < acceptPersistedBlock.indexOf("const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
       && acceptPersistedBlock.includes("const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
       && acceptPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(result);')
+      && acceptPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to tombstone the resolved suggestion, then try the in-place local reconcile path before falling back to canonical reload',
+    'Expected markAcceptPersisted to tombstone the resolved suggestion, reconcile the mutation, and wait for collab reconnect to settle before returning success',
   );
 
   const rejectPersistedBlock = sliceBetween(
@@ -112,8 +113,25 @@ function run(): void {
         < rejectPersistedBlock.indexOf("const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")
       && rejectPersistedBlock.includes("const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")
       && rejectPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(result);')
+      && rejectPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !rejectPersistedBlock.includes('rejectMark(view, markId);'),
-    'Expected markRejectPersisted to tombstone the resolved suggestion, then try the in-place local reconcile path before falling back to canonical reload',
+    'Expected markRejectPersisted to tombstone the resolved suggestion, reconcile the mutation, and wait for collab reconnect to settle before returning success',
+  );
+
+  const settleBlock = sliceBetween(
+    editorSource,
+    '  private async waitForStableShareReviewMutationState(): Promise<void> {',
+    '\n  private async flushShareReviewMutationState(): Promise<void> {',
+  );
+  assert(
+    settleBlock.includes("const deadline = Date.now() + 2500;")
+      && settleBlock.includes("const awaitingTemplateSeed = Boolean(this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0);")
+      && settleBlock.includes("const collabReconnectStable = !this.pendingCollabRebindOnSync")
+      && settleBlock.includes("&& !this.suppressTrackChangesDuringCollabReconnect")
+      && settleBlock.includes("&& !this.collabSessionRefreshInFlight;")
+      && settleBlock.includes("const synced = this.collabConnectionStatus === 'connected'")
+      && settleBlock.includes("this.traceShareReview('mutation.settle-timeout'"),
+    'Expected persisted review mutations to wait for the post-mutation collab reconnect to become stable before another accept/reject can start',
   );
 
   const localResolveBlock = sliceBetween(

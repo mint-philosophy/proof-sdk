@@ -9136,6 +9136,40 @@ class ProofEditorImpl implements ProofEditor {
     }
   }
 
+  private async waitForStableShareReviewMutationState(): Promise<void> {
+    if (!this.isShareMode || !this.collabEnabled || !this.collabCanEdit) return;
+
+    const deadline = Date.now() + 2500;
+    while (Date.now() < deadline) {
+      const awaitingTemplateSeed = Boolean(this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0);
+      const collabReconnectStable = !this.pendingCollabRebindOnSync
+        && !this.suppressTrackChangesDuringCollabReconnect
+        && !this.collabSessionRefreshInFlight;
+      const hydrated = this.hasCompletedInitialCollabHydration && this.isCollabHydratedForEditing();
+      const synced = this.collabConnectionStatus === 'connected'
+        && this.collabIsSynced
+        && this.collabUnsyncedChanges === 0
+        && this.collabPendingLocalUpdates === 0;
+      if (!awaitingTemplateSeed && collabReconnectStable && hydrated && synced) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 20);
+      });
+    }
+
+    this.traceShareReview('mutation.settle-timeout', {
+      collabConnectionStatus: this.collabConnectionStatus,
+      collabIsSynced: this.collabIsSynced,
+      collabUnsyncedChanges: this.collabUnsyncedChanges,
+      collabPendingLocalUpdates: this.collabPendingLocalUpdates,
+      pendingCollabRebindOnSync: this.pendingCollabRebindOnSync,
+      suppressTrackChangesDuringCollabReconnect: this.suppressTrackChangesDuringCollabReconnect,
+      pendingCollabTemplateMarkdown: this.summarizeTraceMarkdown(this.pendingCollabTemplateMarkdown),
+      hasCompletedInitialCollabHydration: this.hasCompletedInitialCollabHydration,
+    }, 'warn');
+  }
+
   private async flushShareReviewMutationState(): Promise<void> {
     if (!this.isShareMode || !this.editor || this.suppressMarksSync) return;
     this.flushShareMarks({ persistContent: false });
@@ -9275,6 +9309,7 @@ class ProofEditorImpl implements ProofEditor {
       const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)
         || await this.applyShareMutationDocumentResult(result);
       if (success && this.editor) {
+        await this.waitForStableShareReviewMutationState();
         captureEvent('suggestion_accepted', { count: 1 });
         this.editor.action((ctx) => {
           const view = ctx.get(editorViewCtx);
@@ -9369,6 +9404,7 @@ class ProofEditorImpl implements ProofEditor {
       const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)
         || await this.applyShareMutationDocumentResult(result);
       if (success && this.editor) {
+        await this.waitForStableShareReviewMutationState();
         captureEvent('suggestion_rejected', { count: 1 });
         this.editor.action((ctx) => {
           const view = ctx.get(editorViewCtx);

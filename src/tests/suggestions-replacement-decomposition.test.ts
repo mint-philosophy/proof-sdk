@@ -519,6 +519,15 @@ function run(): void {
       true,
       'Generic deleteContentBackward should reuse the pending modifier intent so Cmd+Delete can still be ignored',
     );
+    const staleDeleteIntent = __debugResolveTrackedDeleteIntentForBeforeInput('insertText', {
+      key: 'Backspace',
+      modifiers: { altKey: true },
+    });
+    assertEqual(
+      staleDeleteIntent,
+      null,
+      'Non-delete beforeinput events should ignore stale modified-delete intents so the next typed character is not swallowed',
+    );
     state = state.apply(wrapTransactionForSuggestions(state.tr.delete(lineDeleteRange!.from, lineDeleteRange!.to), state, true));
     const lineDeleteMarks = getMarks(state).filter((mark) => mark.kind === 'delete');
     assertEqual(lineDeleteMarks.length, 1, 'Cmd+Delete should become one delete suggestion');

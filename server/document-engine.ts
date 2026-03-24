@@ -1096,55 +1096,6 @@ function rebasePendingInsertMarksAfterAcceptedSuggestion(
       continue;
     }
 
-    const startRel = parseRelativeCharOffset(mark.startRel);
-    const endRel = parseRelativeCharOffset(mark.endRel);
-    const hasAnchorMetadata = Boolean(
-      (typeof mark.quote === 'string' && normalizeQuote(mark.quote).length > 0)
-      || startRel !== null
-      || endRel !== null,
-    );
-    if (hasAnchorMetadata) {
-      const nextMark: StoredMark = { ...mark };
-      let markChanged = false;
-
-      if (startRel !== null) {
-        const rebasedStartRel = rebaseCollapsedInsertPositionForAcceptedSuggestion(startRel, acceptedMark);
-        if (rebasedStartRel !== startRel) {
-          nextMark.startRel = `char:${rebasedStartRel}`;
-          markChanged = true;
-        }
-      }
-
-      if (endRel !== null) {
-        const rebasedEndRel = rebaseCollapsedInsertPositionForAcceptedSuggestion(endRel, acceptedMark);
-        if (rebasedEndRel !== endRel) {
-          nextMark.endRel = `char:${rebasedEndRel}`;
-          markChanged = true;
-        }
-      }
-
-      const range = getStoredMarkRange(mark);
-      if (range) {
-        const rebasedFrom = rebaseCollapsedInsertPositionForAcceptedSuggestion(range.from, acceptedMark);
-        const rebasedTo = range.to > range.from
-          ? rebaseCollapsedInsertPositionForAcceptedSuggestion(range.to, acceptedMark)
-          : rebasedFrom;
-        if (rebasedFrom !== range.from || rebasedTo !== range.to) {
-          nextMark.range = { from: rebasedFrom, to: Math.max(rebasedFrom, rebasedTo) };
-          markChanged = true;
-        }
-      }
-
-      if (!markChanged) {
-        nextMarks[id] = mark;
-        continue;
-      }
-
-      changed = true;
-      nextMarks[id] = nextMark;
-      continue;
-    }
-
     const range = getStoredMarkRange(mark);
     if (!range) {
       nextMarks[id] = mark;
@@ -2786,7 +2737,9 @@ async function computeSuggestionStatusTransition(
   marks: Record<string, StoredMark>,
   markId: string,
   status: 'accepted' | 'rejected',
+  options: { rebasePendingInserts?: boolean } = {},
 ): Promise<SuggestionStatusComputation> {
+  const rebasePendingInserts = options.rebasePendingInserts ?? true;
   const existing = marks[markId];
   if (!existing) {
     return { ok: false, result: { status: 404, body: { success: false, error: 'Mark not found' } } };
@@ -2895,6 +2848,7 @@ async function computeSuggestionStatusTransition(
   let nextMarkdown = structuredResult.markdown;
   let nextMarks = (
     status === 'accepted'
+      && rebasePendingInserts
       && shouldRebasePendingInsertMarksForAcceptedSuggestion(markdown, nextMarkdown, directAcceptMark)
       ? rebasePendingInsertMarksAfterAcceptedSuggestion(structuredResult.marks, markId, directAcceptMark)
       : structuredResult.marks
@@ -2909,7 +2863,7 @@ async function computeSuggestionStatusTransition(
       const acceptedMarks = { ...marks };
       delete acceptedMarks[markId];
       nextMarkdown = applyMutationCleanup('POST /marks/accept', acceptedMarkdown);
-      nextMarks = shouldRebasePendingInsertMarksForAcceptedSuggestion(markdown, nextMarkdown, directAcceptMark)
+      nextMarks = rebasePendingInserts && shouldRebasePendingInsertMarksForAcceptedSuggestion(markdown, nextMarkdown, directAcceptMark)
         ? rebasePendingInsertMarksAfterAcceptedSuggestion(
           acceptedMarks,
           markId,
@@ -2951,6 +2905,11 @@ async function acceptAllSuggestionsAsync(
       const mark = marks[markId];
       const kind = mark?.kind;
       return Boolean(mark) && (kind === 'insert' || kind === 'delete' || kind === 'replace') && mark.status === 'pending';
+    })
+    .sort((a, b) => {
+      const aPos = getPendingSuggestionSortPosition(doc.markdown, marks[a]);
+      const bPos = getPendingSuggestionSortPosition(doc.markdown, marks[b]);
+      return bPos - aPos;
     });
   if (pendingIds.length === 0) {
     return {
@@ -2970,16 +2929,11 @@ async function acceptAllSuggestionsAsync(
   let nextMarkdown = doc.markdown;
   let nextMarks = marks;
   const acceptedIds: string[] = [];
-  const remainingIds = [...pendingIds];
-  while (remainingIds.length > 0) {
-    remainingIds.sort((a, b) => {
-      const aPos = getPendingSuggestionSortPosition(nextMarkdown, nextMarks[a]);
-      const bPos = getPendingSuggestionSortPosition(nextMarkdown, nextMarks[b]);
-      return bPos - aPos;
+  for (const markId of pendingIds) {
+    if (!nextMarks[markId] || nextMarks[markId]?.status !== 'pending') continue;
+    const computed = await computeSuggestionStatusTransition(nextMarkdown, nextMarks, markId, 'accepted', {
+      rebasePendingInserts: false,
     });
-    const markId = remainingIds.shift();
-    if (!markId || !nextMarks[markId] || nextMarks[markId]?.status !== 'pending') continue;
-    const computed = await computeSuggestionStatusTransition(nextMarkdown, nextMarks, markId, 'accepted');
     if (!computed.ok) return computed.result;
     nextMarkdown = stripAllProofSpanTags(computed.nextMarkdown);
     nextMarks = computed.nextMarks;

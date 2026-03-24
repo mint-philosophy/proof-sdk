@@ -1065,6 +1065,16 @@ function isCollapsedMaterializedInsertMark(markdown: string, mark: StoredMark): 
   return stripAllProofSpanTags(markdown).includes(content);
 }
 
+function shouldPreserveMaterializedInsertForRehydration(mark: StoredMark): boolean {
+  if (mark.kind !== 'insert') return false;
+  const range = getStoredMarkRange(mark);
+  if (!range || range.to <= range.from) return false;
+  const normalizedContent = normalizeQuote(mark.content);
+  const normalizedQuote = normalizeQuote(mark.quote);
+  if (normalizedContent.length === 0 || normalizedQuote.length === 0) return false;
+  return normalizedQuote === normalizedContent || normalizedQuote.includes(normalizedContent);
+}
+
 function getPendingSuggestionSortPosition(markdown: string, mark: StoredMark | undefined): number {
   if (!mark) return -1;
   const range = getStoredMarkRange(mark);
@@ -2519,7 +2529,7 @@ async function updateSuggestionStatusAsync(
   let marksForRehydration = stabilizedExisting === existing
     ? marks
     : { ...marks, [markId]: stabilizedExisting };
-  if (isRecord(stabilizedExisting.target)) {
+  if (isRecord(stabilizedExisting.target) && !shouldPreserveMaterializedInsertForRehydration(stabilizedExisting)) {
     const parsedTarget = parseAnchorTarget(stabilizedExisting.target);
     if (!parsedTarget.ok) {
       return { status: 409, body: { success: false, code: 'ANCHOR_NOT_FOUND', error: 'Suggestion target metadata is invalid' } };
@@ -2804,7 +2814,7 @@ async function computeSuggestionStatusTransition(
   let marksForRehydration = stabilizedExisting === existing
     ? marks
     : { ...marks, [markId]: stabilizedExisting };
-  if (isRecord(stabilizedExisting.target)) {
+  if (isRecord(stabilizedExisting.target) && !shouldPreserveMaterializedInsertForRehydration(stabilizedExisting)) {
     const parsedTarget = parseAnchorTarget(stabilizedExisting.target);
     if (!parsedTarget.ok) {
       return { ok: false, result: { status: 409, body: { success: false, code: 'ANCHOR_NOT_FOUND', error: 'Suggestion target metadata is invalid' } } };

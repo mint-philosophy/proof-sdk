@@ -249,6 +249,70 @@ async function run(): Promise<void> {
       `Expected cross-block accept-all not to drift the prepended second-paragraph insert into the first paragraph, got ${JSON.stringify(crossBlockAccepted.body.markdown)}`,
     );
 
+    const run34HeadingId = 'run34-heading';
+    const run34ParagraphOneId = 'run34-paragraph-one';
+    const run34ParagraphTwoId = 'run34-paragraph-two';
+    const run34LiveDoc = schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Run 34 Accept All Test'),
+        schema.text(' TC heading edit', [schema.marks.proofSuggestion.create({ id: run34HeadingId, kind: 'insert', by: 'human:editor' })]),
+      ]),
+      schema.node('paragraph', null, [
+        schema.text('First baseline paragraph with enough text to test cross-block offset calculations properly.'),
+        schema.text(' TC insertion in paragraph one.', [schema.marks.proofSuggestion.create({ id: run34ParagraphOneId, kind: 'insert', by: 'human:editor' })]),
+      ]),
+      schema.node('paragraph', null, [
+        schema.text('Second baseline paragraph for multi-block accept all verification testing.'),
+        schema.text(' TC insertion in paragraph two.', [schema.marks.proofSuggestion.create({ id: run34ParagraphTwoId, kind: 'insert', by: 'human:editor' })]),
+      ]),
+    ]);
+
+    const run34State = EditorState.create({
+      schema,
+      doc: run34LiveDoc,
+      plugins: [marksStatePlugin],
+    });
+
+    const run34LiveMetadata = getMarkMetadataWithQuotes(run34State);
+    const run34PersistedMetadata = buildCanonicalShareMarkMetadata(run34State, run34LiveMetadata);
+    for (const markId of [run34HeadingId, run34ParagraphOneId, run34ParagraphTwoId]) {
+      assert(
+        run34PersistedMetadata[markId]?.range?.from === run34PersistedMetadata[markId]?.range?.to,
+        `Expected ${markId} to stay collapsed after canonicalization, got ${JSON.stringify(run34PersistedMetadata[markId])}`,
+      );
+      assert(
+        !run34PersistedMetadata[markId]?.quote,
+        `Expected ${markId} to remain quote-less after canonicalization, got ${JSON.stringify(run34PersistedMetadata[markId])}`,
+      );
+    }
+
+    const run34Slug = `share-track-changes-run34-${Math.random().toString(36).slice(2, 10)}`;
+    const run34Markdown = 'Run 34 Accept All Test TC heading edit\n\n'
+      + 'First baseline paragraph with enough text to test cross-block offset calculations properly. TC insertion in paragraph one.\n\n'
+      + 'Second baseline paragraph for multi-block accept all verification testing. TC insertion in paragraph two.\n';
+    db.createDocument(
+      run34Slug,
+      run34Markdown,
+      run34PersistedMetadata as Record<string, StoredMark>,
+      'Share track changes run 34 accept-all regression',
+    );
+
+    const run34Accepted = await executeDocumentOperationAsync(run34Slug, 'POST', '/marks/accept-all', {
+      markIds: [run34HeadingId, run34ParagraphOneId, run34ParagraphTwoId],
+      by: 'human:test',
+    });
+    assertEqual(run34Accepted.status, 200, `Expected run 34 accept-all to succeed, got ${run34Accepted.status}`);
+    assertEqual(
+      String(run34Accepted.body.markdown ?? ''),
+      run34Markdown,
+      `Expected run 34 accept-all not to duplicate or drift appended inserts across blocks, got ${JSON.stringify(run34Accepted.body.markdown)}`,
+    );
+    assertEqual(
+      Object.keys((run34Accepted.body.marks ?? {}) as Record<string, StoredMark>).length,
+      0,
+      'Expected run 34 accept-all to clear all accepted insert marks',
+    );
+
     console.log('share-track-changes-multi-insert-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

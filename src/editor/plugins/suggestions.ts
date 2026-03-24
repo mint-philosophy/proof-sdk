@@ -76,12 +76,20 @@ function resolveLiveInsertSuggestionRange(
   return getSuggestionClusterRangeFromSegments(segments);
 }
 
+function resolveLiveSuggestionRange(
+  doc: ProseMirrorNode,
+  id: string,
+  kind: SuggestionKind,
+): MarkRange | null {
+  const segments = collectSuggestionSegments(doc, id, kind);
+  return getSuggestionClusterRangeFromSegments(segments);
+}
+
 function resolveLiveDeleteSuggestionRange(
   doc: ProseMirrorNode,
   id: string
 ): MarkRange | null {
-  const segments = collectSuggestionSegments(doc, id, 'delete');
-  return getSuggestionClusterRangeFromSegments(segments);
+  return resolveLiveSuggestionRange(doc, id, 'delete');
 }
 
 function getLiveInsertSuggestionText(doc: ProseMirrorNode, id: string): string | null {
@@ -91,7 +99,7 @@ function getLiveInsertSuggestionText(doc: ProseMirrorNode, id: string): string |
 
 function collectSuggestionIdsInRange(
   doc: ProseMirrorNode,
-  kind: 'insert' | 'delete',
+  kind: SuggestionKind,
   from: number,
   to: number
 ): string[] {
@@ -483,6 +491,134 @@ function setSelectionAfterInsertedText(tr: Transaction, pos: number): void {
   tr.setSelection(TextSelection.create(tr.doc, Math.max(0, Math.min(pos, tr.doc.content.size))));
 }
 
+function detectTextPreservingSuggestionRewrite(
+  oldState: EditorState,
+  newState: EditorState,
+): { oldFrom: number; oldTo: number; newFrom: number; newTo: number } | null {
+  const oldText = oldState.doc.textBetween(0, oldState.doc.content.size, '\n', '\n');
+  const newText = newState.doc.textBetween(0, newState.doc.content.size, '\n', '\n');
+  if (oldText !== newText) return null;
+
+  const from = oldState.doc.content.findDiffStart(newState.doc.content);
+  if (typeof from !== 'number') return null;
+  const diffEnd = oldState.doc.content.findDiffEnd(newState.doc.content);
+  if (!diffEnd) return null;
+
+  return {
+    oldFrom: from,
+    oldTo: diffEnd.a,
+    newFrom: from,
+    newTo: diffEnd.b,
+  };
+}
+
+function expandChangedRange(doc: ProseMirrorNode, from: number, to: number): MarkRange {
+  if (to > from) {
+    return { from, to };
+  }
+  return {
+    from: Math.max(0, from - 1),
+    to: Math.min(doc.content.size, from + 1),
+  };
+}
+
+function buildTextPreservingInsertPersistenceTransaction(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  const rewrite = detectTextPreservingSuggestionRewrite(oldState, newState);
+  if (!rewrite) return null;
+
+  const suggestionType = newState.schema.marks.proofSuggestion;
+  if (!suggestionType) return null;
+
+  const oldChangedRange = expandChangedRange(oldState.doc, rewrite.oldFrom, rewrite.oldTo);
+  const newChangedRange = expandChangedRange(newState.doc, rewrite.newFrom, rewrite.newTo);
+  const oldInsertIds = collectSuggestionIdsInRange(
+    oldState.doc,
+    'insert',
+    oldChangedRange.from,
+    oldChangedRange.to,
+  );
+  if (oldInsertIds.length === 0) return null;
+
+  const authoredType = newState.schema.marks.proofAuthored ?? null;
+  const oldMetadata = getMarkMetadata(oldState);
+  let metadata = getMarkMetadata(newState);
+  let metadataChanged = false;
+  let tr = newState.tr;
+
+  if (authoredType) {
+    tr = tr.removeMark(newChangedRange.from, newChangedRange.to, authoredType);
+  }
+
+  const spuriousSuggestionIds = new Set<string>([
+    ...collectSuggestionIdsInRange(newState.doc, 'delete', newChangedRange.from, newChangedRange.to),
+    ...collectSuggestionIdsInRange(newState.doc, 'replace', newChangedRange.from, newChangedRange.to),
+  ]);
+  for (const id of spuriousSuggestionIds) {
+    const kind = metadata[id]?.kind;
+    if (kind !== 'delete' && kind !== 'replace') continue;
+    const range = resolveLiveSuggestionRange(newState.doc, id, kind);
+    if (range) {
+      tr = tr.removeMark(range.from, range.to, suggestionType);
+    }
+    if (metadata[id]) {
+      delete metadata[id];
+      metadataChanged = true;
+    }
+  }
+
+  const now = Date.now();
+  for (const id of oldInsertIds) {
+    const oldRange = resolveLiveSuggestionRange(oldState.doc, id, 'insert');
+    const oldEntry = oldMetadata[id];
+    if (!oldRange || !oldEntry || oldEntry.kind !== 'insert') continue;
+
+    const restoredFrom = Math.max(0, Math.min(oldRange.from, newState.doc.content.size));
+    const restoredTo = Math.max(restoredFrom, Math.min(oldRange.to, newState.doc.content.size));
+    if (restoredTo <= restoredFrom) continue;
+
+    if (authoredType) {
+      tr = tr.removeMark(restoredFrom, restoredTo, authoredType);
+    }
+    tr = tr.addMark(
+      restoredFrom,
+      restoredTo,
+      suggestionType.create({ id, kind: 'insert', by: oldEntry.by ?? metadata[id]?.by ?? 'unknown' })
+    );
+
+    metadata[id] = {
+      ...metadata[id],
+      ...oldEntry,
+      kind: 'insert',
+      by: oldEntry.by ?? metadata[id]?.by ?? 'unknown',
+      status: 'pending',
+    };
+    metadataChanged = true;
+
+    if (oldEntry.by) {
+      lastInsertByActor.set(oldEntry.by, {
+        id,
+        from: restoredFrom,
+        to: restoredTo,
+        by: oldEntry.by,
+        updatedAt: now,
+      });
+    }
+  }
+
+  const syncedMetadata = syncInsertSuggestionMetadataFromDoc(tr.doc, metadata, oldInsertIds);
+  metadataChanged = metadataChanged || syncedMetadata !== metadata;
+  metadata = syncedMetadata;
+
+  if (tr.steps.length === 0 && !metadataChanged) return null;
+  const finalTr = metadataChanged ? syncSuggestionMetadataTransaction(newState, tr, metadata) : tr;
+  finalTr.setMeta('suggestions-wrapped', true);
+  finalTr.setMeta('addToHistory', false);
+  return finalTr;
+}
+
 function detectPlainTextInsertionDiff(
   oldState: EditorState,
   newState: EditorState,
@@ -585,6 +721,13 @@ export function __debugBuildPlainInsertionSuggestionFallbackTransaction(
   newState: EditorState,
 ): Transaction | null {
   return buildPlainInsertionSuggestionFallbackTransaction(oldState, newState);
+}
+
+export function __debugBuildTextPreservingInsertPersistenceTransaction(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  return buildTextPreservingInsertPersistenceTransaction(oldState, newState);
 }
 
 function detectSelectionReplacement(
@@ -1462,6 +1605,15 @@ export const suggestionsPlugin = $prose(() => {
         || isYjsChangeOriginTransaction(tr)
       )) {
         return null;
+      }
+
+      const persistenceFallbackTr = buildTextPreservingInsertPersistenceTransaction(oldState, newState);
+      if (persistenceFallbackTr) {
+        console.log('[suggestions.appendTransactionPersistenceFallback]', {
+          from: persistenceFallbackTr.selection.from,
+          to: persistenceFallbackTr.selection.to,
+        });
+        return persistenceFallbackTr;
       }
 
       const fallbackTr = buildPlainInsertionSuggestionFallbackTransaction(oldState, newState);

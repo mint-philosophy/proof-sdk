@@ -6,6 +6,7 @@ import {
   __debugResolveTrackedDeleteIntentFromBeforeInput,
   __debugResolveTrackedDeleteIntentForBeforeInput,
   __debugBuildPlainInsertionSuggestionFallbackTransaction,
+  __debugBuildTextPreservingInsertPersistenceTransaction,
   __debugResolveTrackedDeleteRange,
   __debugResolveTrackedTextInputRange,
   wrapTransactionForSuggestions,
@@ -174,6 +175,63 @@ function run(): void {
     return true;
   });
   assertEqual(insertedAuthoredCount, 0, 'Composition fallback should strip authored marks from the inserted range');
+
+  state = createState({ from: 18, to: 18 });
+  state = state.apply(wrapTransactionForSuggestions(state.tr.insertText(' brave', 18, 18), state, true));
+  const prePauseInsert = getMarks(state).find((mark) => mark.kind === 'insert');
+  assert(prePauseInsert?.range, 'Expected pre-pause tracked insert range');
+  const prePauseMetadata = { ...((marksPluginKey.getState(state) as { metadata?: Record<string, unknown> } | undefined)?.metadata ?? {}) };
+  const pauseDeleteId = 'pause-delete';
+  let pauseState = state.apply(
+    state.tr
+      .removeMark(prePauseInsert.range!.from, prePauseInsert.range!.to, schema.marks.proofSuggestion)
+      .addMark(prePauseInsert.range!.from, prePauseInsert.range!.to, authoredType.create({ by: 'human:Anonymous' }))
+      .addMark(
+        prePauseInsert.range!.from,
+        prePauseInsert.range!.to,
+        schema.marks.proofSuggestion.create({ id: pauseDeleteId, kind: 'delete', by: 'human:Anonymous' })
+      )
+      .setMeta(marksPluginKey, {
+        type: 'SET_METADATA',
+        metadata: {
+          ...Object.fromEntries(Object.entries(prePauseMetadata).filter(([id]) => id !== prePauseInsert.id)),
+          [pauseDeleteId]: {
+            kind: 'delete',
+            by: 'human:Anonymous',
+            createdAt: '2026-03-24T00:00:00.000Z',
+            status: 'pending',
+            quote: ' brave',
+            range: { from: prePauseInsert.range!.from, to: prePauseInsert.range!.to },
+          },
+        },
+      })
+  );
+  assertEqual(
+    pauseState.doc.textContent,
+    state.doc.textContent,
+    'Pause-corruption fixture should preserve the same plain text while changing marks only',
+  );
+  assertEqual(
+    getMarks(pauseState).filter((mark) => mark.kind === 'delete').length,
+    1,
+    'Pause-corruption fixture should produce one spurious delete suggestion',
+  );
+  const pausePersistenceFallbackTr = __debugBuildTextPreservingInsertPersistenceTransaction(state, pauseState);
+  assert(pausePersistenceFallbackTr, 'Expected text-preserving rewrite fallback to restore the pending insert');
+  pauseState = pauseState.apply(pausePersistenceFallbackTr!);
+
+  const repairedPauseMarks = getMarks(pauseState);
+  const repairedPauseInsertMarks = repairedPauseMarks.filter((mark) => mark.kind === 'insert');
+  const repairedPauseDeleteMarks = repairedPauseMarks.filter((mark) => mark.kind === 'delete');
+  assertEqual(repairedPauseInsertMarks.length, 1, 'Pause rewrite fallback should restore a single insert suggestion');
+  assertEqual(repairedPauseDeleteMarks.length, 0, 'Pause rewrite fallback should remove the spurious delete suggestion');
+  let repairedPauseAuthoredCount = 0;
+  pauseState.doc.nodesBetween(prePauseInsert.range!.from, prePauseInsert.range!.to, (node) => {
+    if (!node.isText) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofAuthored')) repairedPauseAuthoredCount += 1;
+    return true;
+  });
+  assertEqual(repairedPauseAuthoredCount, 0, 'Pause rewrite fallback should strip authored marks from the restored insert range');
 
   const originalDateNow = Date.now;
   let now = 1_700_000_000_000;

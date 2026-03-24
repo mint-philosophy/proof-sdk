@@ -1384,7 +1384,15 @@ export const suggestionsPlugin = $prose(() => {
       },
 
       handleTextInput(view, from, to, text) {
-        if (!isSuggestionsEnabled(view.state)) return false;
+        const enabled = isSuggestionsEnabled(view.state);
+        console.log('[suggestions.handleTextInput]', {
+          enabled,
+          from,
+          to,
+          text,
+          trackChangesView: view.dom?.dataset?.trackChangesView ?? null,
+        });
+        if (!enabled) return false;
         if (!text) return false;
         // Let composition-driven text updates use the same tracked-insert path
         // as ordinary typing. If we opt out here, ProseMirror's DOM observer

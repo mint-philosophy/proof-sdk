@@ -11059,6 +11059,7 @@ if (window.location?.pathname?.startsWith('/d/')) {
     getMarkdown: () => (window.proof.getMarkdownSnapshot()?.content ?? ''),
     insertMarkdown: (markdown: string) => window.proof.insertAtCursor(markdown, 'ai:browser-agent'),
     replaceSelection: (markdown: string) => window.proof.replaceSelection(markdown, 'ai:browser-agent'),
+    isSuggestionsEnabled: () => window.proof.isSuggestionsEnabled(),
     getClientIncidentEvents: (limit?: number) => getClientIncidentEvents(limit),
     clearClientIncidentEvents: () => clearClientIncidentEvents(),
     focus: () => {

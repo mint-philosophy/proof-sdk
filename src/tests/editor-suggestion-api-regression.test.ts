@@ -76,6 +76,11 @@ function run(): void {
   );
 
   assert(
+    editorSource.includes('isSuggestionsEnabled: () => window.proof.isSuggestionsEnabled(),'),
+    'Expected __PROOF_EDITOR__ to expose isSuggestionsEnabled so QA can verify the actual suggestions plugin state',
+  );
+
+  assert(
     editorSource.includes('mergedIncomingMarks = mergePendingServerMarks(getMarkMetadataWithQuotes(view.state), incomingMarks);'),
     'Expected collab.onMarks to merge incoming metadata against the quote-aware local snapshot',
   );

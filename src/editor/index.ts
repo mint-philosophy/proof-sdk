@@ -5877,8 +5877,16 @@ class ProofEditorImpl implements ProofEditor {
     this.lastMarkdown = markdown;
     this.sendDocumentSnapshot(view, markdown, actionMarks);
 
+    let liveMetadata = actionMetadata ?? getMarkMetadataWithQuotes(view.state);
+    const liveInsertIds = actionMarks
+      .filter((mark) => mark.kind === 'insert')
+      .map((mark) => mark.id);
+    if (liveInsertIds.length > 0) {
+      liveMetadata = syncInsertSuggestionMetadataFromDoc(view.state.doc, liveMetadata, liveInsertIds);
+    }
+
     const metadata = mergePendingServerMarks(
-      actionMetadata ?? getMarkMetadataWithQuotes(view.state),
+      liveMetadata,
       this.lastReceivedServerMarks,
     );
     const persistedMetadata = this.isShareMode

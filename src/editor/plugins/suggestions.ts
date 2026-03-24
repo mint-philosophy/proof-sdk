@@ -1248,6 +1248,7 @@ export function isSuggestionsEnabled(state: EditorState): boolean {
  * Enable suggestions
  */
 export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {
+  resetSuggestionsInsertCoalescing();
   const tr = view.state.tr.setMeta(suggestionsPluginKey, { enabled: true });
   view.dispatch(tr);
 }
@@ -1256,6 +1257,7 @@ export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Tra
  * Disable suggestions
  */
 export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {
+  resetSuggestionsInsertCoalescing();
   const tr = view.state.tr.setMeta(suggestionsPluginKey, { enabled: false });
   view.dispatch(tr);
 }

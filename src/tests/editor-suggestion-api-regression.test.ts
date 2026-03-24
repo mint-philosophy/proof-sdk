@@ -18,6 +18,7 @@ function run(): void {
   const shareClientSource = readFileSync(path.resolve(process.cwd(), 'src/bridge/share-client.ts'), 'utf8');
   const agentRoutesSource = readFileSync(path.resolve(process.cwd(), 'server/agent-routes.ts'), 'utf8');
   const documentEngineSource = readFileSync(path.resolve(process.cwd(), 'server/document-engine.ts'), 'utf8');
+  const suggestionsSource = readFileSync(path.resolve(process.cwd(), 'src/editor/plugins/suggestions.ts'), 'utf8');
 
   const acceptSuggestionBlock = sliceBetween(editorSource, '  acceptSuggestion(id: string): boolean {', '\n  /**');
   assert(acceptSuggestionBlock.includes('return this.markAccept(String(id));'), 'Expected acceptSuggestion to delegate to markAccept');
@@ -49,12 +50,21 @@ function run(): void {
   assert(
     editorSource.includes('private scheduleShareMarksFlush(): void')
       && handleMarksChangeBlock.includes('if (this.isShareMode) {')
+      && handleMarksChangeBlock.includes("const liveInsertIds = actionMarks")
+      && handleMarksChangeBlock.includes("syncInsertSuggestionMetadataFromDoc(view.state.doc, liveMetadata, liveInsertIds)")
       && handleMarksChangeBlock.includes('this.scheduleShareMarksFlush();')
       && handleMarksChangeBlock.includes('Let content flow through the existing collab binding')
       && handleMarksChangeBlock.includes('} else if (this.collabEnabled && this.collabCanEdit) {')
       && handleMarksChangeBlock.includes('collabClient.setMarksMetadata(metadata);')
       && !handleMarksChangeBlock.includes('this.flushShareMarks();'),
-    'Expected share-mode mark updates to defer the share flush until after the dispatch cycle instead of pushing marks immediately during tracked typing',
+    'Expected share-mode mark updates to resync live insert metadata from the document, then defer the share flush until after the dispatch cycle instead of pushing marks immediately during tracked typing',
+  );
+
+  assert(
+    suggestionsSource.includes('export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {')
+      && suggestionsSource.includes('export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {')
+      && suggestionsSource.includes('resetSuggestionsInsertCoalescing();'),
+    'Expected toggling track changes on or off to clear stale insert coalescing state',
   );
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');

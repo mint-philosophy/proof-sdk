@@ -451,6 +451,219 @@ async function run(): Promise<void> {
       `Expected stored target-bearing materialized span batch markdown without duplication or cross-block bleed, got ${JSON.stringify(storedMaterializedTargetSpanBatch?.markdown)}`,
     );
 
+    const capturedMutationBaseSlug = `shared-captured-mutation-base-${Math.random().toString(36).slice(2, 10)}`;
+    const capturedVisibleMarkdown = '# Metadata Capture TC edit\n\nBaseline paragraph one.TC p1 insert&#x20;\n\nBaseline paragraph two.TC p2 insert&#x20;\n';
+    const capturedPersistedMarkdown = '# Metadata Capture<span data-proof="suggestion" data-id="m1774374800876_1" data-by="human:Test Editor" data-kind="insert"> TC edit</span>\n\nBaseline paragraph one.<span data-proof="suggestion" data-id="m1774374816542_2" data-by="human:Test Editor" data-kind="insert">TC p1 insert</span>&#x20;\n\nBaseline paragraph two.<span data-proof="suggestion" data-id="m1774374829974_3" data-by="human:Test Editor" data-kind="insert">TC p2 insert</span>&#x20;\n';
+    const capturedMarks = {
+      'authored:human:Test Editor:1-17': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 1, to: 17 },
+        quote: 'Metadata Capture',
+        startRel: 'char:0',
+        endRel: 'char:16',
+      },
+      'authored:human:Test Editor:19-42': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 48, to: 49 },
+        quote: 'e',
+        startRel: 'char:46',
+        endRel: 'char:47',
+      },
+      'authored:human:Test Editor:44-67': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 86, to: 87 },
+        quote: 'o',
+        startRel: 'char:83',
+        endRel: 'char:84',
+      },
+      m1774374800876_1: {
+        kind: 'insert',
+        by: 'human:Test Editor',
+        createdAt: '2026-03-24T17:53:20.876Z',
+        status: 'pending',
+        content: ' TC edit',
+        range: { from: 17, to: 25 },
+        startRel: 'char:16',
+        endRel: 'char:24',
+        quote: 'TC edit',
+      },
+      'authored:human:Test Editor:17-18': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 17, to: 18 },
+        startRel: 'char:16',
+        endRel: 'char:17',
+      },
+      'authored:human:Test Editor:42-43': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 47, to: 48 },
+        quote: 'n',
+        startRel: 'char:45',
+        endRel: 'char:46',
+      },
+      'authored:human:Test Editor:67-68': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 85, to: 86 },
+        quote: 'w',
+        startRel: 'char:82',
+        endRel: 'char:83',
+      },
+      'authored:human:Test Editor:17-19': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 18, to: 19 },
+        quote: 'T',
+        startRel: 'char:17',
+        endRel: 'char:18',
+      },
+      'authored:human:Test Editor:43-44': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 46, to: 47 },
+        quote: 'o',
+        startRel: 'char:44',
+        endRel: 'char:45',
+      },
+      'authored:human:Test Editor:68-69': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 84, to: 85 },
+        quote: 't',
+        startRel: 'char:81',
+        endRel: 'char:82',
+      },
+      'authored:human:Test Editor:20-43': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 27, to: 46 },
+        quote: 'Baseline paragraph',
+        startRel: 'char:25',
+        endRel: 'char:44',
+      },
+      'authored:human:Test Editor:45-68': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 65, to: 84 },
+        quote: 'Baseline paragraph',
+        startRel: 'char:62',
+        endRel: 'char:81',
+      },
+      'authored:human:Test Editor:44-45': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 50, to: 63 },
+        quote: 'TC p1 insert',
+        startRel: 'char:48',
+        endRel: 'char:61',
+      },
+      'authored:human:Test Editor:69-70': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 88, to: 101 },
+        quote: 'TC p2 insert',
+        startRel: 'char:85',
+        endRel: 'char:98',
+      },
+      'authored:human:Test Editor:19-24': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 19, to: 24 },
+        quote: 'C edi',
+        startRel: 'char:18',
+        endRel: 'char:23',
+      },
+      m1774374816542_2: {
+        kind: 'insert',
+        by: 'human:Test Editor',
+        createdAt: '2026-03-24T17:53:36.542Z',
+        status: 'pending',
+        content: ' TC p1 insert',
+        range: { from: 50, to: 63 },
+        startRel: 'char:48',
+        endRel: 'char:61',
+        quote: 'TC p1 insert',
+      },
+      'authored:human:Test Editor:24-25': {
+        kind: 'authored',
+        by: 'human:Test Editor',
+        createdAt: '1970-01-01T00:00:00.000Z',
+        range: { from: 24, to: 25 },
+        quote: 't',
+        startRel: 'char:23',
+        endRel: 'char:24',
+      },
+      m1774374829974_3: {
+        kind: 'insert',
+        by: 'human:Test Editor',
+        createdAt: '2026-03-24T17:53:49.974Z',
+        status: 'pending',
+        content: ' TC p2 insert',
+        range: { from: 88, to: 101 },
+        startRel: 'char:85',
+        endRel: 'char:98',
+        quote: 'TC p2 insert',
+      },
+    } as const;
+
+    db.createDocument(
+      capturedMutationBaseSlug,
+      capturedPersistedMarkdown,
+      capturedMarks as unknown as Record<string, unknown>,
+      'Captured mutation-base accept-all regression',
+    );
+    const capturedDoc = db.getDocumentBySlug(capturedMutationBaseSlug);
+    assert(Boolean(capturedDoc), 'Expected captured mutation-base doc to exist');
+    const acceptedCapturedMutationBase = await executeDocumentOperationAsync(
+      capturedMutationBaseSlug,
+      'POST',
+      '/marks/accept-all',
+      {
+        markIds: ['m1774374800876_1', 'm1774374816542_2', 'm1774374829974_3'],
+        by: 'human:test',
+      },
+      {
+        doc: capturedDoc!,
+        mutationBase: {
+          token: 'mt1:captured-test',
+          source: 'live_yjs',
+          schemaVersion: 'mt1',
+          markdown: capturedVisibleMarkdown,
+          marks: capturedMarks as unknown as Record<string, unknown>,
+          accessEpoch: 1,
+        },
+        precondition: { mode: 'revision', baseRevision: capturedDoc!.revision },
+      },
+    );
+    assert(acceptedCapturedMutationBase.status === 200, `Expected captured mutation-base batch accept status 200, got ${acceptedCapturedMutationBase.status}`);
+    assert(
+      String(acceptedCapturedMutationBase.body.markdown ?? '') === capturedVisibleMarkdown,
+      `Expected captured mutation-base batch accept not to duplicate already-materialized insert text, got ${JSON.stringify(acceptedCapturedMutationBase.body.markdown)}`,
+    );
+    const storedCapturedMutationBase = db.getDocumentBySlug(capturedMutationBaseSlug);
+    assert(
+      storedCapturedMutationBase?.markdown === capturedVisibleMarkdown,
+      `Expected stored captured mutation-base markdown to stay identical to the authoritative visible snapshot, got ${JSON.stringify(storedCapturedMutationBase?.markdown)}`,
+    );
+
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

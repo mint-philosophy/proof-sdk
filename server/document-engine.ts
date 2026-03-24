@@ -3117,7 +3117,12 @@ async function acceptAllSuggestionsAsync(
   if (ready.error) return ready.error;
   const doc = ready.doc;
   const actor = typeof body.by === 'string' && body.by.trim() ? body.by.trim() : 'owner';
-  const marks = parseMarks(doc.marks);
+  const baseMarkdown = typeof context?.mutationBase?.markdown === 'string'
+    ? context.mutationBase.markdown
+    : doc.markdown;
+  const marks = context?.mutationBase
+    ? canonicalizeStoredMarks(context.mutationBase.marks as Record<string, StoredMark>)
+    : parseMarks(doc.marks);
   const requestedMarkIds = Array.isArray(body.markIds)
     ? body.markIds.filter((markId): markId is string => typeof markId === 'string' && markId.trim().length > 0).map((markId) => markId.trim())
     : [];
@@ -3136,7 +3141,7 @@ async function acceptAllSuggestionsAsync(
         return bPos - aPos;
       })
   );
-  const pendingIds = getPendingIds(doc.markdown, marks);
+  const pendingIds = getPendingIds(baseMarkdown, marks);
   if (pendingIds.length === 0) {
     return {
       status: 200,
@@ -3145,14 +3150,14 @@ async function acceptAllSuggestionsAsync(
         acceptedCount: 0,
         shareState: doc.share_state,
         updatedAt: doc.updated_at,
-        markdown: doc.markdown,
-        content: doc.markdown,
+        markdown: baseMarkdown,
+        content: baseMarkdown,
         marks,
       },
     };
   }
 
-  let nextMarkdown = doc.markdown;
+  let nextMarkdown = baseMarkdown;
   let nextMarks = marks;
   const acceptedIds: string[] = [];
   while (true) {

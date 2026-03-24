@@ -13,6 +13,12 @@ async function run(): Promise<void> {
       && engineSource.includes('await invalidateCollabDocumentAndWait(slug);'),
     'Expected async accepted suggestion finalization to wait for full collab invalidation before returning',
   );
+  assert(
+    engineSource.includes('const originalMark = marks[markId];')
+      && engineSource.includes('const originalRange = originalMark ? getStoredMarkRange(originalMark) : null;')
+      && engineSource.includes("nextMarkdown = applyMutationCleanup('POST /marks/accept', stripAllProofSpanTags(nextMarkdown));"),
+    'Expected accept-all batch loop to preserve originally materialized insert marks instead of replaying them as fresh inserts',
+  );
 
   const dbName = `proof-shared-insert-accept-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
   const dbPath = path.join(os.tmpdir(), dbName);

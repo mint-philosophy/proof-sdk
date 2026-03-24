@@ -40,10 +40,25 @@ function run(): void {
   );
 
   const markAcceptAllBlock = sliceBetween(editorSource, '  markAcceptAll(): number {', '\n  /**\n   * Reject all pending suggestions\n   */');
+  const sortedPendingIdsBlock = sliceBetween(
+    editorSource,
+    '  private getSortedPendingSuggestionIdsForShareReview(): string[] {',
+    '\n  /**\n   * Accept all pending suggestions\n   */',
+  );
   assert(
-    markAcceptAllBlock.includes('acceptedIds = getPendingSuggestions(getMarks(view.state)).map((mark) => mark.id);')
-      && markAcceptAllBlock.includes('const result = await shareClient.acceptSuggestion(suggestionId, actor);'),
-    'Expected markAcceptAll to persist each accepted suggestion through share mutations',
+    sortedPendingIdsBlock.includes('sortedIds = [...getPendingSuggestions(getMarks(view.state))]')
+      && sortedPendingIdsBlock.includes("const aMax = a.range?.to ?? a.range?.from ?? -1;")
+      && sortedPendingIdsBlock.includes('return bMax - aMax;'),
+    'Expected share review batch actions to sort pending suggestions from the live document by descending position before each mutation pass',
+  );
+  assert(
+    markAcceptAllBlock.includes('const initialIds = this.getSortedPendingSuggestionIdsForShareReview();')
+      && markAcceptAllBlock.includes('const pendingIds = this.getSortedPendingSuggestionIdsForShareReview();')
+      && markAcceptAllBlock.includes('const latestPendingIds = this.getSortedPendingSuggestionIdsForShareReview();')
+      && markAcceptAllBlock.includes('const success = await this.markAcceptPersisted(suggestionId);')
+      && markAcceptAllBlock.includes('const maxPasses = 8;')
+      && markAcceptAllBlock.includes('if (acceptedInPass === 0) break;'),
+    'Expected share-mode markAcceptAll to recompute live pending suggestion order after each accept instead of replaying a stale snapshot',
   );
 
   const handleMarksChangeBlock = sliceBetween(editorSource, '  private handleMarksChange(', '\n  private serializeMarkdown(');

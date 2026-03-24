@@ -9416,6 +9416,23 @@ class ProofEditorImpl implements ProofEditor {
     });
   }
 
+  private getSortedPendingSuggestionIdsForShareReview(): string[] {
+    if (!this.editor) return [];
+
+    let sortedIds: string[] = [];
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      sortedIds = [...getPendingSuggestions(getMarks(view.state))]
+        .sort((a, b) => {
+          const aMax = a.range?.to ?? a.range?.from ?? -1;
+          const bMax = b.range?.to ?? b.range?.from ?? -1;
+          return bMax - aMax;
+        })
+        .map((mark) => mark.id);
+    });
+    return sortedIds;
+  }
+
   /**
    * Accept all pending suggestions
    */
@@ -9426,21 +9443,31 @@ class ProofEditorImpl implements ProofEditor {
     }
 
     if (this.isShareMode) {
-      let acceptedIds: string[] = [];
-      this.editor.action((ctx) => {
-        const view = ctx.get(editorViewCtx);
-        acceptedIds = getPendingSuggestions(getMarks(view.state)).map((mark) => mark.id);
-      });
-      if (acceptedIds.length === 0) return 0;
+      const initialIds = this.getSortedPendingSuggestionIdsForShareReview();
+      if (initialIds.length === 0) return 0;
 
       void (async () => {
-        for (const suggestionId of acceptedIds) {
-          await this.markAcceptPersisted(suggestionId);
+        const maxPasses = 8;
+        for (let pass = 0; pass < maxPasses; pass += 1) {
+          const pendingIds = this.getSortedPendingSuggestionIdsForShareReview();
+          if (pendingIds.length === 0) break;
+
+          let acceptedInPass = 0;
+          for (const suggestionId of pendingIds) {
+            const latestPendingIds = this.getSortedPendingSuggestionIdsForShareReview();
+            if (!latestPendingIds.includes(suggestionId)) continue;
+            const success = await this.markAcceptPersisted(suggestionId);
+            if (success) {
+              acceptedInPass += 1;
+            }
+          }
+
+          if (acceptedInPass === 0) break;
         }
       })().catch((error) => {
         console.error('[markAcceptAll] Failed to persist suggestion acceptance via share mutation:', error);
       });
-      return acceptedIds.length;
+      return initialIds.length;
     }
 
     let count = 0;

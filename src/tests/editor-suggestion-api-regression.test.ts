@@ -72,6 +72,17 @@ function run(): void {
       && !markAcceptAllBlock.includes('await this.markAcceptPersisted(suggestionId);'),
     'Expected share-mode markAcceptAll to batch persisted accepts server-side and perform a single final authoritative apply/reconnect',
   );
+  const markRejectAllBlock = sliceBetween(editorSource, '  markRejectAll(): number {', '\n  /**\n   * Delete a mark by ID\n   */');
+  assert(
+    markRejectAllBlock.includes('const initialIds = this.getSortedPendingSuggestionIdsForShareReview();')
+      && markRejectAllBlock.includes('void this.runSerializedShareReviewMutation(async () => {')
+      && markRejectAllBlock.includes('const result = await shareClient.rejectSuggestion(suggestionId, actor);')
+      && markRejectAllBlock.includes('pendingIds = this.getSortedPendingSuggestionIdsFromStoredMarks(serverMarks)')
+      && markRejectAllBlock.includes('const success = await this.applyShareMutationDocumentResult(latestSuccessfulResult);')
+      && markRejectAllBlock.includes("tombstoneResolvedMarkIds(rejectedIds, { reason: 'deleted' });")
+      && !markRejectAllBlock.includes('await this.markRejectPersisted(suggestionId);'),
+    'Expected share-mode markRejectAll to batch persisted rejects server-side and perform a single final authoritative apply/reconnect',
+  );
 
   const handleMarksChangeBlock = sliceBetween(editorSource, '  private handleMarksChange(', '\n  private serializeMarkdown(');
   assert(

@@ -9609,6 +9609,24 @@ class ProofEditorImpl implements ProofEditor {
       .map(([id]) => id);
   }
 
+  private buildShareBatchSuggestionSnapshot(): { markdown: string; marks: Record<string, unknown> } | null {
+    if (!this.editor) return null;
+
+    let snapshot: { markdown: string; marks: Record<string, unknown> } | null = null;
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const serialized = this.serializeMarkdown(view);
+      if (!serialized) return;
+      const markdown = this.normalizeMarkdownForCollab(serialized);
+      const metadata = getMarkMetadataWithQuotes(view.state);
+      snapshot = {
+        markdown,
+        marks: buildCanonicalShareMarkMetadata(view.state, metadata) as Record<string, unknown>,
+      };
+    });
+    return snapshot;
+  }
+
   /**
    * Accept all pending suggestions
    */
@@ -9629,7 +9647,8 @@ class ProofEditorImpl implements ProofEditor {
           return;
         }
         const actor = getCurrentActor();
-        const result = await shareClient.acceptSuggestions(initialIds, actor);
+        const snapshot = this.buildShareBatchSuggestionSnapshot();
+        const result = await shareClient.acceptSuggestions(initialIds, actor, undefined, snapshot ?? undefined);
         if (!result || 'error' in result || result.success !== true) {
           console.error('[markAcceptAll] Failed to persist suggestion acceptance via share mutation:', result);
           return;

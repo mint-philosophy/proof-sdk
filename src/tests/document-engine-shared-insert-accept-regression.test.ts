@@ -670,6 +670,68 @@ async function run(): Promise<void> {
       `Expected stored captured mutation-base markdown to stay identical to the authoritative visible snapshot, got ${JSON.stringify(storedCapturedMutationBase?.markdown)}`,
     );
 
+    const capturedParagraphVisibleMarkdown = '# Mark Capture Test\n\nBaseline paragraph one for testing.TC edit one.&#x20;\n\nBaseline paragraph two for testing. TC edit two.\n';
+    const capturedParagraphPersistedMarkdown = '# Mark Capture Test\n\nBaseline paragraph one for testing<span data-proof="suggestion" data-kind="insert" data-id="m1774381382005_1">TC edit one.</span>&#x20;\n\nBaseline paragraph two for testing<span data-proof="suggestion" data-kind="insert" data-id="m1774381384411_2"> TC edit two.</span>\n';
+    const capturedParagraphMarks = {
+      m1774381382005_1: {
+        kind: 'insert',
+        by: 'human:Test Editor',
+        createdAt: '2026-03-24T19:43:02.006Z',
+        status: 'pending',
+        content: ' TC edit one.',
+        range: { from: 55, to: 68 },
+        startRel: 'char:53',
+        endRel: 'char:66',
+        quote: 'TC edit one.',
+      },
+      m1774381384411_2: {
+        kind: 'insert',
+        by: 'human:Test Editor',
+        createdAt: '2026-03-24T19:43:04.411Z',
+        status: 'pending',
+        content: ' TC edit two.',
+        range: { from: 105, to: 118 },
+        startRel: 'char:102',
+        endRel: 'char:115',
+        quote: 'TC edit two.',
+      },
+    } as const;
+    const capturedParagraphSlug = `captured-p1p2-${Date.now()}`;
+    db.createDocument(
+      capturedParagraphSlug,
+      capturedParagraphPersistedMarkdown,
+      capturedParagraphMarks as unknown as Record<string, unknown>,
+      'Captured paragraph mutation-base accept-all regression',
+    );
+    const capturedParagraphDoc = db.getDocumentBySlug(capturedParagraphSlug);
+    assert(Boolean(capturedParagraphDoc), 'Expected captured paragraph mutation-base doc to exist');
+    const acceptedCapturedParagraph = await executeDocumentOperationAsync(
+      capturedParagraphSlug,
+      'POST',
+      '/marks/accept-all',
+      {
+        markIds: ['m1774381382005_1', 'm1774381384411_2'],
+        by: 'human:test',
+      },
+      {
+        doc: capturedParagraphDoc!,
+        mutationBase: {
+          token: 'mt1:captured-p1p2-test',
+          source: 'live_yjs',
+          schemaVersion: 'mt1',
+          markdown: capturedParagraphVisibleMarkdown,
+          marks: capturedParagraphMarks as unknown as Record<string, unknown>,
+          accessEpoch: 1,
+        },
+        precondition: { mode: 'revision', baseRevision: capturedParagraphDoc!.revision },
+      },
+    );
+    assert(acceptedCapturedParagraph.status === 200, `Expected captured paragraph batch accept status 200, got ${acceptedCapturedParagraph.status}`);
+    assert(
+      String(acceptedCapturedParagraph.body.markdown ?? '') === capturedParagraphVisibleMarkdown,
+      `Expected captured paragraph batch accept not to duplicate already-materialized insert text with mismatched content/quote whitespace, got ${JSON.stringify(acceptedCapturedParagraph.body.markdown)}`,
+    );
+
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

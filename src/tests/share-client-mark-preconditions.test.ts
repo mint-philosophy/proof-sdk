@@ -142,7 +142,18 @@ async function run(): Promise<void> {
       'acceptSuggestion should return the eventual canonical markdown after transient MARK_NOT_FOUND retries',
     );
 
-    const batchAccept = await shareClient.acceptSuggestions(['mark-1', 'mark-2'], 'human:editor');
+    const batchAccept = await shareClient.acceptSuggestions(
+      ['mark-1', 'mark-2'],
+      'human:editor',
+      undefined,
+      {
+        markdown: 'Snapshot batch markdown',
+        marks: {
+          'mark-1': { kind: 'insert', status: 'pending' },
+          'mark-2': { kind: 'insert', status: 'pending' },
+        },
+      },
+    );
     assert.equal((batchAccept && 'error' in batchAccept) ? false : batchAccept?.success, true, 'acceptSuggestions should succeed');
     assert.equal(
       (batchAccept && 'error' in batchAccept) ? undefined : batchAccept?.markdown,
@@ -200,6 +211,19 @@ async function run(): Promise<void> {
       acceptAllRequest?.body?.markIds,
       ['mark-1', 'mark-2'],
       'acceptSuggestions should send the requested markIds in one batch payload',
+    );
+    assert.equal(
+      acceptAllRequest?.body?.markdown,
+      'Snapshot batch markdown',
+      'acceptSuggestions should send the caller-provided visible markdown snapshot for batch accept',
+    );
+    assert.deepEqual(
+      acceptAllRequest?.body?.marks,
+      {
+        'mark-1': { kind: 'insert', status: 'pending' },
+        'mark-2': { kind: 'insert', status: 'pending' },
+      },
+      'acceptSuggestions should send the caller-provided mark snapshot for batch accept',
     );
     assert.equal(
       rejectRequest?.body?.baseRevision,

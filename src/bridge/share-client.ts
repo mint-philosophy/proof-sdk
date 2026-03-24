@@ -547,6 +547,10 @@ export class ShareClient {
     by: string;
     idempotencyKey: string;
     options?: { token?: string };
+    snapshot?: {
+      markdown: string;
+      marks: Record<string, unknown>;
+    };
   }): Promise<ShareMarkMutationResponse | ShareRequestError | null> {
     const submit = async (base: ShareMutationBase): Promise<ShareMarkMutationResponse | ShareRequestError> => {
       const response = await fetch(`${this.getApiBase()}/agent/${encodeURIComponent(this.slug as string)}/marks/${args.path}`, {
@@ -556,7 +560,17 @@ export class ShareClient {
           'Idempotency-Key': args.idempotencyKey,
           ...this.getShareAuthHeaders(args.options?.token),
         },
-        body: JSON.stringify({ markIds: args.markIds, by: args.by, ...base }),
+        body: JSON.stringify({
+          markIds: args.markIds,
+          by: args.by,
+          ...(args.snapshot
+            ? {
+                markdown: args.snapshot.markdown,
+                marks: args.snapshot.marks,
+              }
+            : {}),
+          ...base,
+        }),
       });
       const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
       if (!response.ok) {
@@ -1025,7 +1039,11 @@ export class ShareClient {
   async acceptSuggestions(
     markIds: string[],
     by: string,
-    options?: { token?: string }
+    options?: { token?: string },
+    snapshot?: {
+      markdown: string;
+      marks: Record<string, unknown>;
+    },
   ): Promise<ShareMarkMutationResponse | ShareRequestError | null> {
     if (!this.slug) return null;
     const trimmedIds = markIds
@@ -1045,6 +1063,7 @@ export class ShareClient {
       by: actor,
       idempotencyKey,
       options,
+      snapshot,
     });
   }
 

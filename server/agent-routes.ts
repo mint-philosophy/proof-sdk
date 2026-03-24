@@ -385,6 +385,59 @@ function buildMutationContextDocument(
   };
 }
 
+function normalizeBatchMutationSnapshotMarkdown(markdown: string): string {
+  return stripAllProofSpanTags(stripEphemeralCollabSpans(markdown)).replace(/\r\n/g, '\n');
+}
+
+function overlayBatchMutationPayloadSnapshot(
+  context: AsyncDocumentMutationContext,
+  payload: Record<string, unknown>,
+): AsyncDocumentMutationContext {
+  const snapshotMarkdown = typeof payload.markdown === 'string'
+    ? payload.markdown
+    : typeof payload.content === 'string'
+      ? payload.content
+      : null;
+  const snapshotMarks = isRecord(payload.marks)
+    ? canonicalizeStoredMarks(payload.marks as Record<string, StoredMark>)
+    : null;
+  if (!snapshotMarkdown || !snapshotMarks) return context;
+
+  const requestedIds = Array.isArray(payload.markIds)
+    ? payload.markIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim())
+    : [];
+  if (requestedIds.some((markId) => !Object.prototype.hasOwnProperty.call(snapshotMarks, markId))) {
+    return context;
+  }
+
+  const authoritativeVisible = normalizeBatchMutationSnapshotMarkdown(
+    typeof context.mutationBase?.markdown === 'string' ? context.mutationBase.markdown : context.doc.markdown,
+  );
+  const snapshotVisible = normalizeBatchMutationSnapshotMarkdown(snapshotMarkdown);
+  if (authoritativeVisible !== snapshotVisible) {
+    return context;
+  }
+
+  const mutationBase = context.mutationBase
+    ? {
+        ...context.mutationBase,
+        markdown: snapshotMarkdown,
+        marks: snapshotMarks as Record<string, unknown>,
+      }
+    : null;
+
+  return {
+    ...context,
+    doc: {
+      ...context.doc,
+      markdown: snapshotMarkdown,
+      marks: JSON.stringify(snapshotMarks),
+      plain_text: snapshotMarkdown,
+    },
+    mutationBase,
+  };
+}
+
 function shouldIncludeCanonicalDiagnostics(): boolean {
   const runtimeEnv = (process.env.PROOF_ENV || process.env.NODE_ENV || '').trim().toLowerCase();
   if (runtimeEnv !== 'production' && runtimeEnv !== 'prod') return true;
@@ -3564,10 +3617,11 @@ agentRoutes.post('/:slug/marks/accept-all', async (req: Request, res: Response) 
   const payload = asPayload(req.body);
   const mutationContext = await enforceMutationPrecondition(res, slug, mutationRoute, 'suggestion.accept', payload, replay);
   if (!mutationContext) return;
+  const effectiveMutationContext = overlayBatchMutationPayloadSnapshot(mutationContext, payload);
   let keepRewriteLockCooldown = false;
   acquireRewriteLock(slug);
   try {
-    const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/accept-all', payload, mutationContext);
+    const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/accept-all', payload, effectiveMutationContext);
     if (result.status >= 200 && result.status < 300) {
       keepRewriteLockCooldown = true;
       if (isRecord(result.body)) {

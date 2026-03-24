@@ -792,6 +792,75 @@ async function run(): Promise<void> {
       `Expected run 43 collapsed-range batch accept to preserve the paragraph-one insertion text once, got ${JSON.stringify(acceptedRun43.body.markdown)}`,
     );
 
+    const run49VisibleMarkdown = '# Run 49 P1P2 Full Test\n\nBaseline paragraph one for testing. TC edit one. \n\nBaseline paragraph two for verify. TC edit two.\n';
+    const run49PersistedMarkdown = '# Run 49 P1P2 Full Test\n\nBaseline paragraph one for testing.<span data-proof="suggestion" data-kind="insert" data-id="m-run49-p1"> TC edit one.</span>&#x20;\n\nBaseline paragraph two for verify.<span data-proof="suggestion" data-kind="insert" data-id="m-run49-p2"> TC edit two.</span>\n';
+    const run49P1Start = run49VisibleMarkdown.indexOf(' TC edit one.');
+    const run49P2Start = run49VisibleMarkdown.indexOf(' TC edit two.');
+    assert(run49P1Start >= 0, 'Expected run 49 visible markdown to contain paragraph-one insertion text');
+    assert(run49P2Start >= 0, 'Expected run 49 visible markdown to contain paragraph-two insertion text');
+    const run49Marks = {
+      'm-run49-p1': {
+        kind: 'insert',
+        by: 'human:Test Editor',
+        status: 'pending',
+        content: ' TC edit one.',
+        // Real CGEvent paragraph marks can keep a collapsed insertion point that
+        // drifts several characters away from the already-materialized text by
+        // the time batch accept runs.
+        range: { from: run49P1Start + 6, to: run49P1Start + 6 },
+      },
+      'm-run49-p2': {
+        kind: 'insert',
+        by: 'human:Test Editor',
+        status: 'pending',
+        content: ' TC edit two.',
+        range: { from: run49P2Start, to: run49P2Start },
+      },
+    } as const;
+    const run49Slug = `captured-run49-${Date.now()}`;
+    db.createDocument(
+      run49Slug,
+      run49PersistedMarkdown,
+      run49Marks as unknown as Record<string, unknown>,
+      'Captured run 49 stale collapsed-range accept-all regression',
+    );
+    const run49Doc = db.getDocumentBySlug(run49Slug);
+    assert(Boolean(run49Doc), 'Expected captured run 49 doc to exist');
+    const acceptedRun49 = await executeDocumentOperationAsync(
+      run49Slug,
+      'POST',
+      '/marks/accept-all',
+      {
+        markIds: ['m-run49-p2', 'm-run49-p1'],
+        by: 'human:test',
+      },
+      {
+        doc: run49Doc!,
+        mutationBase: {
+          token: 'mt1:captured-run49-test',
+          source: 'live_yjs',
+          schemaVersion: 'mt1',
+          markdown: run49VisibleMarkdown,
+          marks: run49Marks as unknown as Record<string, unknown>,
+          accessEpoch: 1,
+        },
+        precondition: { mode: 'revision', baseRevision: run49Doc!.revision },
+      },
+    );
+    assert(acceptedRun49.status === 200, `Expected run 49 stale collapsed-range batch accept status 200, got ${acceptedRun49.status}`);
+    const acceptedRun49Markdown = String(acceptedRun49.body.markdown ?? '');
+    assert(
+      !acceptedRun49Markdown.includes('TC edit one. TCedit one.')
+        && !acceptedRun49Markdown.includes('TC edit one.TC edit one.')
+        && !acceptedRun49Markdown.includes('TC edit one.TCedit one.'),
+      `Expected run 49 stale collapsed-range batch accept not to duplicate paragraph-one insert text, got ${JSON.stringify(acceptedRun49.body.markdown)}`,
+    );
+    assert(
+      acceptedRun49Markdown.includes('Baseline paragraph one for testing. TC edit one.')
+        && acceptedRun49Markdown.includes('Baseline paragraph two for verify. TC edit two.'),
+      `Expected run 49 stale collapsed-range batch accept to preserve the paragraph insert text once in each block, got ${JSON.stringify(acceptedRun49.body.markdown)}`,
+    );
+
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

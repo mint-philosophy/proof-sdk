@@ -1029,16 +1029,21 @@ function stabilizeCollapsedMaterializedInsertMark(markdown: string, mark: Stored
   const rawVisibleText = getRawVisibleMutationText(markdown);
   const target = normalizedQuote.length > 0 ? normalizedQuote : normalizedContent;
   if (target.length > 0) {
+    // Real browser-composed TC inserts can leave collapsed insertion-point
+    // ranges a few characters stale relative to the already-materialized text.
+    // Search a bounded neighborhood around the stored position instead of only
+    // exact +/-1 offsets so batch accept can recognize those inserts as
+    // already present and avoid replaying them.
+    const searchRadius = Math.max(4, Math.min(48, Math.max(content.length, target.length) + 16));
     const candidateStarts = Array.from(new Set([
       range.from - content.length,
       range.from - target.length,
-      range.from - 1,
-      range.from,
-      range.from + 1,
+      ...Array.from({ length: (searchRadius * 2) + 1 }, (_value, index) => (range.from - searchRadius) + index),
     ]));
     const candidateLengths = Array.from(new Set([
       content.length,
       target.length,
+      Math.max(1, target.length - 1),
       target.length + 1,
       target.length + 2,
     ].filter((value) => value > 0)));

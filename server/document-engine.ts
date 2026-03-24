@@ -1034,6 +1034,22 @@ function isCollapsedMaterializedInsertMark(markdown: string, mark: StoredMark): 
   return stripAllProofSpanTags(markdown).includes(content);
 }
 
+function getPendingSuggestionSortPosition(markdown: string, mark: StoredMark | undefined): number {
+  if (!mark) return -1;
+  const range = getStoredMarkRange(mark);
+  if (range) return range.to > range.from ? range.to : range.from;
+
+  const endRel = parseRelativeCharOffset(mark.endRel);
+  if (endRel !== null) return endRel;
+  const startRel = parseRelativeCharOffset(mark.startRel);
+  if (startRel !== null) return startRel;
+
+  const quote = normalizeQuote(mark.quote);
+  if (!quote) return -1;
+  const anchor = findQuoteAnchorInMarkdown(markdown, quote);
+  return anchor?.strippedEnd ?? anchor?.strippedStart ?? -1;
+}
+
 function rebaseCollapsedInsertPositionForAcceptedSuggestion(
   pos: number,
   acceptedMark: StoredMark,
@@ -1077,6 +1093,55 @@ function rebasePendingInsertMarksAfterAcceptedSuggestion(
       || mark.status === 'rejected'
     ) {
       nextMarks[id] = mark;
+      continue;
+    }
+
+    const startRel = parseRelativeCharOffset(mark.startRel);
+    const endRel = parseRelativeCharOffset(mark.endRel);
+    const hasAnchorMetadata = Boolean(
+      (typeof mark.quote === 'string' && normalizeQuote(mark.quote).length > 0)
+      || startRel !== null
+      || endRel !== null,
+    );
+    if (hasAnchorMetadata) {
+      const nextMark: StoredMark = { ...mark };
+      let markChanged = false;
+
+      if (startRel !== null) {
+        const rebasedStartRel = rebaseCollapsedInsertPositionForAcceptedSuggestion(startRel, acceptedMark);
+        if (rebasedStartRel !== startRel) {
+          nextMark.startRel = `char:${rebasedStartRel}`;
+          markChanged = true;
+        }
+      }
+
+      if (endRel !== null) {
+        const rebasedEndRel = rebaseCollapsedInsertPositionForAcceptedSuggestion(endRel, acceptedMark);
+        if (rebasedEndRel !== endRel) {
+          nextMark.endRel = `char:${rebasedEndRel}`;
+          markChanged = true;
+        }
+      }
+
+      const range = getStoredMarkRange(mark);
+      if (range) {
+        const rebasedFrom = rebaseCollapsedInsertPositionForAcceptedSuggestion(range.from, acceptedMark);
+        const rebasedTo = range.to > range.from
+          ? rebaseCollapsedInsertPositionForAcceptedSuggestion(range.to, acceptedMark)
+          : rebasedFrom;
+        if (rebasedFrom !== range.from || rebasedTo !== range.to) {
+          nextMark.range = { from: rebasedFrom, to: Math.max(rebasedFrom, rebasedTo) };
+          markChanged = true;
+        }
+      }
+
+      if (!markChanged) {
+        nextMarks[id] = mark;
+        continue;
+      }
+
+      changed = true;
+      nextMarks[id] = nextMark;
       continue;
     }
 
@@ -2886,13 +2951,6 @@ async function acceptAllSuggestionsAsync(
       const mark = marks[markId];
       const kind = mark?.kind;
       return Boolean(mark) && (kind === 'insert' || kind === 'delete' || kind === 'replace') && mark.status === 'pending';
-    })
-    .sort((a, b) => {
-      const aMark = marks[a];
-      const bMark = marks[b];
-      const aMax = aMark?.range?.to ?? aMark?.range?.from ?? -1;
-      const bMax = bMark?.range?.to ?? bMark?.range?.from ?? -1;
-      return bMax - aMax;
     });
   if (pendingIds.length === 0) {
     return {
@@ -2912,7 +2970,15 @@ async function acceptAllSuggestionsAsync(
   let nextMarkdown = doc.markdown;
   let nextMarks = marks;
   const acceptedIds: string[] = [];
-  for (const markId of pendingIds) {
+  const remainingIds = [...pendingIds];
+  while (remainingIds.length > 0) {
+    remainingIds.sort((a, b) => {
+      const aPos = getPendingSuggestionSortPosition(nextMarkdown, nextMarks[a]);
+      const bPos = getPendingSuggestionSortPosition(nextMarkdown, nextMarks[b]);
+      return bPos - aPos;
+    });
+    const markId = remainingIds.shift();
+    if (!markId || !nextMarks[markId] || nextMarks[markId]?.status !== 'pending') continue;
     const computed = await computeSuggestionStatusTransition(nextMarkdown, nextMarks, markId, 'accepted');
     if (!computed.ok) return computed.result;
     nextMarkdown = stripAllProofSpanTags(computed.nextMarkdown);

@@ -277,6 +277,57 @@ async function run(): Promise<void> {
       `Expected stored malformed inline batch markdown without duplication or bleed, got ${JSON.stringify(storedMalformedInlineBatch?.markdown)}`,
     );
 
+    const crossBlockAnchorBatchSlug = `shared-cross-block-anchor-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(
+      crossBlockAnchorBatchSlug,
+      '# Untitled\n\nThis is baseline paragraph one for the accept all test. It contains multiple sentences to create a realistic document.\n\nSecond paragraph with additional content for testing the batch accept functionality across multiple blocks.\n\nThird paragraph provides more content for the multi-block accept all test scenario.\n',
+      {},
+      'Shared cross-block anchor insert batch accept regression',
+    );
+
+    const headingSuggest = await executeDocumentOperationAsync(crossBlockAnchorBatchSlug, 'POST', '/marks/suggest-insert', {
+      quote: 'Untitled',
+      content: ' TC heading insertion',
+      by: 'human:test',
+    });
+    assert(headingSuggest.status === 200, `Expected heading suggest status 200, got ${headingSuggest.status}`);
+
+    const paragraphOneSuggest = await executeDocumentOperationAsync(crossBlockAnchorBatchSlug, 'POST', '/marks/suggest-insert', {
+      quote: 'across multiple blocks.',
+      content: ' TC insertion in paragraph one.',
+      by: 'human:test',
+    });
+    assert(paragraphOneSuggest.status === 200, `Expected paragraph one suggest status 200, got ${paragraphOneSuggest.status}`);
+
+    const paragraphTwoSuggest = await executeDocumentOperationAsync(crossBlockAnchorBatchSlug, 'POST', '/marks/suggest-insert', {
+      quote: 'test scenario.',
+      content: ' TC insertion in paragraph two.',
+      by: 'human:test',
+    });
+    assert(paragraphTwoSuggest.status === 200, `Expected paragraph two suggest status 200, got ${paragraphTwoSuggest.status}`);
+
+    const crossBlockMarks = JSON.parse(String(db.getDocumentBySlug(crossBlockAnchorBatchSlug)?.marks ?? '{}')) as Record<string, { kind?: string }>;
+    const crossBlockMarkIds = Object.keys(crossBlockMarks);
+    assert(crossBlockMarkIds.length === 3, `Expected three pending anchor-based insert marks, got ${crossBlockMarkIds.length}`);
+
+    const acceptedCrossBlockBatch = await executeDocumentOperationAsync(crossBlockAnchorBatchSlug, 'POST', '/marks/accept-all', {
+      markIds: crossBlockMarkIds,
+      by: 'human:test',
+    });
+    assert(acceptedCrossBlockBatch.status === 200, `Expected cross-block anchor batch accept status 200, got ${acceptedCrossBlockBatch.status}`);
+    assert(
+      String(acceptedCrossBlockBatch.body.markdown ?? '')
+        === '# Untitled TC heading insertion\n\nThis is baseline paragraph one for the accept all test. It contains multiple sentences to create a realistic document.\n\nSecond paragraph with additional content for testing the batch accept functionality across multiple blocks. TC insertion in paragraph one.\n\nThird paragraph provides more content for the multi-block accept all test scenario. TC insertion in paragraph two.\n',
+      `Expected cross-block anchor batch accept to place each insert after its own anchor, got ${JSON.stringify(acceptedCrossBlockBatch.body.markdown)}`,
+    );
+
+    const storedCrossBlockBatch = db.getDocumentBySlug(crossBlockAnchorBatchSlug);
+    assert(
+      storedCrossBlockBatch?.markdown
+        === '# Untitled TC heading insertion\n\nThis is baseline paragraph one for the accept all test. It contains multiple sentences to create a realistic document.\n\nSecond paragraph with additional content for testing the batch accept functionality across multiple blocks. TC insertion in paragraph one.\n\nThird paragraph provides more content for the multi-block accept all test scenario. TC insertion in paragraph two.\n',
+      `Expected stored cross-block anchor batch markdown without offset drift, got ${JSON.stringify(storedCrossBlockBatch?.markdown)}`,
+    );
+
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

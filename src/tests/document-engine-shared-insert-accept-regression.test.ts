@@ -15,7 +15,7 @@ async function run(): Promise<void> {
   );
   assert(
     engineSource.includes('const originalMark = marks[markId];')
-      && engineSource.includes('const originalRange = originalMark ? getStoredMarkRange(originalMark) : null;')
+      && engineSource.includes("&& isMaterializedInsertMark(baseMarkdown, originalMark)")
       && engineSource.includes("nextMarkdown = applyMutationCleanup('POST /marks/accept', stripAllProofSpanTags(nextMarkdown));"),
     'Expected accept-all batch loop to preserve originally materialized insert marks instead of replaying them as fresh inserts',
   );

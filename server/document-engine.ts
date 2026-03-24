@@ -3165,15 +3165,9 @@ async function acceptAllSuggestionsAsync(
     const markId = currentPendingIds[0];
     if (!markId) break;
     const originalMark = marks[markId];
-    const originalRange = originalMark ? getStoredMarkRange(originalMark) : null;
-    const originalQuote = normalizeQuote(originalMark?.quote);
-    const originalContent = normalizeQuote(originalMark?.content);
     if (
       originalMark?.kind === 'insert'
-      && originalRange
-      && originalRange.to > originalRange.from
-      && originalQuote.length > 0
-      && (originalQuote === originalContent || originalQuote.includes(originalContent))
+      && isMaterializedInsertMark(baseMarkdown, originalMark)
     ) {
       const currentMarks = { ...nextMarks };
       delete currentMarks[markId];

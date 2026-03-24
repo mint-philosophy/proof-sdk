@@ -119,6 +119,57 @@ async function run(): Promise<void> {
       `Expected stored batch markdown without duplicated accepted inserts, got ${JSON.stringify(storedBatch?.markdown)}`,
     );
 
+    const inlineBatchSlug = `shared-inline-batch-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(
+      inlineBatchSlug,
+      'Hello world one two three.\n',
+      {
+        'inline-1': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: ' one',
+          content: ' one',
+          range: { from: 12, to: 16 },
+        },
+        'inline-2': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: ' two',
+          content: ' two',
+          range: { from: 16, to: 20 },
+        },
+        'inline-3': {
+          kind: 'insert',
+          status: 'pending',
+          by: 'human:test',
+          quote: ' three.',
+          content: ' three.',
+          range: { from: 20, to: 27 },
+        },
+      },
+      'Shared inline insert batch accept regression',
+    );
+
+    const acceptedInlineBatch = await executeDocumentOperationAsync(inlineBatchSlug, 'POST', '/marks/accept-all', {
+      markIds: ['inline-1', 'inline-2', 'inline-3'],
+      by: 'human:test',
+    });
+    assert(acceptedInlineBatch.status === 200, `Expected inline batch accept status 200, got ${acceptedInlineBatch.status}`);
+    assert(
+      String(acceptedInlineBatch.body.markdown ?? '') === 'Hello world one two three.\n',
+      `Expected inline batch accept not to duplicate already materialized inserts, got ${JSON.stringify(acceptedInlineBatch.body.markdown)}`,
+    );
+    const acceptedInlineMarks = (acceptedInlineBatch.body.marks ?? {}) as Record<string, { kind?: string }>;
+    assert(Object.keys(acceptedInlineMarks).length === 0, 'Expected inline batch accept to clear all accepted insert marks');
+
+    const storedInlineBatch = db.getDocumentBySlug(inlineBatchSlug);
+    assert(
+      storedInlineBatch?.markdown === 'Hello world one two three.\n',
+      `Expected stored inline batch markdown without duplicated inserts, got ${JSON.stringify(storedInlineBatch?.markdown)}`,
+    );
+
     console.log('document-engine-shared-insert-accept-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

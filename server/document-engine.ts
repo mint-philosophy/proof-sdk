@@ -1063,6 +1063,16 @@ function rebasePendingInsertMarksAfterAcceptedSuggestion(
   return changed ? canonicalizeStoredMarks(nextMarks) : marks;
 }
 
+function shouldRebasePendingInsertMarksForAcceptedSuggestion(
+  previousMarkdown: string,
+  nextMarkdown: string,
+  acceptedMark: StoredMark,
+): boolean {
+  if (acceptedMark.kind === 'delete') return true;
+  if (acceptedMark.kind !== 'insert') return false;
+  return stripAllProofSpanTags(nextMarkdown) !== stripAllProofSpanTags(previousMarkdown);
+}
+
 function toStructuredMutationFailureResult(
   failure: ProofMarkRehydrationFailure,
   fallbackAnchorMessage: string,
@@ -2572,6 +2582,7 @@ async function updateSuggestionStatusAsync(
   let nextMarkdown = structuredResult.markdown;
   let nextMarks = (
     status === 'accepted'
+      && shouldRebasePendingInsertMarksForAcceptedSuggestion(doc.markdown, nextMarkdown, directAcceptMark)
       ? rebasePendingInsertMarksAfterAcceptedSuggestion(structuredResult.marks, markId, directAcceptMark)
       : structuredResult.marks
   ) as unknown as Record<string, unknown>;
@@ -2585,10 +2596,14 @@ async function updateSuggestionStatusAsync(
       const acceptedMarks = { ...marks };
       delete acceptedMarks[markId];
       nextMarkdown = applyMutationCleanup('POST /marks/accept', acceptedMarkdown);
-      nextMarks = rebasePendingInsertMarksAfterAcceptedSuggestion(
-        acceptedMarks,
-        markId,
-        directAcceptMark,
+      nextMarks = (
+        shouldRebasePendingInsertMarksForAcceptedSuggestion(doc.markdown, nextMarkdown, directAcceptMark)
+          ? rebasePendingInsertMarksAfterAcceptedSuggestion(
+            acceptedMarks,
+            markId,
+            directAcceptMark,
+          )
+          : acceptedMarks
       ) as unknown as Record<string, unknown>;
     }
   }
@@ -2755,6 +2770,7 @@ async function computeSuggestionStatusTransition(
   let nextMarkdown = structuredResult.markdown;
   let nextMarks = (
     status === 'accepted'
+      && shouldRebasePendingInsertMarksForAcceptedSuggestion(markdown, nextMarkdown, directAcceptMark)
       ? rebasePendingInsertMarksAfterAcceptedSuggestion(structuredResult.marks, markId, directAcceptMark)
       : structuredResult.marks
   ) as Record<string, StoredMark>;
@@ -2768,11 +2784,13 @@ async function computeSuggestionStatusTransition(
       const acceptedMarks = { ...marks };
       delete acceptedMarks[markId];
       nextMarkdown = applyMutationCleanup('POST /marks/accept', acceptedMarkdown);
-      nextMarks = rebasePendingInsertMarksAfterAcceptedSuggestion(
-        acceptedMarks,
-        markId,
-        directAcceptMark,
-      ) as Record<string, StoredMark>;
+      nextMarks = shouldRebasePendingInsertMarksForAcceptedSuggestion(markdown, nextMarkdown, directAcceptMark)
+        ? rebasePendingInsertMarksAfterAcceptedSuggestion(
+          acceptedMarks,
+          markId,
+          directAcceptMark,
+        ) as Record<string, StoredMark>
+        : acceptedMarks;
     }
   }
   if (status === 'accepted' && directAcceptMark.kind === 'insert') {

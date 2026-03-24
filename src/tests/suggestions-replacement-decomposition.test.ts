@@ -5,6 +5,7 @@ import { marksPluginKey, getMarks } from '../editor/plugins/marks.js';
 import {
   __debugResolveTrackedDeleteIntentFromBeforeInput,
   __debugResolveTrackedDeleteIntentForBeforeInput,
+  __debugBuildPlainInsertionSuggestionFallbackTransaction,
   __debugResolveTrackedDeleteRange,
   __debugResolveTrackedTextInputRange,
   wrapTransactionForSuggestions,
@@ -56,6 +57,13 @@ function run(): void {
           updatedAt: { default: null },
         },
         inclusive: false,
+        spanning: true,
+      },
+      proofAuthored: {
+        attrs: {
+          by: { default: 'human:Anonymous' },
+        },
+        inclusive: true,
         spanning: true,
       },
     },
@@ -138,6 +146,34 @@ function run(): void {
     'delta',
     'Selection replacement should preserve the full replacement text even when the browser only reports the changed diff',
   );
+
+  const authoredType = schema.marks.proofAuthored;
+  state = createState();
+  state = state.apply(
+    state.tr.addMark(1, state.doc.content.size, authoredType.create({ by: 'human:Anonymous' }))
+  );
+  let compositionState = state.apply(state.tr.insertText(' brave', 18, 18));
+  compositionState = compositionState.apply(
+    compositionState.tr.addMark(18, 24, authoredType.create({ by: 'human:Anonymous' }))
+  );
+  const compositionFallbackTr = __debugBuildPlainInsertionSuggestionFallbackTransaction(state, compositionState);
+  assert(compositionFallbackTr, 'Expected plain inserted text fallback to create a suggestion transaction');
+  compositionState = compositionState.apply(compositionFallbackTr!);
+
+  const compositionMarks = getMarks(compositionState).filter((mark) => mark.kind === 'insert');
+  assertEqual(compositionMarks.length, 1, 'Composition fallback should create one insert suggestion');
+  assertEqual(
+    (compositionMarks[0]?.data as InsertData | undefined)?.content,
+    ' brave',
+    'Composition fallback should preserve the inserted text as a suggestion',
+  );
+  let insertedAuthoredCount = 0;
+  compositionState.doc.nodesBetween(18, 24, (node) => {
+    if (!node.isText) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofAuthored')) insertedAuthoredCount += 1;
+    return true;
+  });
+  assertEqual(insertedAuthoredCount, 0, 'Composition fallback should strip authored marks from the inserted range');
 
   const originalDateNow = Date.now;
   let now = 1_700_000_000_000;

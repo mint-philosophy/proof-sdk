@@ -483,6 +483,110 @@ function setSelectionAfterInsertedText(tr: Transaction, pos: number): void {
   tr.setSelection(TextSelection.create(tr.doc, Math.max(0, Math.min(pos, tr.doc.content.size))));
 }
 
+function detectPlainTextInsertionDiff(
+  oldState: EditorState,
+  newState: EditorState,
+): { from: number; to: number; insertedText: string } | null {
+  const from = oldState.doc.content.findDiffStart(newState.doc.content);
+  if (typeof from !== 'number') return null;
+  const diffEnd = oldState.doc.content.findDiffEnd(newState.doc.content);
+  if (!diffEnd) return null;
+
+  const insertedText = newState.doc.textBetween(from, diffEnd.b, '\n', '\n');
+  const deletedText = oldState.doc.textBetween(from, diffEnd.a, '\n', '\n');
+  if (!insertedText || deletedText.length > 0) return null;
+
+  return { from, to: diffEnd.b, insertedText };
+}
+
+function buildPlainInsertionSuggestionFallbackTransaction(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  const diff = detectPlainTextInsertionDiff(oldState, newState);
+  if (!diff) return null;
+
+  const suggestionType = newState.schema.marks.proofSuggestion;
+  if (!suggestionType) return null;
+
+  const actor = getCurrentActor();
+  const now = Date.now();
+  let metadata = getMarkMetadata(newState);
+  let metadataChanged = false;
+  let tr = newState.tr;
+
+  const authoredType = newState.schema.marks.proofAuthored ?? null;
+  if (authoredType) {
+    tr = tr.removeMark(diff.from, diff.to, authoredType);
+  }
+
+  const existingInsertIds = collectSuggestionIdsInRange(newState.doc, 'insert', diff.from, diff.to);
+  if (existingInsertIds.length > 0) {
+    const syncedMetadata = syncInsertSuggestionMetadataFromDoc(tr.doc, metadata, existingInsertIds);
+    metadataChanged = metadataChanged || syncedMetadata !== metadata;
+    metadata = syncedMetadata;
+    if (tr.steps.length === 0 && !metadataChanged) return null;
+    const finalTr = metadataChanged ? syncSuggestionMetadataTransaction(newState, tr, metadata) : tr;
+    finalTr.setMeta('suggestions-wrapped', true);
+    return finalTr;
+  }
+
+  const candidate = getCoalescableInsertCandidate(newState.doc, metadata, diff.from, actor, now);
+  if (candidate) {
+    tr = tr.addMark(
+      diff.from,
+      diff.to,
+      suggestionType.create({ id: candidate.id, kind: 'insert', by: actor })
+    );
+    const syncedMetadata = syncInsertSuggestionMetadataFromDoc(tr.doc, metadata, [candidate.id]);
+    metadataChanged = metadataChanged || syncedMetadata !== metadata;
+    metadata = syncedMetadata;
+    const updatedRange = resolveLiveInsertSuggestionRange(tr.doc, candidate.id) ?? candidate.range;
+    lastInsertByActor.set(actor, {
+      id: candidate.id,
+      from: updatedRange.from,
+      to: updatedRange.to,
+      by: actor,
+      updatedAt: now,
+    });
+  } else {
+    const suggestionId = generateMarkId();
+    const createdAt = new Date().toISOString();
+    tr = tr.addMark(
+      diff.from,
+      diff.to,
+      suggestionType.create({ id: suggestionId, kind: 'insert', by: actor })
+    );
+    metadata = {
+      ...metadata,
+      [suggestionId]: {
+        ...buildSuggestionMetadata('insert', actor, diff.insertedText, createdAt),
+        ...buildCollapsedInsertAnchorMetadata(diff.from),
+      },
+    };
+    metadataChanged = true;
+    lastInsertByActor.set(actor, {
+      id: suggestionId,
+      from: diff.from,
+      to: diff.to,
+      by: actor,
+      updatedAt: now,
+    });
+  }
+
+  if (tr.steps.length === 0 && !metadataChanged) return null;
+  const finalTr = metadataChanged ? syncSuggestionMetadataTransaction(newState, tr, metadata) : tr;
+  finalTr.setMeta('suggestions-wrapped', true);
+  return finalTr;
+}
+
+export function __debugBuildPlainInsertionSuggestionFallbackTransaction(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  return buildPlainInsertionSuggestionFallbackTransaction(oldState, newState);
+}
+
 function detectSelectionReplacement(
   tr: Transaction,
   state: EditorState
@@ -1339,7 +1443,7 @@ export const suggestionsPlugin = $prose(() => {
       },
     },
 
-    appendTransaction(_trs, oldState, newState) {
+    appendTransaction(trs, oldState, newState) {
       const wasEnabled = suggestionsPluginKey.getState(oldState)?.enabled ?? false;
       const isEnabled = suggestionsPluginKey.getState(newState)?.enabled ?? false;
       if (wasEnabled !== isEnabled) {
@@ -1347,6 +1451,26 @@ export const suggestionsPlugin = $prose(() => {
         queueMicrotask(() => {
           (window as any).proof?.bridge?.sendMessage('suggestionsChanged', { enabled: isEnabled });
         });
+      }
+
+      if (!isEnabled || !trs.some((tr) => tr.docChanged)) return null;
+      if (trs.some((tr) =>
+        tr.getMeta('suggestions-wrapped')
+        || tr.getMeta(marksPluginKey) !== undefined
+        || tr.getMeta('document-load') !== undefined
+        || tr.getMeta('history$') !== undefined
+        || isYjsChangeOriginTransaction(tr)
+      )) {
+        return null;
+      }
+
+      const fallbackTr = buildPlainInsertionSuggestionFallbackTransaction(oldState, newState);
+      if (fallbackTr) {
+        console.log('[suggestions.appendTransactionFallback]', {
+          from: fallbackTr.selection.from,
+          to: fallbackTr.selection.to,
+        });
+        return fallbackTr;
       }
       return null;
     },

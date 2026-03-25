@@ -229,6 +229,8 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('const preserveInsertCoalescing = this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(')
       && setupSuggestionsInterceptorBlock.includes('if (!preserveInsertCoalescing) {')
       && setupSuggestionsInterceptorBlock.includes('resetSuggestionsInsertCoalescing();')
+      && setupSuggestionsInterceptorBlock.includes('if (!carriesIncomingSuggestionMarks) {')
+      && setupSuggestionsInterceptorBlock.includes('this.repairRemoteSuggestionBoundaryInheritance(view, beforeState, dispatchWithRevision);')
       && setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined;")
       && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')

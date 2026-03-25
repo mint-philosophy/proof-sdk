@@ -72,6 +72,10 @@ import {
 import { applyAgentEditOperations, type AgentEditOperation, type AgentEditTarget } from './agent-edit-ops.js';
 import { getEffectiveShareStateForRole } from './share-access.js';
 import {
+  canonicalizeVisibleTextBlockSeparators,
+  stripMarkdownVisibleText,
+} from '../src/shared/anchor-target-text.js';
+import {
   AGENT_DOCS_PATH,
   ALT_SHARE_TOKEN_HEADER_FORMAT,
   AUTH_HEADER_FORMAT,
@@ -387,7 +391,9 @@ function buildMutationContextDocument(
 }
 
 function normalizeBatchMutationSnapshotMarkdown(markdown: string): string {
-  return stripAllProofSpanTags(stripEphemeralCollabSpans(markdown)).replace(/\r\n/g, '\n');
+  return canonicalizeVisibleTextBlockSeparators(
+    stripMarkdownVisibleText(stripAllProofSpanTags(stripEphemeralCollabSpans(markdown))),
+  );
 }
 
 function overlayMarkMutationPayloadSnapshot(
@@ -440,6 +446,11 @@ function overlayMarkMutationPayloadSnapshot(
     mutationBase,
   };
 }
+
+export const __agentRoutesMarkMutationSnapshotForTests = {
+  normalizeBatchMutationSnapshotMarkdown,
+  overlayMarkMutationPayloadSnapshot,
+};
 
 function shouldIncludeCanonicalDiagnostics(): boolean {
   const runtimeEnv = (process.env.PROOF_ENV || process.env.NODE_ENV || '').trim().toLowerCase();

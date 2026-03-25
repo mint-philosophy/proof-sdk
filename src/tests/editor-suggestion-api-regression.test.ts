@@ -238,6 +238,7 @@ function run(): void {
     preserveInsertCoalescingBlock.includes('if (!this.collabEnabled) return false;')
       && preserveInsertCoalescingBlock.includes('if (!view.hasFocus()) return false;')
       && preserveInsertCoalescingBlock.includes('if (!beforeState.selection.empty) return false;')
+      && preserveInsertCoalescingBlock.includes('if (hasRecentSuggestionsInsertCoalescingState()) return true;')
       && preserveInsertCoalescingBlock.includes('if (hasActiveInsertCoalescingCandidate(beforeState, beforeState.selection.from)) return true;')
       && preserveInsertCoalescingBlock.includes("return carriesIncomingSuggestionMarks || isExplicitYjsChangeOriginTransaction(transaction);"),
     'Expected remote self-echo handling to preserve tracked-insert coalescing only for focused recent local typing in collab mode',

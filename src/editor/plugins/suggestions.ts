@@ -60,6 +60,17 @@ export function resetSuggestionsInsertCoalescing(): void {
   lastInsertByActor.clear();
 }
 
+export function hasRecentSuggestionsInsertCoalescingState(): boolean {
+  const actor = getCurrentActor();
+  const cached = lastInsertByActor.get(actor);
+  if (!cached) return false;
+  if ((Date.now() - cached.updatedAt) > COALESCE_WINDOW_MS) {
+    lastInsertByActor.delete(actor);
+    return false;
+  }
+  return true;
+}
+
 function normalizeSuggestionKind(kind: unknown): SuggestionKind {
   if (kind === 'insert' || kind === 'delete' || kind === 'replace') return kind;
   return 'replace';
@@ -1068,6 +1079,10 @@ export function __debugHasActiveInsertCoalescingCandidate(
   pos: number,
 ): boolean {
   return hasActiveInsertCoalescingCandidate(state, pos);
+}
+
+export function __debugHasRecentSuggestionsInsertCoalescingState(): boolean {
+  return hasRecentSuggestionsInsertCoalescingState();
 }
 
 function detectSelectionReplacement(

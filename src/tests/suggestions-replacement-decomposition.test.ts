@@ -11,6 +11,7 @@ import {
   __debugResolveTrackedDeleteRange,
   __debugResolveTrackedTextInputRange,
   __debugHasActiveInsertCoalescingCandidate,
+  __debugHasRecentSuggestionsInsertCoalescingState,
   wrapTransactionForSuggestions,
 } from '../editor/plugins/suggestions.js';
 import type { InsertData } from '../formats/marks.js';
@@ -203,6 +204,10 @@ function run(): void {
   assert(
     __debugHasActiveInsertCoalescingCandidate(state, state.selection.from),
     'A tracked insert that has grown to include trailing whitespace should still register as an active coalescing candidate at the live cursor',
+  );
+  assert(
+    __debugHasRecentSuggestionsInsertCoalescingState(),
+    'A tracked insert that has just coalesced trailing whitespace should keep recent insert-cache state alive for the next keystroke',
   );
 
   state = createState({ from: 18, to: 18 });

@@ -40,10 +40,19 @@ function run(): void {
 
   assert(
     source.includes('setReviewButtonsBusy(false);')
+      && source.includes('private reopenFirstPendingSuggestion(')
       && source.includes('const fallbackMarkId = this.getFirstPendingSuggestionMarkId();')
       && source.includes("this.openForMark(fallbackMarkId, undefined, {")
-      && source.includes("preserveReviewTransition: true,"),
+      && source.includes("preserveReviewTransition: options?.preserveReviewTransition,"),
     'Expected successful persisted review actions to re-enable the current action row before follow-up, and expected suggestion updates to immediately reopen the remaining pending suggestion if the active mark disappears mid-transition',
+  );
+
+  assert(
+    source.includes('if (this.reopenFirstPendingSuggestion({')
+      && source.includes('preserveReviewTransition: this.suggestionReviewTransitionPending,')
+      && source.includes('if (!activeMark && this.reopenFirstPendingSuggestion()) {')
+      && source.includes('const reboundMarkId = this.activeMarkId;'),
+    'Expected stale suggestion popovers to rebind to the first remaining pending suggestion after collab reseeds, both during editor updates and at click time',
   );
 
   assert(

@@ -1272,6 +1272,18 @@ class MarkPopoverController {
     return this.getPendingSuggestionReviewItems()[0]?.primaryMarkId ?? null;
   }
 
+  private reopenFirstPendingSuggestion(
+    options?: { preserveReviewTransition?: boolean },
+  ): boolean {
+    const fallbackMarkId = this.getFirstPendingSuggestionMarkId();
+    if (!fallbackMarkId) return false;
+    this.openForMark(fallbackMarkId, undefined, {
+      source: 'direct',
+      preserveReviewTransition: options?.preserveReviewTransition,
+    });
+    return true;
+  }
+
   private getSortedPendingReviewActionIds(markIds: string[]): string[] {
     return getPendingSuggestions(getMarks(this.view.state))
       .filter((mark) => markIds.includes(mark.id))
@@ -1938,14 +1950,9 @@ class MarkPopoverController {
         const marks = getMarks(view.state);
         const mark = marks.find(item => item.id === this.activeMarkId);
         if (!mark) {
-          if (this.suggestionReviewTransitionPending) {
-            const fallbackMarkId = this.getFirstPendingSuggestionMarkId();
-            if (fallbackMarkId) {
-              this.openForMark(fallbackMarkId, undefined, {
-                source: 'direct',
-                preserveReviewTransition: true,
-              });
-            }
+          if (this.reopenFirstPendingSuggestion({
+            preserveReviewTransition: this.suggestionReviewTransitionPending,
+          })) {
             return;
           }
           this.close();
@@ -2646,13 +2653,20 @@ class MarkPopoverController {
       nextMarkId: string | null;
       kind: 'insert' | 'delete' | 'replace';
     } | null => {
-      const marks = getMarks(this.view.state);
+      let marks = getMarks(this.view.state);
       const preferredMarkId = this.activeMarkId ?? mark.id;
       let activeMark = marks.find((item) => item.id === preferredMarkId);
       if (!activeMark) {
         const fallbackMarkId = this.getFirstPendingSuggestionMarkId();
         if (fallbackMarkId) {
           activeMark = marks.find((item) => item.id === fallbackMarkId);
+        }
+      }
+      if (!activeMark && this.reopenFirstPendingSuggestion()) {
+        marks = getMarks(this.view.state);
+        const reboundMarkId = this.activeMarkId;
+        if (reboundMarkId) {
+          activeMark = marks.find((item) => item.id === reboundMarkId);
         }
       }
       if (!activeMark || (activeMark.kind !== 'insert' && activeMark.kind !== 'delete' && activeMark.kind !== 'replace')) {

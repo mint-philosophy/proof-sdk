@@ -1680,8 +1680,15 @@ class ProofEditorImpl implements ProofEditor {
             statusPendingLocalUpdates: status.pendingLocalUpdates,
           });
           this.updateShareEditGate();
-          if (status.connectionStatus === 'disconnected' && collabClient.terminalCloseReason === 'permission-denied') {
-            void this.refreshCollabSessionAndReconnect(false);
+          const authFailed = collabClient.lastAuthenticationFailureReason !== null;
+          if (
+            status.connectionStatus === 'disconnected'
+            && (
+              collabClient.terminalCloseReason === 'permission-denied'
+              || authFailed
+            )
+          ) {
+            void this.refreshCollabSessionAndReconnect(this.shouldPreservePendingLocalCollabState());
           }
           if (status.connectionStatus === 'connected' && status.isSynced) {
             if (this.pendingCollabRebindOnSync) {
@@ -2516,7 +2523,6 @@ class ProofEditorImpl implements ProofEditor {
       if (!Number.isFinite(expiresAtMs)) return;
       const now = Date.now();
       if ((expiresAtMs - now) > 60_000) return;
-      if (this.collabConnectionStatus === 'connected' && this.collabIsSynced) return;
       if (this.shouldDeferExpiringCollabRefresh(now)) return;
       await this.refreshCollabSessionAndReconnect(this.shouldPreservePendingLocalCollabState());
     }, 2_000);

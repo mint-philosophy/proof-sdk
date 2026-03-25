@@ -16,6 +16,7 @@ function sliceBetween(source: string, startNeedle: string, endNeedle: string): s
 function run(): void {
   const editorSource = readFileSync(path.resolve(process.cwd(), 'src/editor/index.ts'), 'utf8');
   const shareClientSource = readFileSync(path.resolve(process.cwd(), 'src/bridge/share-client.ts'), 'utf8');
+  const collabClientSource = readFileSync(path.resolve(process.cwd(), 'src/bridge/collab-client.ts'), 'utf8');
 
   assert(
     shareClientSource.includes('markdown?: string;')
@@ -65,6 +66,37 @@ function run(): void {
     'Expected collab reconnect to support preserving the current canonical editor state while skipping a redundant reconnect template replay',
   );
 
+  const refreshLoopBlock = sliceBetween(
+    editorSource,
+    '  private startCollabRefreshLoop(): void {',
+    '\n  private shouldPreservePendingLocalCollabState(): boolean {',
+  );
+  assert(
+    refreshLoopBlock.includes('if ((expiresAtMs - now) > 60_000) return;')
+      && refreshLoopBlock.includes('if (this.shouldDeferExpiringCollabRefresh(now)) return;')
+      && refreshLoopBlock.includes('await this.refreshCollabSessionAndReconnect(this.shouldPreservePendingLocalCollabState());')
+      && !refreshLoopBlock.includes("if (this.collabConnectionStatus === 'connected' && this.collabIsSynced) return;"),
+    'Expected the collab refresh loop to proactively refresh near-expiry sessions even when the room is currently healthy',
+  );
+
+  assert(
+    editorSource.includes("const authFailed = collabClient.lastAuthenticationFailureReason !== null;")
+      && editorSource.includes("collabClient.terminalCloseReason === 'permission-denied'")
+      && editorSource.includes('|| authFailed')
+      && editorSource.includes('void this.refreshCollabSessionAndReconnect(this.shouldPreservePendingLocalCollabState());'),
+    'Expected collab auth-failure disconnects to trigger a session refresh/reconnect instead of leaving persisted review actions stuck offline',
+  );
+
+  assert(
+    collabClientSource.includes('function classifyAuthenticationFailureReason(reason: string): CollabTerminalCloseReason {')
+      && collabClientSource.includes("if (normalized === 'document-not-found') return 'unshared';")
+      && collabClientSource.includes("normalized === 'document-revoked'")
+      && collabClientSource.includes("normalized === 'document-paused'")
+      && collabClientSource.includes("normalized === 'permission-denied'")
+      && collabClientSource.includes('this.terminalCloseReason = classifyAuthenticationFailureReason(reason);'),
+    'Expected collab-client authentication failures to classify terminal close reasons so the editor can distinguish refreshable auth expiry from permanent unshare/revoke cases',
+  );
+
   const editGateBlock = sliceBetween(
     editorSource,
     '  private updateShareEditGate(): void {',
@@ -95,8 +127,10 @@ function run(): void {
   );
   assert(
     !applyLatestCollabMarksBlock.includes('if (Object.keys(this.lastReceivedServerMarks).length === 0) return;')
-      && applyLatestCollabMarksBlock.includes("this.applyExternalMarks(this.lastReceivedServerMarks, { pruneMissingSuggestions: true });"),
-    'Expected collab mark application to treat an empty authoritative mark set as a real signal and prune stale suggestion anchors',
+      && applyLatestCollabMarksBlock.includes('this.applyExternalMarks(this.lastReceivedServerMarks);')
+      && !applyLatestCollabMarksBlock.includes("this.applyExternalMarks(this.lastReceivedServerMarks, { pruneMissingSuggestions: true });")
+      && applyLatestCollabMarksBlock.includes('this.resyncPendingInsertMetadataAfterRemoteApply(this.lastReceivedServerMarks);'),
+    'Expected live collab mark application to avoid pruning missing pending suggestions while still resyncing pending insert metadata from the current document',
   );
 
   const acceptPersistedBlock = sliceBetween(

@@ -170,6 +170,19 @@ function applyYTextDiff(target: Y.Text, nextValue: string): void {
   }
 }
 
+function classifyAuthenticationFailureReason(reason: string): CollabTerminalCloseReason {
+  const normalized = reason.trim().toLowerCase();
+  if (normalized === 'document-not-found') return 'unshared';
+  if (
+    normalized === 'document-revoked'
+    || normalized === 'document-paused'
+    || normalized === 'permission-denied'
+  ) {
+    return 'permission-denied';
+  }
+  return null;
+}
+
 export class CollabClient {
   private ydoc: Y.Doc | null = null;
   private provider: HocuspocusProvider | null = null;
@@ -658,6 +671,7 @@ export class CollabClient {
     provider.on('authenticationFailed', (event: { reason?: string }) => {
       const reason = typeof event?.reason === 'string' ? event.reason : 'permission-denied';
       this.lastAuthenticationFailureReason = reason;
+      this.terminalCloseReason = classifyAuthenticationFailureReason(reason);
       this.connectionStatus = 'disconnected';
       this.hasSynced = false;
       this.lastDisconnectAt = Date.now();

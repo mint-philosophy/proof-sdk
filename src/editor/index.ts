@@ -9661,7 +9661,9 @@ class ProofEditorImpl implements ProofEditor {
       const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)
         || await this.applyShareMutationDocumentResult(result);
       if (success && this.editor) {
-        await this.waitForStableShareReviewMutationState();
+        if (this.hasActiveRemoteCollabPeer()) {
+          await this.waitForStableShareReviewMutationState();
+        }
         captureEvent('suggestion_accepted', { count: 1 });
         this.editor.action((ctx) => {
           const view = ctx.get(editorViewCtx);
@@ -9769,7 +9771,9 @@ class ProofEditorImpl implements ProofEditor {
             : undefined,
         );
       if (success && this.editor) {
-        await this.waitForStableShareReviewMutationState();
+        if (this.hasActiveRemoteCollabPeer()) {
+          await this.waitForStableShareReviewMutationState();
+        }
         captureEvent('suggestion_rejected', { count: 1 });
         this.editor.action((ctx) => {
           const view = ctx.get(editorViewCtx);

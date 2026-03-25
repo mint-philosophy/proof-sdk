@@ -158,9 +158,10 @@ function run(): void {
       && acceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
       && acceptPersistedBlock.includes("const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
       && acceptPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(result);')
+      && acceptPersistedBlock.includes('if (this.hasActiveRemoteCollabPeer()) {')
       && acceptPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to remap stale UI ids to the authoritative pending mark, tombstone both local and remote ids, reconcile the mutation, and wait for collab reconnect to settle before returning success',
+    'Expected markAcceptPersisted to remap stale UI ids to the authoritative pending mark, tombstone both local and remote ids, reconcile the mutation, and only block on collab settle when a remote peer is actually connected',
   );
 
   const rejectPersistedBlock = sliceBetween(
@@ -181,9 +182,10 @@ function run(): void {
       && rejectPersistedBlock.includes('preserveRejectResultAcrossReconnect')
       && rejectPersistedBlock.includes('skipReconnectTemplateSeed: true,')
       && rejectPersistedBlock.includes('preserveEditorStateDuringReconnect: true,')
+      && rejectPersistedBlock.includes('if (this.hasActiveRemoteCollabPeer()) {')
       && rejectPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !rejectPersistedBlock.includes('rejectMark(view, markId);'),
-    'Expected markRejectPersisted to tombstone the resolved suggestion, preserve the authoritative reject result through collab reconnect only when a remote peer is present, and wait for reconnect to settle before returning success',
+    'Expected markRejectPersisted to tombstone the resolved suggestion, preserve the authoritative reject result through collab reconnect only when a remote peer is present, and only block on collab settle when a remote peer is actually connected',
   );
 
   const settleBlock = sliceBetween(

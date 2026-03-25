@@ -200,12 +200,15 @@ function run(): void {
   );
   assert(
     suggestionsAppendTransactionBlock.includes('const hasBlockingMarksMeta = trs.some((tr) => {')
+      && suggestionsAppendTransactionBlock.includes("const hasWrappedSuggestionTransaction = trs.some((tr) => tr.getMeta('suggestions-wrapped'));")
       && suggestionsAppendTransactionBlock.includes("return (meta as { type?: unknown }).type !== 'INTERNAL';")
       && suggestionsAppendTransactionBlock.includes('const hasRemoteSuggestionInsert = trs.some((tr) =>')
       && suggestionsAppendTransactionBlock.includes('transactionCarriesInsertedSuggestionMarks(tr)')
+      && suggestionsAppendTransactionBlock.includes('const splitMergeTr = buildAdjacentSplitInsertMergeTransaction(oldState, newState);')
+      && suggestionsAppendTransactionBlock.includes('if (hasWrappedSuggestionTransaction) {')
       && suggestionsAppendTransactionBlock.includes('|| isExplicitYjsChangeOriginTransaction(tr)')
       && !suggestionsAppendTransactionBlock.includes("|| tr.getMeta(marksPluginKey) !== undefined"),
-    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions and to skip explicit Yjs change-origin echoes plus raw y-sync transactions that already carry incoming suggestion marks',
+    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions, still allow split-insert healing after wrapped local typing, and skip explicit Yjs change-origin echoes plus raw y-sync transactions that already carry incoming suggestion marks',
   );
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');

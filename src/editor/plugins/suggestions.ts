@@ -1831,6 +1831,7 @@ export const suggestionsPlugin = $prose(() => {
       }
 
       if (!isEnabled || !trs.some((tr) => tr.docChanged)) return null;
+      const hasWrappedSuggestionTransaction = trs.some((tr) => tr.getMeta('suggestions-wrapped'));
       const hasBlockingMarksMeta = trs.some((tr) => {
         const meta = tr.getMeta(marksPluginKey);
         if (meta === undefined) return false;
@@ -1842,8 +1843,7 @@ export const suggestionsPlugin = $prose(() => {
         && transactionCarriesInsertedSuggestionMarks(tr)
       );
       if (trs.some((tr) =>
-        tr.getMeta('suggestions-wrapped')
-        || tr.getMeta('document-load') !== undefined
+        tr.getMeta('document-load') !== undefined
         || tr.getMeta('history$') !== undefined
         || isExplicitYjsChangeOriginTransaction(tr)
       ) || hasBlockingMarksMeta || hasRemoteSuggestionInsert) {
@@ -1866,6 +1866,10 @@ export const suggestionsPlugin = $prose(() => {
           to: splitMergeTr.selection.to,
         });
         return splitMergeTr;
+      }
+
+      if (hasWrappedSuggestionTransaction) {
+        return null;
       }
 
       const fallbackTr = buildPlainInsertionSuggestionFallbackTransaction(oldState, newState);

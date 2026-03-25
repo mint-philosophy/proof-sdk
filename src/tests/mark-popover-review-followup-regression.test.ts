@@ -18,7 +18,8 @@ function run(): void {
 
   assert(
     source.includes('const getActiveSuggestionActionTarget = (): {')
-      && source.includes('const activeMarkId = this.activeMarkId ?? mark.id;')
+      && source.includes('const preferredMarkId = this.activeMarkId ?? mark.id;')
+      && source.includes('const fallbackMarkId = this.getFirstPendingSuggestionMarkId();')
       && source.includes("nextMarkId: this.getAdjacentSuggestionMarkId(activeMark.id, 'next'),")
       && source.includes("this.runSuggestionReviewAction(target.markId, 'reject', target.nextMarkId, target.kind, {")
       && source.includes("this.runSuggestionReviewAction(target.markId, 'accept', target.nextMarkId, target.kind, {"),
@@ -30,8 +31,11 @@ function run(): void {
       && source.includes('if (stableFollowupMarkId === followupMarkId || remainingAttempts <= 0) {')
       && source.includes('stableFollowupMarkId = followupMarkId;')
       && source.includes("const stateActiveMarkId = getActiveMarkId(this.view.state);")
-      && source.includes('const followupActive = stateActiveMarkId === followupMarkId;'),
-    'Expected review follow-up to require a confirmed stable reopen before it clears the transition guard, and to trust editor state rather than stale controller state when deciding whether the next suggestion is open',
+      && source.includes('const followupActive = stateActiveMarkId === followupMarkId;')
+      && source.includes("this.openForMark(followupMarkId, undefined, { source: 'direct' });")
+      && source.includes('const fallbackMarkId = this.getFirstPendingSuggestionMarkId();')
+      && source.includes("this.openForMark(fallbackMarkId, undefined, { source: 'direct' });"),
+    'Expected review follow-up to require a confirmed stable reopen before it clears the transition guard, and to force-open the remaining pending suggestion if the timed follow-up never stabilizes',
   );
 
   assert(

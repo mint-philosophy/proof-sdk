@@ -695,6 +695,7 @@ class MarkPopoverController {
 
         this.suggestionReviewTransitionPending = false;
         this.suggestionReviewFollowupTimer = null;
+        this.openForMark(followupMarkId, undefined, { source: 'direct' });
         return;
       }
       if (preferredMarkId && !reviewedIdSet.has(preferredMarkId)) {
@@ -706,6 +707,12 @@ class MarkPopoverController {
           this.openForMark(preferredMarkId, undefined, { source: 'direct' });
           return;
         }
+      }
+      const fallbackMarkId = this.getFirstPendingSuggestionMarkId();
+      if (fallbackMarkId) {
+        this.suggestionReviewTransitionPending = false;
+        this.openForMark(fallbackMarkId, undefined, { source: 'direct' });
+        return;
       }
       if (!preferredMarkId) {
         this.suggestionReviewTransitionPending = false;
@@ -1259,6 +1266,10 @@ class MarkPopoverController {
   private getSuggestionReviewItemByMarkId(markId: string): SuggestionReviewItem | null {
     return this.getPendingSuggestionReviewItems()
       .find((item) => item.memberMarkIds.includes(markId)) ?? null;
+  }
+
+  private getFirstPendingSuggestionMarkId(): string | null {
+    return this.getPendingSuggestionReviewItems()[0]?.primaryMarkId ?? null;
   }
 
   private getSortedPendingReviewActionIds(markIds: string[]): string[] {
@@ -2627,8 +2638,15 @@ class MarkPopoverController {
       nextMarkId: string | null;
       kind: 'insert' | 'delete' | 'replace';
     } | null => {
-      const activeMarkId = this.activeMarkId ?? mark.id;
-      const activeMark = getMarks(this.view.state).find((item) => item.id === activeMarkId);
+      const marks = getMarks(this.view.state);
+      const preferredMarkId = this.activeMarkId ?? mark.id;
+      let activeMark = marks.find((item) => item.id === preferredMarkId);
+      if (!activeMark) {
+        const fallbackMarkId = this.getFirstPendingSuggestionMarkId();
+        if (fallbackMarkId) {
+          activeMark = marks.find((item) => item.id === fallbackMarkId);
+        }
+      }
       if (!activeMark || (activeMark.kind !== 'insert' && activeMark.kind !== 'delete' && activeMark.kind !== 'replace')) {
         return null;
       }

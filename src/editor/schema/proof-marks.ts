@@ -107,12 +107,10 @@ export const proofSuggestionSchema = $markSchema('proofSuggestion', (ctx) => ({
     },
   ],
   toDOM: (mark) => {
-    const attrs = ctx.get(proofSuggestionAttr.key)(mark);
     const domAttrs: Record<string, string> = {
       'data-proof': 'suggestion',
       'data-kind': normalizeSuggestionKind(mark.attrs.kind),
       ...buildCommonDomAttrs(mark),
-      ...attrs,
     };
     if (mark.attrs.content) domAttrs['data-content'] = String(mark.attrs.content);
     if (mark.attrs.status) domAttrs['data-status'] = String(mark.attrs.status);
@@ -194,11 +192,9 @@ export const proofCommentSchema = $markSchema('proofComment', (ctx) => ({
     },
   ],
   toDOM: (mark) => {
-    const attrs = ctx.get(proofCommentAttr.key)(mark);
     const domAttrs: Record<string, string> = {
       'data-proof': 'comment',
       ...buildCommonDomAttrs(mark),
-      ...attrs,
     };
     return ['span', domAttrs, 0];
   },
@@ -246,11 +242,9 @@ export const proofFlaggedSchema = $markSchema('proofFlagged', (ctx) => ({
     },
   ],
   toDOM: (mark) => {
-    const attrs = ctx.get(proofFlaggedAttr.key)(mark);
     const domAttrs: Record<string, string> = {
       'data-proof': 'flagged',
       ...buildCommonDomAttrs(mark),
-      ...attrs,
     };
     return ['span', domAttrs, 0];
   },
@@ -298,11 +292,9 @@ export const proofApprovedSchema = $markSchema('proofApproved', (ctx) => ({
     },
   ],
   toDOM: (mark) => {
-    const attrs = ctx.get(proofApprovedAttr.key)(mark);
     const domAttrs: Record<string, string> = {
       'data-proof': 'approved',
       ...buildCommonDomAttrs(mark),
-      ...attrs,
     };
     return ['span', domAttrs, 0];
   },
@@ -354,14 +346,12 @@ export const proofAuthoredSchema = $markSchema('proofAuthored', (ctx) => ({
     },
   ],
   toDOM: (mark) => {
-    const attrs = ctx.get(proofAuthoredAttr.key)(mark);
     return [
       'span',
       {
         'data-proof': 'authored',
         'data-by': mark.attrs.by,
         'data-proof-id': mark.attrs.id ?? null,
-        ...attrs,
       },
       0,
     ];

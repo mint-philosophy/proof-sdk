@@ -9322,6 +9322,11 @@ class ProofEditorImpl implements ProofEditor {
     });
 
     if (matchedServerResult) {
+      if (action === 'reject') {
+        this.pendingCollabReconnectTemplateOverride = null;
+        this.skipNextCollabTemplateSeed = true;
+        this.preserveEditorStateOnNextCollabReconnect = true;
+      }
       if (this.collabEnabled && this.activeCollabSession) {
         void this.refreshCollabSessionAndReconnect(false);
       }
@@ -9735,7 +9740,10 @@ class ProofEditorImpl implements ProofEditor {
 
       tombstoneResolvedMarkIds([markId], { reason: 'deleted' });
       const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)
-        || await this.applyShareMutationDocumentResult(result);
+        || await this.applyShareMutationDocumentResult(result, {
+          skipReconnectTemplateSeed: true,
+          preserveEditorStateDuringReconnect: true,
+        });
       if (success && this.editor) {
         await this.waitForStableShareReviewMutationState();
         captureEvent('suggestion_rejected', { count: 1 });

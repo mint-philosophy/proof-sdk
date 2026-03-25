@@ -159,10 +159,12 @@ function run(): void {
       && rejectPersistedBlock.indexOf("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
         < rejectPersistedBlock.indexOf("const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")
       && rejectPersistedBlock.includes("const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")
-      && rejectPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(result);')
+      && rejectPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(result, {')
+      && rejectPersistedBlock.includes('skipReconnectTemplateSeed: true,')
+      && rejectPersistedBlock.includes('preserveEditorStateDuringReconnect: true,')
       && rejectPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !rejectPersistedBlock.includes('rejectMark(view, markId);'),
-    'Expected markRejectPersisted to tombstone the resolved suggestion, reconcile the mutation, and wait for collab reconnect to settle before returning success',
+    'Expected markRejectPersisted to tombstone the resolved suggestion, preserve the authoritative reject result through collab reconnect, and wait for reconnect to settle before returning success',
   );
 
   const settleBlock = sliceBetween(
@@ -208,10 +210,13 @@ function run(): void {
       && localResolveBlock.includes('const liveMarkdown = this.normalizeMarkdownForCollab(serializer(view.state.doc));')
       && localResolveBlock.includes("matchedServerResult = liveMarkdown === expectedMarkdown && !Object.prototype.hasOwnProperty.call(liveMetadata, markId);")
       && localResolveBlock.includes('this.pendingCollabReconnectTemplateOverride = expectedMarkdown;')
+      && localResolveBlock.includes("if (action === 'reject') {")
+      && localResolveBlock.includes('this.skipNextCollabTemplateSeed = true;')
+      && localResolveBlock.includes('this.preserveEditorStateOnNextCollabReconnect = true;')
       && localResolveBlock.includes('this.disconnectCollabService();')
       && localResolveBlock.includes('collabClient.disconnect();')
       && localResolveBlock.includes('void this.refreshCollabSessionAndReconnect(false);'),
-    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response, then tear down the old collab room before reconnecting',
+    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response, and to preserve authoritative reject results through the subsequent collab reconnect',
   );
 
   console.log('share-review-persisted-canonical-sync-regression.test.ts passed');

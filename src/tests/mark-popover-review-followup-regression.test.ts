@@ -70,6 +70,16 @@ function run(): void {
     'Expected openForMark to keep the follow-up timer and transition guard intact during review-driven navigation',
   );
 
+  assert(
+    source.includes('function canMergeAdjacentInsertReviewItems(')
+      && source.includes("const gapText = doc.textBetween(left.range.to, right.range.from, '\\n', '\\n');")
+      && source.includes('return isWhitespaceOnlyInlineGap(gapText);')
+      && source.includes('const mergedInsertMark = buildMergedInsertReviewMark(fragments, doc);')
+      && source.includes('memberMarkIds: fragments.map((fragment) => fragment.id),')
+      && source.includes('this.view.state.doc,'),
+    'Expected review-item construction to merge adjacent pending insert fragments within the same paragraph so collab-split suggestions stay actionable as one review item',
+  );
+
   console.log('mark-popover-review-followup-regression.test.ts passed');
 }
 

@@ -24,6 +24,7 @@ import {
   getThread,
   getActorName,
   getPendingSuggestions,
+  normalizeQuote,
   type Mark,
   type CommentData,
   type InsertData,
@@ -96,6 +97,10 @@ type SuggestionReviewItem = {
   at: string;
   insertMark?: Mark;
   deleteMark?: Mark;
+};
+
+type InlineTextAccessor = {
+  textBetween: (from: number, to: number, blockSeparator?: string, leafText?: string) => string;
 };
 
 type TouchSafeButtonOptions = {
@@ -485,7 +490,58 @@ function isReplacementPair(insertMark: Mark, deleteMark: Mark): boolean {
   return rangesTouch(insertMark.range, deleteMark.range);
 }
 
-function buildSuggestionReviewItems(suggestions: Mark[]): SuggestionReviewItem[] {
+function parseMarkTimestamp(mark: Mark): number | null {
+  const value = Date.parse(mark.at);
+  return Number.isFinite(value) ? value : null;
+}
+
+function isWhitespaceOnlyInlineGap(text: string): boolean {
+  return text.replace(/\u2060/g, '').trim().length === 0;
+}
+
+function canMergeAdjacentInsertReviewItems(
+  left: Mark,
+  right: Mark,
+  doc: InlineTextAccessor | null,
+): boolean {
+  if (left.kind !== 'insert' || right.kind !== 'insert') return false;
+  if (left.by !== right.by) return false;
+  if (!left.range || !right.range) return false;
+  if (!doc) return false;
+  if (right.range.from < left.range.to) return false;
+
+  const leftAt = parseMarkTimestamp(left);
+  const rightAt = parseMarkTimestamp(right);
+  if (leftAt !== null && rightAt !== null && Math.abs(rightAt - leftAt) > 2_000) {
+    return false;
+  }
+
+  const gapText = doc.textBetween(left.range.to, right.range.from, '\n', '\n');
+  if (gapText.includes('\n')) return false;
+  return isWhitespaceOnlyInlineGap(gapText);
+}
+
+function buildMergedInsertReviewMark(fragments: Mark[], doc: InlineTextAccessor): Mark {
+  const first = fragments[0]!;
+  const last = fragments[fragments.length - 1]!;
+  const mergedRange = {
+    from: first.range?.from ?? last.range?.from ?? 0,
+    to: last.range?.to ?? first.range?.to ?? 0,
+  };
+  const mergedContent = doc.textBetween(mergedRange.from, mergedRange.to, '\n', '\n');
+  return {
+    ...first,
+    range: mergedRange,
+    quote: normalizeQuote(mergedContent),
+    data: {
+      ...((first.data as InsertData | undefined) ?? { status: 'pending' }),
+      content: mergedContent,
+      status: ((first.data as InsertData | undefined)?.status ?? 'pending'),
+    },
+  };
+}
+
+function buildSuggestionReviewItems(suggestions: Mark[], doc: InlineTextAccessor | null = null): SuggestionReviewItem[] {
   const sorted = [...suggestions]
     .filter((mark) => isSuggestionKind(mark.kind))
     .sort((a, b) => {
@@ -513,6 +569,31 @@ function buildSuggestionReviewItems(suggestions: Mark[]): SuggestionReviewItem[]
       });
       index += 1;
       continue;
+    }
+
+    if (mark.kind === 'insert' && doc) {
+      const fragments = [mark];
+      while (index + 1 < sorted.length) {
+        const candidate = sorted[index + 1]!;
+        const previous = fragments[fragments.length - 1]!;
+        if (!canMergeAdjacentInsertReviewItems(previous, candidate, doc)) break;
+        fragments.push(candidate);
+        index += 1;
+      }
+
+      if (fragments.length > 1) {
+        const mergedInsertMark = buildMergedInsertReviewMark(fragments, doc);
+        items.push({
+          id: mergedInsertMark.id,
+          primaryMarkId: mergedInsertMark.id,
+          memberMarkIds: fragments.map((fragment) => fragment.id),
+          kind: 'insert',
+          by: mergedInsertMark.by,
+          at: mergedInsertMark.at,
+          insertMark: mergedInsertMark,
+        });
+        continue;
+      }
     }
 
     items.push({
@@ -1261,6 +1342,7 @@ class MarkPopoverController {
     return buildSuggestionReviewItems(
       getPendingSuggestions(getMarks(this.view.state))
         .filter((mark) => isSuggestionKind(mark.kind)),
+      this.view.state.doc,
     );
   }
 
@@ -2553,6 +2635,7 @@ class MarkPopoverController {
     const kindPresentation = getSuggestionKindPresentation(kind);
     const replacementInsertMark = reviewItem?.kind === 'replace' ? reviewItem.insertMark : null;
     const replacementDeleteMark = reviewItem?.kind === 'replace' ? reviewItem.deleteMark : null;
+    const groupedInsertMark = reviewItem?.kind === 'insert' ? reviewItem.insertMark : null;
 
     const header = document.createElement('div');
     header.className = 'mark-popover-header';
@@ -2624,8 +2707,8 @@ class MarkPopoverController {
       const original = replacementDeleteMark.quote ?? '';
       appendDetailRow('Original text', original, '#b91c1c');
       appendDetailRow('Edited text', current, '#15803d');
-    } else if (mark.kind === 'insert') {
-      const data = mark.data as InsertData | undefined;
+    } else if ((groupedInsertMark ?? mark).kind === 'insert') {
+      const data = (groupedInsertMark ?? mark).data as InsertData | undefined;
       appendDetailRow('Inserted text', data?.content ?? '', '#15803d');
     } else if (mark.kind === 'replace') {
       const data = mark.data as ReplaceData | undefined;

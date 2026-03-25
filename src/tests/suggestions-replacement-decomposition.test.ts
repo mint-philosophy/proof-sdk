@@ -566,6 +566,77 @@ function run(): void {
     'Collab chunk merge should absorb adjacent marked chunks and the short plain tail into one insert suggestion',
   );
 
+  const crossParagraphOriginalId = 'cross-paragraph-original';
+  const crossParagraphSecondId = 'cross-paragraph-second';
+  const crossParagraphState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('TC para one from A.', [schema.marks.proofSuggestion.create({
+          id: crossParagraphOriginalId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+      ]),
+      schema.node('paragraph', null, [
+        schema.text('TC para two from A.', [schema.marks.proofSuggestion.create({
+          id: crossParagraphSecondId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).apply(EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('TC para one from A.', [schema.marks.proofSuggestion.create({
+          id: crossParagraphOriginalId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+      ]),
+      schema.node('paragraph', null, [
+        schema.text('TC para two from A.', [schema.marks.proofSuggestion.create({
+          id: crossParagraphSecondId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      [crossParagraphOriginalId]: {
+        kind: 'insert',
+        by: 'unknown',
+        createdAt: new Date(Date.now() - 200).toISOString(),
+        status: 'pending',
+        content: 'TC para one from A.',
+        range: { from: 1, to: 20 },
+      },
+      [crossParagraphSecondId]: {
+        kind: 'insert',
+        by: 'unknown',
+        createdAt: new Date(Date.now() - 100).toISOString(),
+        status: 'pending',
+        content: 'TC para two from A.',
+        range: { from: 22, to: 41 },
+      },
+    },
+  }));
+  const crossParagraphMergeTr = __debugBuildAdjacentSplitInsertMergeTransaction(
+    crossParagraphState,
+    crossParagraphState,
+  );
+  assertEqual(
+    crossParagraphMergeTr,
+    null,
+    'Adjacent insert healing should not merge separate paragraph suggestions into one shared mark id',
+  );
+
   const originalDateNow = Date.now;
   let now = 1_700_000_000_000;
   Date.now = () => now;

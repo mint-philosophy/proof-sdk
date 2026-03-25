@@ -820,6 +820,13 @@ function isRecentPendingInsertFragment(
   return Math.abs(Date.now() - createdAt) <= COALESCE_WINDOW_MS;
 }
 
+function areInlineRunsAdjacent(
+  left: Pick<InlineInsertRun, 'to'>,
+  right: Pick<InlineInsertRun, 'from'>,
+): boolean {
+  return left.to === right.from;
+}
+
 function buildAdjacentSplitInsertMergeTransaction(
   oldState: EditorState,
   newState: EditorState,
@@ -870,6 +877,18 @@ function buildAdjacentSplitInsertMergeTransaction(
     if (!leftWasPending) continue;
 
     if (gap?.kind === 'plain' && right?.kind === 'insert') {
+      if (!areInlineRunsAdjacent(left, gap) || !areInlineRunsAdjacent(gap, right)) {
+        console.log('[suggestions.mergeCheck.skip]', {
+          reason: 'non-adjacent-runs',
+          leftId: left.id,
+          rightId: right.id,
+          leftTo: left.to,
+          gapFrom: gap.from,
+          gapTo: gap.to,
+          rightFrom: right.from,
+        });
+        continue;
+      }
       if (left.id === right.id) {
         console.log('[suggestions.mergeCheck.skip]', { reason: 'same-id', id: left.id });
         continue;
@@ -946,6 +965,9 @@ function buildAdjacentSplitInsertMergeTransaction(
     }
 
     if (gap?.kind === 'insert') {
+      if (!areInlineRunsAdjacent(left, gap)) {
+        continue;
+      }
       if (left.id === gap.id) continue;
       const rightMeta = metadata[gap.id];
       if (!rightMeta || rightMeta.kind !== 'insert') continue;
@@ -969,7 +991,12 @@ function buildAdjacentSplitInsertMergeTransaction(
         gap.to,
         suggestionType.create({ id: left.id, kind: 'insert', by: leftBy }),
       );
-      if (right?.kind === 'plain' && isRecentPendingInsertFragment(leftMeta) && right.text.length <= 4) {
+      if (
+        right?.kind === 'plain'
+        && areInlineRunsAdjacent(gap, right)
+        && isRecentPendingInsertFragment(leftMeta)
+        && right.text.length <= 4
+      ) {
         if (authoredType) {
           tr = tr.removeMark(right.from, right.to, authoredType);
         }
@@ -993,6 +1020,9 @@ function buildAdjacentSplitInsertMergeTransaction(
     }
 
     if (gap?.kind === 'plain' && !right && isRecentPendingInsertFragment(leftMeta) && gap.text.length <= 4) {
+      if (!areInlineRunsAdjacent(left, gap)) {
+        continue;
+      }
       if (authoredType) {
         tr = tr.removeMark(gap.from, gap.to, authoredType);
       }

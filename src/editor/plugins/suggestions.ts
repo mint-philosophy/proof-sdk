@@ -810,6 +810,16 @@ function shouldMergeRecentPendingInsertFragments(
   return Math.abs(rightCreatedAt - leftCreatedAt) <= COALESCE_WINDOW_MS;
 }
 
+function isRecentPendingInsertFragment(
+  meta: StoredMark,
+): boolean {
+  if (meta.kind !== 'insert') return false;
+  if (meta.status && meta.status !== 'pending') return false;
+  const createdAt = parseStoredMarkTimestamp(meta.createdAt);
+  if (createdAt === null) return false;
+  return Math.abs(Date.now() - createdAt) <= COALESCE_WINDOW_MS;
+}
+
 function buildAdjacentSplitInsertMergeTransaction(
   oldState: EditorState,
   newState: EditorState,
@@ -835,105 +845,178 @@ function buildAdjacentSplitInsertMergeTransaction(
   console.log('[suggestions.mergeCheck.runs]', summarizeInlineInsertRuns(runs));
   const mergedInsertIds = new Set<string>();
 
-  for (let index = 0; index <= runs.length - 3; index += 1) {
+  for (let index = 0; index < runs.length; index += 1) {
     const left = runs[index];
     const gap = runs[index + 1];
     const right = runs[index + 2];
-    if (!left || !gap || !right) continue;
+    if (!left) continue;
     console.log('[suggestions.mergeCheck.window]', {
       index,
       left: left.kind === 'insert'
         ? { kind: left.kind, id: left.id, by: left.by, text: left.text, from: left.from, to: left.to }
         : left,
       gap,
-      right: right.kind === 'insert'
+      right: right?.kind === 'insert'
         ? { kind: right.kind, id: right.id, by: right.by, text: right.text, from: right.from, to: right.to }
         : right,
     });
-    if (left.kind !== 'insert' || gap.kind !== 'plain' || right.kind !== 'insert') continue;
-    if (!isWhitespaceOnly(gap.text)) {
-      console.log('[suggestions.mergeCheck.skip]', { reason: 'gap-not-whitespace', gapText: gap.text });
-      continue;
-    }
-    if (left.id === right.id) {
-      console.log('[suggestions.mergeCheck.skip]', { reason: 'same-id', id: left.id });
-      continue;
-    }
+
+    if (left.kind !== 'insert') continue;
     const leftMeta = metadata[left.id];
-    const rightMeta = metadata[right.id];
-    if (!leftMeta || leftMeta.kind !== 'insert' || !rightMeta || rightMeta.kind !== 'insert') {
-      console.log('[suggestions.mergeCheck.skip]', { reason: 'missing-insert-metadata', leftId: left.id, rightId: right.id });
-      continue;
-    }
-    if ((leftMeta.status && leftMeta.status !== 'pending') || (rightMeta.status && rightMeta.status !== 'pending')) {
-      console.log('[suggestions.mergeCheck.skip]', {
-        reason: 'non-pending-status',
-        leftId: left.id,
-        rightId: right.id,
-        leftStatus: leftMeta.status,
-        rightStatus: rightMeta.status,
-      });
-      continue;
-    }
+    if (!leftMeta || leftMeta.kind !== 'insert') continue;
 
     const leftBy = leftMeta.by ?? left.by;
-    const rightBy = rightMeta.by ?? right.by;
     const leftWasPending = oldPendingInsertIds.has(left.id);
-    const rightWasPending = oldPendingInsertIds.has(right.id);
-    const allowRecentPendingPendingMerge = rightWasPending && shouldMergeRecentPendingInsertFragments(
-      leftMeta,
-      rightMeta,
-      leftBy,
-      rightBy,
-    );
-    if (!leftWasPending || (rightWasPending && !allowRecentPendingPendingMerge)) {
-      console.log('[suggestions.mergeCheck.skip]', {
-        reason: 'old-pending-id-shape',
-        leftId: left.id,
-        rightId: right.id,
-        leftWasPending,
-        rightWasPending,
-        allowRecentPendingPendingMerge,
-      });
-      continue;
-    }
-    if (leftBy !== rightBy) {
-      console.log('[suggestions.mergeCheck.skip]', {
-        reason: 'different-actors',
-        leftId: left.id,
-        rightId: right.id,
+    if (!leftWasPending) continue;
+
+    if (gap?.kind === 'plain' && right?.kind === 'insert') {
+      if (left.id === right.id) {
+        console.log('[suggestions.mergeCheck.skip]', { reason: 'same-id', id: left.id });
+        continue;
+      }
+      const rightMeta = metadata[right.id];
+      if (!rightMeta || rightMeta.kind !== 'insert') {
+        console.log('[suggestions.mergeCheck.skip]', { reason: 'missing-insert-metadata', leftId: left.id, rightId: right.id });
+        continue;
+      }
+      if ((rightMeta.status && rightMeta.status !== 'pending')) {
+        console.log('[suggestions.mergeCheck.skip]', {
+          reason: 'non-pending-status',
+          leftId: left.id,
+          rightId: right.id,
+          leftStatus: leftMeta.status,
+          rightStatus: rightMeta.status,
+        });
+        continue;
+      }
+
+      const rightBy = rightMeta.by ?? right.by;
+      const rightWasPending = oldPendingInsertIds.has(right.id);
+      const allowRecentPendingPendingMerge = rightWasPending && shouldMergeRecentPendingInsertFragments(
+        leftMeta,
+        rightMeta,
         leftBy,
         rightBy,
+      );
+      if (rightWasPending && !allowRecentPendingPendingMerge) {
+        console.log('[suggestions.mergeCheck.skip]', {
+          reason: 'old-pending-id-shape',
+          leftId: left.id,
+          rightId: right.id,
+          leftWasPending,
+          rightWasPending,
+          allowRecentPendingPendingMerge,
+        });
+        continue;
+      }
+      if (leftBy !== rightBy) {
+        console.log('[suggestions.mergeCheck.skip]', {
+          reason: 'different-actors',
+          leftId: left.id,
+          rightId: right.id,
+          leftBy,
+          rightBy,
+        });
+        continue;
+      }
+
+      if (authoredType) {
+        tr = tr.removeMark(gap.from, gap.to, authoredType);
+        tr = tr.removeMark(right.from, right.to, authoredType);
+      }
+      tr = tr.removeMark(right.from, right.to, suggestionType);
+      tr = tr.addMark(
+        gap.from,
+        right.to,
+        suggestionType.create({ id: left.id, kind: 'insert', by: leftBy }),
+      );
+
+      delete metadata[right.id];
+      metadataChanged = true;
+      mergedInsertIds.add(left.id);
+
+      console.log('[suggestions.mergeAdjacentInsertSplit]', {
+        leftId: left.id,
+        rightId: right.id,
+        gapText: gap.text,
       });
+
+      index += 2;
       continue;
     }
 
-    if (authoredType) {
-      tr = tr.removeMark(gap.from, gap.to, authoredType);
-      tr = tr.removeMark(right.from, right.to, authoredType);
+    if (gap?.kind === 'insert') {
+      if (left.id === gap.id) continue;
+      const rightMeta = metadata[gap.id];
+      if (!rightMeta || rightMeta.kind !== 'insert') continue;
+      const rightBy = rightMeta.by ?? gap.by;
+      const rightWasPending = oldPendingInsertIds.has(gap.id);
+      const allowRecentPendingPendingMerge = rightWasPending && shouldMergeRecentPendingInsertFragments(
+        leftMeta,
+        rightMeta,
+        leftBy,
+        rightBy,
+      );
+      if (rightWasPending && !allowRecentPendingPendingMerge) continue;
+      if (leftBy !== rightBy) continue;
+
+      if (authoredType) {
+        tr = tr.removeMark(gap.from, gap.to, authoredType);
+      }
+      tr = tr.removeMark(gap.from, gap.to, suggestionType);
+      tr = tr.addMark(
+        gap.from,
+        gap.to,
+        suggestionType.create({ id: left.id, kind: 'insert', by: leftBy }),
+      );
+      if (right?.kind === 'plain' && isRecentPendingInsertFragment(leftMeta) && right.text.length <= 4) {
+        if (authoredType) {
+          tr = tr.removeMark(right.from, right.to, authoredType);
+        }
+        tr = tr.addMark(
+          right.from,
+          right.to,
+          suggestionType.create({ id: left.id, kind: 'insert', by: leftBy }),
+        );
+      }
+
+      delete metadata[gap.id];
+      metadataChanged = true;
+      mergedInsertIds.add(left.id);
+      console.log('[suggestions.mergeAdjacentInsertSplit]', {
+        leftId: left.id,
+        rightId: gap.id,
+        gapText: '',
+      });
+      index += 1;
+      continue;
     }
-    tr = tr.removeMark(right.from, right.to, suggestionType);
-    tr = tr.addMark(
-      gap.from,
-      right.to,
-      suggestionType.create({ id: left.id, kind: 'insert', by: leftBy }),
-    );
 
-    delete metadata[right.id];
-    metadataChanged = true;
-    mergedInsertIds.add(left.id);
-
-    console.log('[suggestions.mergeAdjacentInsertSplit]', {
-      leftId: left.id,
-      rightId: right.id,
-      gapText: gap.text,
-    });
-
-    index += 2;
+    if (gap?.kind === 'plain' && !right && isRecentPendingInsertFragment(leftMeta) && gap.text.length <= 4) {
+      if (authoredType) {
+        tr = tr.removeMark(gap.from, gap.to, authoredType);
+      }
+      tr = tr.addMark(
+        gap.from,
+        gap.to,
+        suggestionType.create({ id: left.id, kind: 'insert', by: leftBy }),
+      );
+      metadataChanged = true;
+      mergedInsertIds.add(left.id);
+      console.log('[suggestions.mergeAdjacentInsertSplit]', {
+        leftId: left.id,
+        rightId: null,
+        gapText: gap.text,
+      });
+      index += 1;
+    }
   }
 
   if (mergedInsertIds.size === 0) return null;
 
+  metadata = Object.fromEntries(
+    Object.entries(metadata).filter(([, stored]) => Boolean(stored)),
+  ) as Record<string, StoredMark>;
   const syncedMetadata = syncInsertSuggestionMetadataFromDoc(tr.doc, metadata, [...mergedInsertIds]);
   metadataChanged = metadataChanged || syncedMetadata !== metadata;
   metadata = syncedMetadata;
@@ -2017,7 +2100,7 @@ export const suggestionsPlugin = $prose(() => {
         tr.getMeta('document-load') !== undefined
         || tr.getMeta('history$') !== undefined
         || isExplicitYjsChangeOriginTransaction(tr)
-      ) || hasBlockingMarksMeta || hasRemoteSuggestionInsert) {
+      ) || hasBlockingMarksMeta) {
         return null;
       }
 
@@ -2039,7 +2122,7 @@ export const suggestionsPlugin = $prose(() => {
         return splitMergeTr;
       }
 
-      if (hasWrappedSuggestionTransaction) {
+      if (hasWrappedSuggestionTransaction || hasRemoteSuggestionInsert) {
         return null;
       }
 

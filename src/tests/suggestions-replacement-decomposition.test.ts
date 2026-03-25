@@ -490,6 +490,82 @@ function run(): void {
     'Adjacent split merge should restore the full pending insert content after a recent pending/pending self-echo split',
   );
 
+  const collabChunkOriginalId = 'collab-chunk-original';
+  const collabChunkSecondId = 'collab-chunk-second';
+  const collabChunkState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha beta gamma.'),
+        schema.text('TC par', [schema.marks.proofSuggestion.create({
+          id: collabChunkOriginalId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+        schema.text('a one from', [schema.marks.proofSuggestion.create({
+          id: collabChunkSecondId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+        schema.text(' A.'),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).apply(EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha beta gamma.'),
+        schema.text('TC par', [schema.marks.proofSuggestion.create({
+          id: collabChunkOriginalId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+        schema.text('a one from', [schema.marks.proofSuggestion.create({
+          id: collabChunkSecondId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+        schema.text(' A.'),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      [collabChunkOriginalId]: {
+        kind: 'insert',
+        by: 'unknown',
+        createdAt: new Date(Date.now() - 200).toISOString(),
+        status: 'pending',
+        content: 'TC par',
+        range: { from: 18, to: 24 },
+      },
+      [collabChunkSecondId]: {
+        kind: 'insert',
+        by: 'unknown',
+        createdAt: new Date(Date.now() - 100).toISOString(),
+        status: 'pending',
+        content: 'a one from',
+        range: { from: 24, to: 34 },
+      },
+    },
+  }));
+  const healedCollabChunkTr = __debugBuildAdjacentSplitInsertMergeTransaction(
+    collabChunkState,
+    collabChunkState,
+  );
+  assert(healedCollabChunkTr, 'Expected collab chunk merge to heal adjacent insert fragments and a short bare tail');
+  const healedCollabChunkState = collabChunkState.apply(healedCollabChunkTr!);
+  const healedCollabChunkMarks = getMarks(healedCollabChunkState).filter((mark) => mark.kind === 'insert');
+  assertEqual(healedCollabChunkMarks.length, 1, 'Collab chunk merge should leave one insert suggestion');
+  assertEqual(healedCollabChunkMarks[0]?.id, collabChunkOriginalId, 'Collab chunk merge should preserve the first insert id');
+  assertEqual(
+    (healedCollabChunkMarks[0]?.data as InsertData | undefined)?.content,
+    'TC para one from A.',
+    'Collab chunk merge should absorb adjacent marked chunks and the short plain tail into one insert suggestion',
+  );
+
   const originalDateNow = Date.now;
   let now = 1_700_000_000_000;
   Date.now = () => now;

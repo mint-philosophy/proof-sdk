@@ -1453,7 +1453,7 @@ function normalizeMetadata(
   const next: Record<string, StoredMark> = { ...metadata };
 
   for (const [id, info] of ids.entries()) {
-    if (!next[id]) {
+    if (!next[id] || typeof next[id] !== 'object') {
       // Comment anchors are meaningless without metadata (the comment body lives only in metadata,
       // not in the ProseMirror mark attrs). Synthesizing an entry here can later be flushed as an
       // "empty comment" and overwrite the real payload when it arrives.

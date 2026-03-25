@@ -3,6 +3,7 @@ import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 
 import { marksPluginKey, getMarks } from '../editor/plugins/marks.js';
 import {
+  __debugBuildAdjacentSplitInsertMergeTransaction,
   __debugResolveTrackedDeleteIntentFromBeforeInput,
   __debugResolveTrackedDeleteIntentForBeforeInput,
   __debugBuildPlainInsertionSuggestionFallbackTransaction,
@@ -336,6 +337,121 @@ function run(): void {
     (repairedSplitGapInsertMarks[0]?.data as InsertData | undefined)?.content,
     splitGapText,
     'Split-gap rewrite fallback should restore the full insert content including the space',
+  );
+
+  const splitDuringTypingOldState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha beta gamma.'),
+        schema.text('TC', [schema.marks.proofSuggestion.create({
+          id: splitGapOriginalId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+        schema.text(' '),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).apply(EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha beta gamma.'),
+        schema.text('TC', [schema.marks.proofSuggestion.create({
+          id: splitGapOriginalId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+        schema.text(' '),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      [splitGapOriginalId]: {
+        kind: 'insert',
+        by: 'unknown',
+        createdAt: '2026-03-25T00:00:00.000Z',
+        status: 'pending',
+        content: 'TC',
+        range: { from: 18, to: 20 },
+      },
+    },
+  }));
+  const splitDuringTypingNewState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha beta gamma.'),
+        schema.text('TC', [schema.marks.proofSuggestion.create({
+          id: splitGapOriginalId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+        schema.text(' '),
+        schema.text('para one from A.', [schema.marks.proofSuggestion.create({
+          id: splitGapSecondId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).apply(EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha beta gamma.'),
+        schema.text('TC', [schema.marks.proofSuggestion.create({
+          id: splitGapOriginalId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+        schema.text(' '),
+        schema.text('para one from A.', [schema.marks.proofSuggestion.create({
+          id: splitGapSecondId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      [splitGapOriginalId]: {
+        kind: 'insert',
+        by: 'unknown',
+        createdAt: '2026-03-25T00:00:00.000Z',
+        status: 'pending',
+        content: 'TC',
+        range: { from: 18, to: 20 },
+      },
+      [splitGapSecondId]: {
+        kind: 'insert',
+        by: 'unknown',
+        createdAt: '2026-03-25T00:00:00.500Z',
+        status: 'pending',
+        content: 'para one from A.',
+        range: { from: 21, to: 37 },
+      },
+    },
+  }));
+  const splitDuringTypingMergeTr = __debugBuildAdjacentSplitInsertMergeTransaction(
+    splitDuringTypingOldState,
+    splitDuringTypingNewState,
+  );
+  assert(splitDuringTypingMergeTr, 'Expected adjacent split insert merge to heal a bare-space split into a single pending insert');
+  const healedSplitDuringTypingState = splitDuringTypingNewState.apply(splitDuringTypingMergeTr!);
+  const healedSplitDuringTypingMarks = getMarks(healedSplitDuringTypingState).filter((mark) => mark.kind === 'insert');
+  assertEqual(healedSplitDuringTypingMarks.length, 1, 'Adjacent split merge should leave one insert suggestion');
+  assertEqual(healedSplitDuringTypingMarks[0]?.id, splitGapOriginalId, 'Adjacent split merge should preserve the original insert id');
+  assertEqual(
+    (healedSplitDuringTypingMarks[0]?.data as InsertData | undefined)?.content,
+    splitGapText,
+    'Adjacent split merge should restore the full pending insert content including the bare space gap',
   );
 
   const originalDateNow = Date.now;

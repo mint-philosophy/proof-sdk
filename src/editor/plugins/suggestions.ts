@@ -682,6 +682,160 @@ function buildTextPreservingInsertPersistenceTransaction(
   return finalTr;
 }
 
+type InlineInsertRun =
+  | { kind: 'insert'; from: number; to: number; text: string; id: string; by: string }
+  | { kind: 'plain'; from: number; to: number; text: string }
+  | { kind: 'other'; from: number; to: number; text: string };
+
+function collectInlineInsertRuns(doc: ProseMirrorNode): InlineInsertRun[] {
+  const runs: InlineInsertRun[] = [];
+
+  doc.descendants((node, pos) => {
+    if (!node.isText) return true;
+
+    const text = node.text ?? '';
+    const insertMarks = node.marks.filter((mark) =>
+      mark.type.name === 'proofSuggestion'
+      && normalizeSuggestionKind(mark.attrs.kind) === 'insert'
+      && typeof mark.attrs.id === 'string'
+      && mark.attrs.id.length > 0
+    );
+    const hasOtherMarks = node.marks.some((mark) =>
+      mark.type.name !== 'proofSuggestion'
+      || normalizeSuggestionKind(mark.attrs.kind) !== 'insert'
+    );
+
+    let nextRun: InlineInsertRun;
+    if (insertMarks.length === 1 && !hasOtherMarks) {
+      nextRun = {
+        kind: 'insert',
+        from: pos,
+        to: pos + node.nodeSize,
+        text,
+        id: String(insertMarks[0]!.attrs.id),
+        by: typeof insertMarks[0]!.attrs.by === 'string' ? insertMarks[0]!.attrs.by : 'unknown',
+      };
+    } else if (node.marks.length === 0) {
+      nextRun = {
+        kind: 'plain',
+        from: pos,
+        to: pos + node.nodeSize,
+        text,
+      };
+    } else {
+      nextRun = {
+        kind: 'other',
+        from: pos,
+        to: pos + node.nodeSize,
+        text,
+      };
+    }
+
+    const previous = runs[runs.length - 1];
+    if (
+      previous
+      && previous.kind === nextRun.kind
+      && (
+        previous.kind !== 'insert'
+        || (nextRun.kind === 'insert'
+          && previous.id === nextRun.id
+          && previous.by === nextRun.by)
+      )
+      && previous.to === nextRun.from
+    ) {
+      previous.to = nextRun.to;
+      previous.text += nextRun.text;
+    } else {
+      runs.push(nextRun);
+    }
+
+    return true;
+  });
+
+  return runs;
+}
+
+function buildAdjacentSplitInsertMergeTransaction(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  const suggestionType = newState.schema.marks.proofSuggestion;
+  if (!suggestionType) return null;
+
+  const authoredType = newState.schema.marks.proofAuthored ?? null;
+  const oldMetadata = getMarkMetadata(oldState);
+  let metadata = getMarkMetadata(newState);
+  let metadataChanged = false;
+  let tr = newState.tr;
+
+  const oldPendingInsertIds = new Set(
+    Object.entries(oldMetadata)
+      .filter(([, mark]) => mark?.kind === 'insert' && mark?.status !== 'accepted' && mark?.status !== 'rejected')
+      .map(([id]) => id),
+  );
+
+  if (oldPendingInsertIds.size === 0) return null;
+
+  const runs = collectInlineInsertRuns(newState.doc);
+  const mergedInsertIds = new Set<string>();
+
+  for (let index = 0; index <= runs.length - 3; index += 1) {
+    const left = runs[index];
+    const gap = runs[index + 1];
+    const right = runs[index + 2];
+    if (!left || !gap || !right) continue;
+    if (left.kind !== 'insert' || gap.kind !== 'plain' || right.kind !== 'insert') continue;
+    if (!isWhitespaceOnly(gap.text)) continue;
+    if (left.id === right.id) continue;
+    if (!oldPendingInsertIds.has(left.id) || oldPendingInsertIds.has(right.id)) continue;
+
+    const leftMeta = metadata[left.id];
+    const rightMeta = metadata[right.id];
+    if (!leftMeta || leftMeta.kind !== 'insert' || !rightMeta || rightMeta.kind !== 'insert') continue;
+    if ((leftMeta.status && leftMeta.status !== 'pending') || (rightMeta.status && rightMeta.status !== 'pending')) continue;
+
+    const leftBy = leftMeta.by ?? left.by;
+    const rightBy = rightMeta.by ?? right.by;
+    if (leftBy !== rightBy) continue;
+
+    if (authoredType) {
+      tr = tr.removeMark(gap.from, gap.to, authoredType);
+      tr = tr.removeMark(right.from, right.to, authoredType);
+    }
+    tr = tr.removeMark(right.from, right.to, suggestionType);
+    tr = tr.addMark(
+      gap.from,
+      right.to,
+      suggestionType.create({ id: left.id, kind: 'insert', by: leftBy }),
+    );
+
+    delete metadata[right.id];
+    metadataChanged = true;
+    mergedInsertIds.add(left.id);
+
+    console.log('[suggestions.mergeAdjacentInsertSplit]', {
+      leftId: left.id,
+      rightId: right.id,
+      gapText: gap.text,
+    });
+
+    index += 2;
+  }
+
+  if (mergedInsertIds.size === 0) return null;
+
+  const syncedMetadata = syncInsertSuggestionMetadataFromDoc(tr.doc, metadata, [...mergedInsertIds]);
+  metadataChanged = metadataChanged || syncedMetadata !== metadata;
+  metadata = syncedMetadata;
+  tr = stripAuthoredMarksFromPendingInsertRanges(tr, authoredType, metadata);
+
+  if (tr.steps.length === 0 && !metadataChanged) return null;
+  const finalTr = metadataChanged ? syncSuggestionMetadataTransaction(newState, tr, metadata) : tr;
+  finalTr.setMeta('suggestions-wrapped', true);
+  finalTr.setMeta('addToHistory', false);
+  return finalTr;
+}
+
 function detectPlainTextInsertionDiff(
   oldState: EditorState,
   newState: EditorState,
@@ -792,6 +946,13 @@ export function __debugBuildTextPreservingInsertPersistenceTransaction(
   newState: EditorState,
 ): Transaction | null {
   return buildTextPreservingInsertPersistenceTransaction(oldState, newState);
+}
+
+export function __debugBuildAdjacentSplitInsertMergeTransaction(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  return buildAdjacentSplitInsertMergeTransaction(oldState, newState);
 }
 
 function detectSelectionReplacement(
@@ -1696,6 +1857,15 @@ export const suggestionsPlugin = $prose(() => {
           to: persistenceFallbackTr.selection.to,
         });
         return persistenceFallbackTr;
+      }
+
+      const splitMergeTr = buildAdjacentSplitInsertMergeTransaction(oldState, newState);
+      if (splitMergeTr) {
+        console.log('[suggestions.appendTransactionSplitMerge]', {
+          from: splitMergeTr.selection.from,
+          to: splitMergeTr.selection.to,
+        });
+        return splitMergeTr;
       }
 
       const fallbackTr = buildPlainInsertionSuggestionFallbackTransaction(oldState, newState);

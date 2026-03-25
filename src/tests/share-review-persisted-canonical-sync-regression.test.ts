@@ -134,7 +134,7 @@ function run(): void {
   const settleBlock = sliceBetween(
     editorSource,
     '  private async waitForStableShareReviewMutationState(): Promise<void> {',
-    '\n  private async flushShareReviewMutationState(): Promise<void> {',
+    '\n  private getCurrentShareReviewPersistSnapshot(): {',
   );
   assert(
     settleBlock.includes("const deadline = Date.now() + 2500;")
@@ -149,7 +149,7 @@ function run(): void {
 
   const flushReviewMutationStateBlock = sliceBetween(
     editorSource,
-    '  private async flushShareReviewMutationState(): Promise<void> {',
+    '  private async flushShareReviewMutationState(expectedMarkIds: string[] = []): Promise<boolean> {',
     '\n  async markAcceptPersisted(markId: string): Promise<boolean> {',
   );
   assert(

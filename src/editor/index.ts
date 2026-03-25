@@ -5733,6 +5733,19 @@ class ProofEditorImpl implements ProofEditor {
     });
   }
 
+  private shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(
+    view: EditorView,
+    beforeState: any,
+    transaction: any,
+    carriesIncomingSuggestionMarks: boolean,
+  ): boolean {
+    if (!this.collabEnabled) return false;
+    if (!view.hasFocus()) return false;
+    if (!beforeState.selection.empty) return false;
+    if ((Date.now() - this.lastLocalTypingAt) > this.collabTypingRecoveryGraceMs) return false;
+    return carriesIncomingSuggestionMarks || isExplicitYjsChangeOriginTransaction(transaction);
+  }
+
   /**
    * Set up the suggestions interceptor to convert edits to tracked changes
    * when suggestion mode is enabled.
@@ -5843,7 +5856,15 @@ class ProofEditorImpl implements ProofEditor {
           // Don't intercept Yjs-origin collaborative transactions.
           if (isRemoteContentChange) {
             clearPendingDomSuggestionSelection();
-            resetSuggestionsInsertCoalescing();
+            const preserveInsertCoalescing = this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(
+              view,
+              beforeState,
+              tr,
+              carriesIncomingSuggestionMarks,
+            );
+            if (!preserveInsertCoalescing) {
+              resetSuggestionsInsertCoalescing();
+            }
             originalDispatch(tr);
             this.repairRemoteSuggestionBoundaryInheritance(view, beforeState, dispatchWithRevision);
             return;

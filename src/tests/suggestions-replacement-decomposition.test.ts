@@ -454,6 +454,32 @@ function run(): void {
     'Adjacent split merge should restore the full pending insert content including the bare space gap',
   );
 
+  const echoedSplitDuringTypingMergeTr = __debugBuildAdjacentSplitInsertMergeTransaction(
+    splitDuringTypingNewState,
+    splitDuringTypingNewState,
+  );
+  assert(
+    echoedSplitDuringTypingMergeTr,
+    'Adjacent split merge should still heal a recent same-actor pending/pending split after a collab echo resets the local coalescing cache',
+  );
+  const healedEchoedSplitDuringTypingState = splitDuringTypingNewState.apply(echoedSplitDuringTypingMergeTr!);
+  const healedEchoedSplitDuringTypingMarks = getMarks(healedEchoedSplitDuringTypingState).filter((mark) => mark.kind === 'insert');
+  assertEqual(
+    healedEchoedSplitDuringTypingMarks.length,
+    1,
+    'Adjacent split merge should collapse recent pending/pending fragments created by a self-echo back to one insert suggestion',
+  );
+  assertEqual(
+    healedEchoedSplitDuringTypingMarks[0]?.id,
+    splitGapOriginalId,
+    'Adjacent split merge should preserve the original insert id even when the old state already contains both pending fragments',
+  );
+  assertEqual(
+    (healedEchoedSplitDuringTypingMarks[0]?.data as InsertData | undefined)?.content,
+    splitGapText,
+    'Adjacent split merge should restore the full pending insert content after a recent pending/pending self-echo split',
+  );
+
   const originalDateNow = Date.now;
   let now = 1_700_000_000_000;
   Date.now = () => now;

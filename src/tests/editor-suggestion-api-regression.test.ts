@@ -212,6 +212,11 @@ function run(): void {
   );
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
+  const preserveInsertCoalescingBlock = sliceBetween(
+    editorSource,
+    '  private shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(',
+    '\n  /**\n   * Set up the suggestions interceptor to convert edits to tracked changes',
+  );
   assert(
     setupSuggestionsInterceptorBlock.includes('const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (')
       && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesSystemTransactionsDepth > 0')
@@ -220,11 +225,21 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes("const isRemoteContentChange = Boolean(tr?.docChanged) && (")
       && setupSuggestionsInterceptorBlock.includes('|| (yjsOrigin.isYjsOrigin && carriesIncomingSuggestionMarks)')
       && setupSuggestionsInterceptorBlock.includes('if (isRemoteContentChange) {')
+      && setupSuggestionsInterceptorBlock.includes('const preserveInsertCoalescing = this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(')
+      && setupSuggestionsInterceptorBlock.includes('if (!preserveInsertCoalescing) {')
+      && setupSuggestionsInterceptorBlock.includes('resetSuggestionsInsertCoalescing();')
       && setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined;")
       && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
     'Expected the suggestions interceptor to pass through collab/template system transactions, while skipping TC wrapping for explicit Yjs echoes and raw y-sync transactions that already carry incoming suggestion-marked content',
+  );
+  assert(
+    preserveInsertCoalescingBlock.includes('if (!this.collabEnabled) return false;')
+      && preserveInsertCoalescingBlock.includes('if (!view.hasFocus()) return false;')
+      && preserveInsertCoalescingBlock.includes('if (!beforeState.selection.empty) return false;')
+      && preserveInsertCoalescingBlock.includes("return carriesIncomingSuggestionMarks || isExplicitYjsChangeOriginTransaction(transaction);"),
+    'Expected remote self-echo handling to preserve tracked-insert coalescing only for focused recent local typing in collab mode',
   );
 
   const applyPendingCollabTemplateBlock = sliceBetween(editorSource, '  private applyPendingCollabTemplate(): void {', '\n  private disconnectCollabService(): void {');

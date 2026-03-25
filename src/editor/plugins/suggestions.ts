@@ -776,6 +776,29 @@ function collectInlineInsertRuns(doc: ProseMirrorNode): InlineInsertRun[] {
   return runs;
 }
 
+function parseStoredMarkTimestamp(value: unknown): number | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function shouldMergeRecentPendingInsertFragments(
+  leftMeta: StoredMark,
+  rightMeta: StoredMark,
+  leftBy: string,
+  rightBy: string,
+): boolean {
+  if (leftMeta.kind !== 'insert' || rightMeta.kind !== 'insert') return false;
+  if ((leftMeta.status && leftMeta.status !== 'pending') || (rightMeta.status && rightMeta.status !== 'pending')) return false;
+  if (leftBy !== rightBy) return false;
+
+  const leftCreatedAt = parseStoredMarkTimestamp(leftMeta.createdAt);
+  const rightCreatedAt = parseStoredMarkTimestamp(rightMeta.createdAt);
+  if (leftCreatedAt === null || rightCreatedAt === null) return false;
+
+  return Math.abs(rightCreatedAt - leftCreatedAt) <= COALESCE_WINDOW_MS;
+}
+
 function buildAdjacentSplitInsertMergeTransaction(
   oldState: EditorState,
   newState: EditorState,
@@ -825,17 +848,6 @@ function buildAdjacentSplitInsertMergeTransaction(
       console.log('[suggestions.mergeCheck.skip]', { reason: 'same-id', id: left.id });
       continue;
     }
-    if (!oldPendingInsertIds.has(left.id) || oldPendingInsertIds.has(right.id)) {
-      console.log('[suggestions.mergeCheck.skip]', {
-        reason: 'old-pending-id-shape',
-        leftId: left.id,
-        rightId: right.id,
-        leftWasPending: oldPendingInsertIds.has(left.id),
-        rightWasPending: oldPendingInsertIds.has(right.id),
-      });
-      continue;
-    }
-
     const leftMeta = metadata[left.id];
     const rightMeta = metadata[right.id];
     if (!leftMeta || leftMeta.kind !== 'insert' || !rightMeta || rightMeta.kind !== 'insert') {
@@ -855,6 +867,25 @@ function buildAdjacentSplitInsertMergeTransaction(
 
     const leftBy = leftMeta.by ?? left.by;
     const rightBy = rightMeta.by ?? right.by;
+    const leftWasPending = oldPendingInsertIds.has(left.id);
+    const rightWasPending = oldPendingInsertIds.has(right.id);
+    const allowRecentPendingPendingMerge = rightWasPending && shouldMergeRecentPendingInsertFragments(
+      leftMeta,
+      rightMeta,
+      leftBy,
+      rightBy,
+    );
+    if (!leftWasPending || (rightWasPending && !allowRecentPendingPendingMerge)) {
+      console.log('[suggestions.mergeCheck.skip]', {
+        reason: 'old-pending-id-shape',
+        leftId: left.id,
+        rightId: right.id,
+        leftWasPending,
+        rightWasPending,
+        allowRecentPendingPendingMerge,
+      });
+      continue;
+    }
     if (leftBy !== rightBy) {
       console.log('[suggestions.mergeCheck.skip]', {
         reason: 'different-actors',

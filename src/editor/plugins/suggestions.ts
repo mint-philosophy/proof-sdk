@@ -2004,7 +2004,10 @@ export const suggestionsPlugin = $prose(() => {
         const meta = tr.getMeta(marksPluginKey);
         if (meta === undefined) return false;
         if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return true;
-        return (meta as { type?: unknown }).type !== 'INTERNAL';
+        const metaType = (meta as { type?: unknown }).type;
+        if (metaType === 'INTERNAL') return false;
+        if (metaType === 'SET_METADATA' && tr.getMeta('suggestions-wrapped')) return false;
+        return true;
       });
       const hasRemoteSuggestionInsert = trs.some((tr) =>
         !isExplicitYjsChangeOriginTransaction(tr)

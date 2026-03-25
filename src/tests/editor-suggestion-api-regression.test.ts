@@ -198,9 +198,11 @@ function run(): void {
   assert(
     suggestionsAppendTransactionBlock.includes('const hasBlockingMarksMeta = trs.some((tr) => {')
       && suggestionsAppendTransactionBlock.includes("return (meta as { type?: unknown }).type !== 'INTERNAL';")
+      && suggestionsAppendTransactionBlock.includes('const hasRemoteSuggestionInsert = trs.some((tr) =>')
+      && suggestionsAppendTransactionBlock.includes('transactionCarriesInsertedSuggestionMarks(tr)')
       && suggestionsAppendTransactionBlock.includes('|| isExplicitYjsChangeOriginTransaction(tr)')
       && !suggestionsAppendTransactionBlock.includes("|| tr.getMeta(marksPluginKey) !== undefined"),
-    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions and to skip only explicit Yjs change-origin echoes',
+    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions and to skip explicit Yjs change-origin echoes plus raw y-sync transactions that already carry incoming suggestion marks',
   );
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
@@ -208,13 +210,15 @@ function run(): void {
     setupSuggestionsInterceptorBlock.includes('const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (')
       && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesSystemTransactionsDepth > 0')
       && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesDuringCollabReconnect')
-      && setupSuggestionsInterceptorBlock.includes("const isRemoteContentChange = Boolean(tr?.docChanged) && isExplicitYjsChangeOriginTransaction(tr);")
-      && setupSuggestionsInterceptorBlock.includes('if (isExplicitYjsChangeOriginTransaction(tr)) {')
+      && setupSuggestionsInterceptorBlock.includes('const carriesIncomingSuggestionMarks = Boolean(tr?.docChanged) && transactionCarriesInsertedSuggestionMarks(tr);')
+      && setupSuggestionsInterceptorBlock.includes("const isRemoteContentChange = Boolean(tr?.docChanged) && (")
+      && setupSuggestionsInterceptorBlock.includes('|| (yjsOrigin.isYjsOrigin && carriesIncomingSuggestionMarks)')
+      && setupSuggestionsInterceptorBlock.includes('if (isRemoteContentChange) {')
       && setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined;")
       && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
-    'Expected the suggestions interceptor to pass through collab/template system transactions, while skipping TC wrapping only for explicit Yjs change-origin echoes instead of any raw y-sync metadata',
+    'Expected the suggestions interceptor to pass through collab/template system transactions, while skipping TC wrapping for explicit Yjs echoes and raw y-sync transactions that already carry incoming suggestion-marked content',
   );
 
   const applyPendingCollabTemplateBlock = sliceBetween(editorSource, '  private applyPendingCollabTemplate(): void {', '\n  private disconnectCollabService(): void {');

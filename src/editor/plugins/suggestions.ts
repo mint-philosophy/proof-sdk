@@ -39,6 +39,7 @@ type SuggestionKind = 'insert' | 'delete' | 'replace';
 type SliceNode = {
   type?: string;
   text?: string;
+  marks?: Array<{ type?: string; attrs?: Record<string, unknown> }>;
   content?: SliceNode[];
 };
 
@@ -316,6 +317,32 @@ function collectSliceText(nodes?: SliceNode[]): { text: string; hasNonText: bool
   }
 
   return { text, hasNonText };
+}
+
+function sliceContainsSuggestionMarks(nodes?: SliceNode[]): boolean {
+  if (!nodes) return false;
+
+  for (const node of nodes) {
+    if (Array.isArray(node.marks) && node.marks.some((mark) => mark?.type === 'proofSuggestion')) {
+      return true;
+    }
+    if (node.content && sliceContainsSuggestionMarks(node.content)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function transactionCarriesInsertedSuggestionMarks(tr: Transaction): boolean {
+  for (const step of tr.steps) {
+    const stepJson = step.toJSON() as { stepType?: string; slice?: { content?: SliceNode[] } };
+    if (stepJson.stepType !== 'replace') continue;
+    if (sliceContainsSuggestionMarks(stepJson.slice?.content)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function detectSuggestionKinds(
@@ -932,6 +959,9 @@ export function wrapTransactionForSuggestions(
     return tr;
   }
   if (isExplicitYjsChangeOriginTransaction(tr)) {
+    return tr;
+  }
+  if (transactionCarriesInsertedSuggestionMarks(tr)) {
     return tr;
   }
 
@@ -1606,12 +1636,16 @@ export const suggestionsPlugin = $prose(() => {
         if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return true;
         return (meta as { type?: unknown }).type !== 'INTERNAL';
       });
+      const hasRemoteSuggestionInsert = trs.some((tr) =>
+        !isExplicitYjsChangeOriginTransaction(tr)
+        && transactionCarriesInsertedSuggestionMarks(tr)
+      );
       if (trs.some((tr) =>
         tr.getMeta('suggestions-wrapped')
         || tr.getMeta('document-load') !== undefined
         || tr.getMeta('history$') !== undefined
         || isExplicitYjsChangeOriginTransaction(tr)
-      ) || hasBlockingMarksMeta) {
+      ) || hasBlockingMarksMeta || hasRemoteSuggestionInsert) {
         return null;
       }
 

@@ -60,6 +60,7 @@ import {
   toggleSuggestions as toggleSuggestionsPlugin,
   isSuggestionsEnabled as isSuggestionsEnabledPlugin,
   resetSuggestionsInsertCoalescing,
+  transactionCarriesInsertedSuggestionMarks,
   wrapTransactionForSuggestions,
 } from './plugins/suggestions';
 import {
@@ -5644,7 +5645,11 @@ class ProofEditorImpl implements ProofEditor {
         const beforeSelectionFrom = beforeState.selection.from;
         const beforeSelectionEmpty = beforeState.selection.empty;
         const yjsOrigin = getYjsTransactionOriginInfo(tr);
-        const isRemoteContentChange = Boolean(tr?.docChanged) && isExplicitYjsChangeOriginTransaction(tr);
+        const carriesIncomingSuggestionMarks = Boolean(tr?.docChanged) && transactionCarriesInsertedSuggestionMarks(tr);
+        const isRemoteContentChange = Boolean(tr?.docChanged) && (
+          isExplicitYjsChangeOriginTransaction(tr)
+          || (yjsOrigin.isYjsOrigin && carriesIncomingSuggestionMarks)
+        );
         const isMarksOnlyChange = tr?.getMeta?.(marksPluginKey) !== undefined;
         const isDocumentLoad = tr?.getMeta?.('document-load') !== undefined;
         const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (
@@ -5706,7 +5711,7 @@ class ProofEditorImpl implements ProofEditor {
           }
 
           // Don't intercept Yjs-origin collaborative transactions.
-          if (isExplicitYjsChangeOriginTransaction(tr)) {
+          if (isRemoteContentChange) {
             clearPendingDomSuggestionSelection();
             resetSuggestionsInsertCoalescing();
             originalDispatch(tr);

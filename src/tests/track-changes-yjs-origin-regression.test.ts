@@ -3,7 +3,7 @@ import { Schema } from '@milkdown/kit/prose/model';
 import { EditorState, Plugin } from '@milkdown/kit/prose/state';
 
 import { getMarks, marksPluginKey } from '../editor/plugins/marks.js';
-import { wrapTransactionForSuggestions } from '../editor/plugins/suggestions.js';
+import { transactionCarriesInsertedSuggestionMarks, wrapTransactionForSuggestions } from '../editor/plugins/suggestions.js';
 import { getYjsTransactionOriginInfo, isExplicitYjsChangeOriginTransaction } from '../editor/plugins/transaction-origins.js';
 
 const schema = new Schema({
@@ -98,6 +98,36 @@ function run(): void {
   );
   const wrappedChangeOriginEcho = wrapTransactionForSuggestions(echoedWithChangeOrigin, state, true);
   assert.equal(wrappedChangeOriginEcho, echoedWithChangeOrigin, 'Expected raw isChangeOrigin Yjs echoes to bypass track-changes wrapping');
+
+  const remoteSuggestionMark = schema.marks.proofSuggestion.create({
+    id: 'remote-insert',
+    kind: 'insert',
+    by: 'human:peer',
+    status: 'pending',
+  });
+  const rawRemoteSuggestionEcho = state.tr.replaceWith(
+    state.selection.from,
+    state.selection.from,
+    schema.text('q', [remoteSuggestionMark]),
+  ) as typeof echoed & {
+    meta?: Record<string, unknown>;
+  };
+  rawRemoteSuggestionEcho.meta = {
+    ...(rawRemoteSuggestionEcho.meta ?? {}),
+    'y-sync$': {},
+  };
+
+  assert.equal(
+    transactionCarriesInsertedSuggestionMarks(rawRemoteSuggestionEcho),
+    true,
+    'Expected raw y-sync remote suggestion inserts to advertise their incoming suggestion marks',
+  );
+  const wrappedRawRemoteSuggestionEcho = wrapTransactionForSuggestions(rawRemoteSuggestionEcho, state, true);
+  assert.equal(
+    wrappedRawRemoteSuggestionEcho,
+    rawRemoteSuggestionEcho,
+    'Expected raw y-sync transactions that already carry suggestion marks to bypass local Track Changes wrapping',
+  );
 
   console.log('track-changes-yjs-origin-regression.test.ts passed');
 }

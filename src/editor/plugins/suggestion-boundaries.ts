@@ -248,6 +248,11 @@ export function buildRemoteInsertSuggestionBoundaryRepair(
   oldState: EditorState,
   newState: EditorState,
   metadata?: Record<string, StoredMark>,
+  options?: {
+    preferLocalInsertGrowthAtSelection?: boolean;
+    localSelectionFrom?: number | null;
+    localSelectionEmpty?: boolean;
+  },
 ): { transaction: Transaction; affectedInsertIds: string[] } | null {
   if (!newState.schema.marks.proofSuggestion) return null;
 
@@ -281,6 +286,17 @@ export function buildRemoteInsertSuggestionBoundaryRepair(
 
     const insertion = detectSingleInsertion(oldText, newText);
     if (!insertion) continue;
+
+    if (
+      options?.preferLocalInsertGrowthAtSelection === true
+      && options.localSelectionEmpty !== false
+      && typeof options.localSelectionFrom === 'number'
+    ) {
+      const selectionOffset = getSuggestionTextOffsetAtPosition(oldSegments, options.localSelectionFrom);
+      if (selectionOffset !== null && selectionOffset === insertion.fromOffset) {
+        continue;
+      }
+    }
 
     const insertedRanges = mapSuggestionTextOffsetsToDocRanges(
       newSegments,

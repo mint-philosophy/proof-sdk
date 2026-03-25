@@ -5710,7 +5710,11 @@ class ProofEditorImpl implements ProofEditor {
     dispatchBase: (transaction: any) => void,
   ): void {
     const currentMetadata = getMarkMetadata(view.state);
-    const repair = buildRemoteInsertSuggestionBoundaryRepair(beforeState, view.state, currentMetadata);
+    const repair = buildRemoteInsertSuggestionBoundaryRepair(beforeState, view.state, currentMetadata, {
+      preferLocalInsertGrowthAtSelection: Date.now() - this.lastLocalTypingAt < 1500,
+      localSelectionFrom: beforeState.selection.from,
+      localSelectionEmpty: beforeState.selection.empty,
+    });
     if (!repair) return;
 
     let repairTr = repair.transaction;

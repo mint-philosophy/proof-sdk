@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { Schema } from '@milkdown/kit/prose/model';
-import { EditorState, Plugin } from '@milkdown/kit/prose/state';
+import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 
 import { marksPluginKey } from '../editor/plugins/marks.js';
 import {
@@ -66,6 +66,10 @@ function createMarkedState(): EditorState {
     ]),
     plugins: [marksStatePlugin],
   });
+}
+
+function getInsertLength(state: EditorState, id: string): number {
+  return getSuggestionTextFromSegments(collectSuggestionSegments(state.doc, id, 'insert'))?.length ?? 0;
 }
 
 function run(): void {
@@ -147,6 +151,47 @@ function run(): void {
     skippedRepair,
     null,
     'Expected boundary repair to ignore legitimate insert growth when local metadata already matches the expanded insert text',
+  );
+
+  const insertLength = getInsertLength(initialState, 'insert-1');
+  const appendPos = insertStart + insertLength;
+  const appendEchoTr = initialState.tr.insertText('!', appendPos, appendPos);
+  const appendEchoMarked = appendEchoTr.addMark(
+    appendPos,
+    appendPos + 1,
+    schema.marks.proofSuggestion.create({
+      id: 'insert-1',
+      kind: 'insert',
+      by: 'user:test',
+      status: 'pending',
+      content: 'This is a collab test insertion.',
+    }),
+  );
+  const localEchoState = initialState.apply(
+    appendEchoMarked.setSelection(TextSelection.create(appendEchoMarked.doc, appendPos + 1))
+  );
+  const staleMetadataRepair = buildRemoteInsertSuggestionBoundaryRepair(
+    initialState,
+    localEchoState,
+    {
+      'insert-1': {
+        kind: 'insert',
+        by: 'user:test',
+        status: 'pending',
+        content: 'This is a collab test insertion.',
+        quote: 'This is a collab test insertion.',
+      },
+    },
+    {
+      preferLocalInsertGrowthAtSelection: true,
+      localSelectionFrom: appendPos,
+      localSelectionEmpty: true,
+    },
+  );
+  assert.equal(
+    staleMetadataRepair,
+    null,
+    'Expected boundary repair to ignore a recent local self-echo append even when metadata still lags behind the expanded insert text',
   );
 
   console.log('suggestion-boundaries-collab-regression.test.ts passed');

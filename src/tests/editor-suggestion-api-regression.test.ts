@@ -84,12 +84,14 @@ function run(): void {
     'Expected persisted share review actions to remap stale UI suggestion ids onto the latest authoritative pending marks before sending accept/reject mutations',
   );
   assert(
-    flushShareReviewMutationStateBlock.includes('this.flushShareMarks({ persistContent: false, forcePersistMarks: true });')
+    flushShareReviewMutationStateBlock.includes('if (this.shareMarksFlushTimer !== null) {')
+      && flushShareReviewMutationStateBlock.includes('clearTimeout(this.shareMarksFlushTimer);')
+      && !flushShareReviewMutationStateBlock.includes('this.flushShareMarks({ persistContent: false, forcePersistMarks: true });')
       && flushShareReviewMutationStateBlock.includes('await this.waitForAuthoritativeShareReviewMarks(expectedPendingIds)')
       && flushShareReviewMutationStateBlock.includes('await this.forcePersistCurrentShareReviewState(expectedPendingIds)')
       && flushShareReviewMutationStateBlock.includes("this.traceShareReview('mutation.preflush-failed'")
       && flushShareReviewMutationStateBlock.includes('return false;'),
-    'Expected persisted review mutations to verify that pending marks are present in authoritative share state and to fall back to a full pushUpdate before accept/reject proceeds',
+    'Expected persisted review mutations to cancel any pending async marks-only flush, verify that pending marks are present in authoritative share state, and fall back to a full pushUpdate before accept/reject proceeds',
   );
   assert(
     markAcceptAllBlock.includes('const initialIds = this.getSortedPendingSuggestionIdsForShareReview();')

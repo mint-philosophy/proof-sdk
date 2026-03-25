@@ -211,10 +211,12 @@ function run(): void {
   );
   assert(
     editorSource.includes('private pendingSharePersistPromise: Promise<boolean> | null = null;')
-      && flushReviewMutationStateBlock.includes("this.flushShareMarks({ persistContent: false, forcePersistMarks: true });")
+      && flushReviewMutationStateBlock.includes('if (this.shareMarksFlushTimer !== null) {')
+      && flushReviewMutationStateBlock.includes('clearTimeout(this.shareMarksFlushTimer);')
+      && !flushReviewMutationStateBlock.includes("this.flushShareMarks({ persistContent: false, forcePersistMarks: true });")
       && flushReviewMutationStateBlock.includes('const pendingPersist = this.pendingSharePersistPromise;')
       && flushReviewMutationStateBlock.includes('await pendingPersist.catch(() => false);'),
-    'Expected persisted review mutations to force a canonical mark persist and wait for it before issuing share accept/reject mutations',
+    'Expected persisted review mutations to cancel a queued async marks-only flush and wait for any in-flight persist before issuing share accept/reject mutations',
   );
 
   const localResolveBlock = sliceBetween(

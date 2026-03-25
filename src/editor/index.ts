@@ -9486,7 +9486,10 @@ class ProofEditorImpl implements ProofEditor {
 
   private async flushShareReviewMutationState(expectedMarkIds: string[] = []): Promise<boolean> {
     if (!this.isShareMode || !this.editor || this.suppressMarksSync) return true;
-    this.flushShareMarks({ persistContent: false, forcePersistMarks: true });
+    if (this.shareMarksFlushTimer !== null) {
+      clearTimeout(this.shareMarksFlushTimer);
+      this.shareMarksFlushTimer = null;
+    }
     const pendingPersist = this.pendingSharePersistPromise;
     let pendingPersistSucceeded = true;
     if (pendingPersist) {

@@ -9614,8 +9614,9 @@ class ProofEditorImpl implements ProofEditor {
       const ready = await this.flushShareReviewMutationState([markId]);
       if (!ready) return false;
       const actor = getCurrentActor();
+      const snapshot = this.buildShareBatchSuggestionSnapshot();
       this.beginShareReviewTrace('accept', markId);
-      const result = await shareClient.acceptSuggestion(markId, actor);
+      const result = await shareClient.acceptSuggestion(markId, actor, undefined, snapshot ?? undefined);
       if (!result || 'error' in result || result.success !== true) {
         this.traceShareReview('mutation.api-failed', {
           action: 'accept',
@@ -9710,8 +9711,9 @@ class ProofEditorImpl implements ProofEditor {
       const ready = await this.flushShareReviewMutationState([markId]);
       if (!ready) return false;
       const actor = getCurrentActor();
+      const snapshot = this.buildShareBatchSuggestionSnapshot();
       this.beginShareReviewTrace('reject', markId);
-      const result = await shareClient.rejectSuggestion(markId, actor);
+      const result = await shareClient.rejectSuggestion(markId, actor, undefined, snapshot ?? undefined);
       if (!result || 'error' in result || result.success !== true) {
         this.traceShareReview('mutation.api-failed', {
           action: 'reject',
@@ -9889,7 +9891,8 @@ class ProofEditorImpl implements ProofEditor {
 
         while (pendingIds.length > 0) {
           const suggestionId = pendingIds[0];
-          const result = await shareClient.rejectSuggestion(suggestionId, actor);
+          const snapshot = this.buildShareBatchSuggestionSnapshot();
+          const result = await shareClient.rejectSuggestion(suggestionId, actor, undefined, snapshot ?? undefined);
           if (!result || 'error' in result || result.success !== true) {
             console.error('[markRejectAll] Failed to persist suggestion rejection via share mutation:', result);
             break;

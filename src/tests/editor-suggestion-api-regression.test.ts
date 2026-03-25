@@ -96,7 +96,8 @@ function run(): void {
       && markRejectAllBlock.includes('void this.runSerializedShareReviewMutation(async () => {')
       && markRejectAllBlock.includes('const ready = await this.flushShareReviewMutationState(initialIds);')
       && markRejectAllBlock.includes('if (!ready) {')
-      && markRejectAllBlock.includes('const result = await shareClient.rejectSuggestion(suggestionId, actor);')
+      && markRejectAllBlock.includes('const snapshot = this.buildShareBatchSuggestionSnapshot();')
+      && markRejectAllBlock.includes('const result = await shareClient.rejectSuggestion(suggestionId, actor, undefined, snapshot ?? undefined);')
       && markRejectAllBlock.includes('pendingIds = this.getSortedPendingSuggestionIdsFromStoredMarks(serverMarks)')
       && markRejectAllBlock.includes('const success = await this.applyShareMutationDocumentResult(latestSuccessfulResult);')
       && markRejectAllBlock.includes("tombstoneResolvedMarkIds(rejectedIds, { reason: 'deleted' });")
@@ -262,8 +263,11 @@ function run(): void {
     shareClientSource.includes('async acceptSuggestion(')
       && shareClientSource.includes('async acceptSuggestions(')
       && shareClientSource.includes("path: 'accept' | 'reject';")
+      && shareClientSource.includes('snapshot?: ShareMarkMutationSnapshot;')
+      && shareClientSource.includes('markdown: args.snapshot.markdown,')
+      && shareClientSource.includes('marks: args.snapshot.marks,')
       && shareClientSource.includes("/agent/${encodeURIComponent(this.slug as string)}/marks/${args.path}"),
-    'Expected ShareClient to expose dedicated single-mark and batch accept mutations',
+    'Expected ShareClient to expose dedicated single-mark and batch accept mutations, including caller-provided mark snapshots for single-mark persistence',
   );
 
   const acceptRouteBlock = sliceBetween(
@@ -273,6 +277,7 @@ function run(): void {
   );
   assert(
     acceptRouteBlock.includes('acquireRewriteLock(slug);')
+      && acceptRouteBlock.includes('const effectiveMutationContext = overlayMarkMutationPayloadSnapshot(mutationContext, payload);')
       && acceptRouteBlock.includes('if (!keepRewriteLockCooldown) {')
       && acceptRouteBlock.includes('releaseRewriteLockImmediately(slug);')
       && acceptRouteBlock.includes('void notifyCollabMutation(')
@@ -294,10 +299,11 @@ function run(): void {
   );
   assert(
     rejectRouteBlock.includes('acquireRewriteLock(slug);')
+      && rejectRouteBlock.includes('const effectiveMutationContext = overlayMarkMutationPayloadSnapshot(mutationContext, payload);')
       && rejectRouteBlock.includes('if (!keepRewriteLockCooldown) {')
       && rejectRouteBlock.includes('releaseRewriteLockImmediately(slug);')
       && rejectRouteBlock.includes("details: 'suggestion.reject'"),
-    'Expected /marks/reject to hold the rewrite lock long enough to block stale collab writes during share review rejection',
+    'Expected /marks/reject to overlay the client mark snapshot and hold the rewrite lock long enough to block stale collab writes during share review rejection',
   );
 
   const asyncFallbackAcceptBlock = sliceBetween(

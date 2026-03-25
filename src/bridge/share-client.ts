@@ -123,6 +123,11 @@ type ShareMutationBase = {
   baseUpdatedAt?: string;
 };
 
+type ShareMarkMutationSnapshot = {
+  markdown: string;
+  marks: Record<string, unknown>;
+};
+
 type KeepaliveMutationBaseOptions = {
   allowLocalBaseToken?: boolean;
 };
@@ -478,6 +483,7 @@ export class ShareClient {
     by: string;
     idempotencyKey: string;
     options?: { token?: string };
+    snapshot?: ShareMarkMutationSnapshot;
   }): Promise<ShareMarkMutationResponse | ShareRequestError | null> {
     const submit = async (base: ShareMutationBase): Promise<ShareMarkMutationResponse | ShareRequestError> => {
       const response = await fetch(`${this.getApiBase()}/agent/${encodeURIComponent(this.slug as string)}/marks/${args.path}`, {
@@ -487,7 +493,17 @@ export class ShareClient {
           'Idempotency-Key': args.idempotencyKey,
           ...this.getShareAuthHeaders(args.options?.token),
         },
-        body: JSON.stringify({ markId: args.markId, by: args.by, ...base }),
+        body: JSON.stringify({
+          markId: args.markId,
+          by: args.by,
+          ...(args.snapshot
+            ? {
+                markdown: args.snapshot.markdown,
+                marks: args.snapshot.marks,
+              }
+            : {}),
+          ...base,
+        }),
       });
       const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
       if (!response.ok) {
@@ -991,7 +1007,8 @@ export class ShareClient {
   async rejectSuggestion(
     markId: string,
     by: string,
-    options?: { token?: string }
+    options?: { token?: string },
+    snapshot?: ShareMarkMutationSnapshot,
   ): Promise<ShareMarkMutationResponse | ShareRequestError | null> {
     if (!this.slug) return null;
     const trimmedMarkId = typeof markId === 'string' ? markId.trim() : '';
@@ -1009,13 +1026,15 @@ export class ShareClient {
       by: actor,
       idempotencyKey,
       options,
+      snapshot,
     });
   }
 
   async acceptSuggestion(
     markId: string,
     by: string,
-    options?: { token?: string }
+    options?: { token?: string },
+    snapshot?: ShareMarkMutationSnapshot,
   ): Promise<ShareMarkMutationResponse | ShareRequestError | null> {
     if (!this.slug) return null;
     const trimmedMarkId = typeof markId === 'string' ? markId.trim() : '';
@@ -1033,6 +1052,7 @@ export class ShareClient {
       by: actor,
       idempotencyKey,
       options,
+      snapshot,
     });
   }
 

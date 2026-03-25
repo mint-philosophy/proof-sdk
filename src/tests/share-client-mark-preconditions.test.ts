@@ -102,7 +102,12 @@ async function run(): Promise<void> {
   try {
     const { shareClient } = await import('../bridge/share-client.js');
 
-    const accept = await shareClient.acceptSuggestion('mark-accept', 'human:editor');
+    const accept = await shareClient.acceptSuggestion('mark-accept', 'human:editor', undefined, {
+      markdown: 'Snapshot single accept markdown',
+      marks: {
+        'mark-accept': { kind: 'insert', status: 'pending' },
+      },
+    });
     assert.equal((accept && 'error' in accept) ? false : accept?.success, true, 'acceptSuggestion should succeed');
     assert.equal(
       (accept && 'error' in accept) ? undefined : accept?.markdown,
@@ -122,7 +127,12 @@ async function run(): Promise<void> {
       'acceptSuggestion should surface canonical markdown from a recoverable collab-sync failure body',
     );
 
-    const reject = await shareClient.rejectSuggestion('mark-reject', 'human:editor');
+    const reject = await shareClient.rejectSuggestion('mark-reject', 'human:editor', undefined, {
+      markdown: 'Snapshot single reject markdown',
+      marks: {
+        'mark-reject': { kind: 'insert', status: 'pending' },
+      },
+    });
     assert.equal((reject && 'error' in reject) ? false : reject?.success, true, 'rejectSuggestion should succeed');
     assert.equal(
       (reject && 'error' in reject) ? undefined : reject?.markdown,
@@ -175,6 +185,18 @@ async function run(): Promise<void> {
     );
     assert.equal(acceptRequest?.body?.baseRevision, 41, 'acceptSuggestion should include baseRevision from /state');
     assert.equal(
+      acceptRequest?.body?.markdown,
+      'Snapshot single accept markdown',
+      'acceptSuggestion should send the caller-provided visible markdown snapshot for single-mark accept',
+    );
+    assert.deepEqual(
+      acceptRequest?.body?.marks,
+      {
+        'mark-accept': { kind: 'insert', status: 'pending' },
+      },
+      'acceptSuggestion should send the caller-provided mark snapshot for single-mark accept',
+    );
+    assert.equal(
       acceptRequests.find((request) => request.body?.markId === 'mark-accept-recovered')?.body?.baseUpdatedAt,
       '2026-03-06T00:00:00.000Z',
       'recoverable acceptSuggestion should still fall back to baseUpdatedAt when revision is unavailable',
@@ -202,6 +224,18 @@ async function run(): Promise<void> {
     assert.ok(
       rejectRequest?.headers.get('Idempotency-Key'),
       'rejectSuggestion should send an Idempotency-Key header when the server requires idempotent mutations',
+    );
+    assert.equal(
+      rejectRequest?.body?.markdown,
+      'Snapshot single reject markdown',
+      'rejectSuggestion should send the caller-provided visible markdown snapshot for single-mark reject',
+    );
+    assert.deepEqual(
+      rejectRequest?.body?.marks,
+      {
+        'mark-reject': { kind: 'insert', status: 'pending' },
+      },
+      'rejectSuggestion should send the caller-provided mark snapshot for single-mark reject',
     );
     assert.ok(
       acceptAllRequest?.headers.get('Idempotency-Key'),

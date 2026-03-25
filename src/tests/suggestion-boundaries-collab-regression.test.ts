@@ -29,6 +29,13 @@ const schema = new Schema({
       inclusive: false,
       spanning: true,
     },
+    proofAuthored: {
+      attrs: {
+        by: { default: 'unknown' },
+      },
+      inclusive: false,
+      spanning: true,
+    },
   },
 });
 
@@ -75,6 +82,7 @@ function getInsertLength(state: EditorState, id: string): number {
 function run(): void {
   const initialState = createMarkedState();
   const insertStart = 7;
+  const suggestionId = 'insert-1';
   const corruptFrom = insertStart + 'This '.length;
   const corruptText = 'REMOTE ';
 
@@ -92,7 +100,7 @@ function run(): void {
   );
   const corruptedState = initialState.apply(corruptedTr);
 
-  const corruptedSegments = collectSuggestionSegments(corruptedState.doc, 'insert-1', 'insert');
+  const corruptedSegments = collectSuggestionSegments(corruptedState.doc, suggestionId, 'insert');
   assert.equal(
     getSuggestionTextFromSegments(corruptedSegments),
     'This REMOTE is a collab test insertion.',
@@ -103,7 +111,7 @@ function run(): void {
   assert(repair, 'Expected remote insert suggestion repair to detect the inherited mark');
 
   const repairedState = corruptedState.apply(repair!.transaction);
-  const repairedSegments = collectSuggestionSegments(repairedState.doc, 'insert-1', 'insert');
+  const repairedSegments = collectSuggestionSegments(repairedState.doc, suggestionId, 'insert');
   assert.equal(repairedSegments.length, 2, 'Expected repair to split the suggestion around the remote plain-text insertion');
   assert.equal(
     getSuggestionTextFromSegments(repairedSegments),
@@ -117,7 +125,7 @@ function run(): void {
   );
 
   const syncedMetadata = syncInsertSuggestionMetadataFromDoc(repairedState.doc, {
-    'insert-1': {
+    [suggestionId]: {
       kind: 'insert',
       by: 'user:test',
       status: 'pending',
@@ -127,18 +135,18 @@ function run(): void {
   }, ['insert-1']);
 
   assert.equal(
-    syncedMetadata['insert-1']?.content,
+    syncedMetadata[suggestionId]?.content,
     'This is a collab test insertion.',
     'Expected metadata repair to preserve only the tracked insert text, not the interleaved remote text',
   );
   assert.equal(
-    syncedMetadata['insert-1']?.quote,
+    syncedMetadata[suggestionId]?.quote,
     'This is a collab test insertion.',
     'Expected metadata repair to keep the serialized insert quote aligned with the repaired live text',
   );
 
   const growingInsertMetadata = {
-    'insert-1': {
+    [suggestionId]: {
       kind: 'insert' as const,
       by: 'user:test',
       status: 'pending' as const,
@@ -153,14 +161,14 @@ function run(): void {
     'Expected boundary repair to ignore legitimate insert growth when local metadata already matches the expanded insert text',
   );
 
-  const insertLength = getInsertLength(initialState, 'insert-1');
+  const insertLength = getInsertLength(initialState, suggestionId);
   const appendPos = insertStart + insertLength;
   const appendEchoTr = initialState.tr.insertText('!', appendPos, appendPos);
   const appendEchoMarked = appendEchoTr.addMark(
     appendPos,
     appendPos + 1,
     schema.marks.proofSuggestion.create({
-      id: 'insert-1',
+      id: suggestionId,
       kind: 'insert',
       by: 'user:test',
       status: 'pending',
@@ -174,7 +182,7 @@ function run(): void {
     initialState,
     localEchoState,
     {
-      'insert-1': {
+      [suggestionId]: {
         kind: 'insert',
         by: 'user:test',
         status: 'pending',
@@ -192,6 +200,80 @@ function run(): void {
     staleMetadataRepair,
     null,
     'Expected boundary repair to ignore a recent local self-echo append even when metadata still lags behind the expanded insert text',
+  );
+
+  const authoredMark = schema.marks.proofAuthored.create({ by: 'human:test' });
+  const fragmentedOldState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha '),
+        schema.text('TC para one from A.', [schema.marks.proofSuggestion.create({
+          id: suggestionId,
+          kind: 'insert',
+          by: 'user:test',
+          status: 'pending',
+        })]),
+        schema.text(' beta gamma.'),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  });
+  const fragmentedState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha '),
+        schema.text('TC', [schema.marks.proofSuggestion.create({
+          id: suggestionId,
+          kind: 'insert',
+          by: 'user:test',
+          status: 'pending',
+        })]),
+        schema.text(' ', [authoredMark]),
+        schema.text('par', [schema.marks.proofSuggestion.create({
+          id: suggestionId,
+          kind: 'insert',
+          by: 'user:test',
+          status: 'pending',
+        })]),
+        schema.text('a', [authoredMark]),
+        schema.text(' one from A.', [schema.marks.proofSuggestion.create({
+          id: suggestionId,
+          kind: 'insert',
+          by: 'user:test',
+          status: 'pending',
+        })]),
+        schema.text(' beta gamma.'),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  });
+  const fragmentedRepair = buildRemoteInsertSuggestionBoundaryRepair(
+    fragmentedOldState,
+    fragmentedState,
+    {
+      [suggestionId]: {
+        kind: 'insert',
+        by: 'user:test',
+        status: 'pending',
+        content: 'TC para one from A.',
+        quote: 'TC para one from A.',
+      },
+    },
+    {
+      preferLocalInsertGrowthAtSelection: true,
+      localSelectionFrom: 7 + 'TC para'.length,
+      localSelectionEmpty: true,
+    },
+  );
+  assert(fragmentedRepair, 'Expected boundary repair to restore missing suggestion coverage for authored gap fragments inside a recent local insert');
+  const repairedFragmentedState = fragmentedState.apply(fragmentedRepair!.transaction);
+  const repairedFragmentedText = getSuggestionTextFromSegments(collectSuggestionSegments(repairedFragmentedState.doc, suggestionId, 'insert'));
+  assert.equal(
+    repairedFragmentedText,
+    'TC para one from A.',
+    'Expected boundary repair to rehydrate authored gap fragments back into the pending insert suggestion',
   );
 
   console.log('suggestion-boundaries-collab-regression.test.ts passed');

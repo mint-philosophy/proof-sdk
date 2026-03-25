@@ -210,6 +210,103 @@ function detectSingleInsertion(oldText: string, nextText: string): SuggestionTex
   };
 }
 
+function detectSingleDeletion(oldText: string, nextText: string): SuggestionTextInsertion | null {
+  if (oldText.length <= nextText.length) return null;
+
+  let prefix = 0;
+  const maxPrefix = Math.min(oldText.length, nextText.length);
+  while (prefix < maxPrefix && oldText.charCodeAt(prefix) === nextText.charCodeAt(prefix)) {
+    prefix += 1;
+  }
+
+  let oldSuffix = oldText.length;
+  let nextSuffix = nextText.length;
+  while (
+    oldSuffix > prefix
+    && nextSuffix > prefix
+    && oldText.charCodeAt(oldSuffix - 1) === nextText.charCodeAt(nextSuffix - 1)
+  ) {
+    oldSuffix -= 1;
+    nextSuffix -= 1;
+  }
+
+  if (nextSuffix !== prefix) return null;
+
+  return {
+    fromOffset: prefix,
+    toOffset: oldSuffix,
+  };
+}
+
+function mapTextOffsetsToDocRanges(
+  doc: ProseMirrorNode,
+  range: MarkRange,
+  fromOffset: number,
+  toOffset: number,
+): MarkRange[] {
+  if (toOffset <= fromOffset) return [];
+
+  const ranges: MarkRange[] = [];
+  let consumed = 0;
+
+  doc.nodesBetween(range.from, range.to, (node, pos) => {
+    if (!node.isText) return true;
+
+    const overlapFrom = Math.max(range.from, pos);
+    const overlapTo = Math.min(range.to, pos + node.nodeSize);
+    if (overlapTo <= overlapFrom) return true;
+
+    const segmentLength = overlapTo - overlapFrom;
+    const segmentStartOffset = consumed;
+    const segmentEndOffset = consumed + segmentLength;
+    const mappedFrom = Math.max(fromOffset, segmentStartOffset);
+    const mappedTo = Math.min(toOffset, segmentEndOffset);
+    if (mappedTo > mappedFrom) {
+      ranges.push({
+        from: overlapFrom + (mappedFrom - segmentStartOffset),
+        to: overlapFrom + (mappedTo - segmentStartOffset),
+      });
+    }
+    consumed = segmentEndOffset;
+    return consumed < toOffset;
+  });
+
+  return ranges;
+}
+
+function collectNonSuggestionTextRanges(
+  doc: ProseMirrorNode,
+  range: MarkRange,
+  id: string,
+): MarkRange[] {
+  const ranges: MarkRange[] = [];
+
+  doc.nodesBetween(range.from, range.to, (node, pos) => {
+    if (!node.isText) return true;
+
+    const overlapFrom = Math.max(range.from, pos);
+    const overlapTo = Math.min(range.to, pos + node.nodeSize);
+    if (overlapTo <= overlapFrom) return true;
+
+    const hasInsertSuggestion = node.marks.some((mark) =>
+      mark.type.name === 'proofSuggestion'
+      && mark.attrs.id === id
+      && normalizeSuggestionKind(mark.attrs.kind) === 'insert'
+    );
+    if (hasInsertSuggestion) return true;
+
+    const previous = ranges[ranges.length - 1];
+    if (previous && previous.to === overlapFrom) {
+      previous.to = overlapTo;
+    } else {
+      ranges.push({ from: overlapFrom, to: overlapTo });
+    }
+    return true;
+  });
+
+  return ranges;
+}
+
 function collectSuggestionMarkRemovals(
   doc: ProseMirrorNode,
   id: string,
@@ -254,7 +351,9 @@ export function buildRemoteInsertSuggestionBoundaryRepair(
     localSelectionEmpty?: boolean;
   },
 ): { transaction: Transaction; affectedInsertIds: string[] } | null {
-  if (!newState.schema.marks.proofSuggestion) return null;
+  const suggestionMarkType = newState.schema.marks.proofSuggestion;
+  if (!suggestionMarkType) return null;
+  const authoredMarkType = newState.schema.marks.proofAuthored ?? null;
 
   const existingInsertIds = collectInsertSuggestionIds(oldState.doc);
   if (existingInsertIds.size === 0) return null;
@@ -285,7 +384,34 @@ export function buildRemoteInsertSuggestionBoundaryRepair(
     }
 
     const insertion = detectSingleInsertion(oldText, newText);
-    if (!insertion) continue;
+    if (!insertion) {
+      if (
+        options?.preferLocalInsertGrowthAtSelection === true
+        && options.localSelectionEmpty !== false
+      ) {
+        const oldRange = getSuggestionClusterRangeFromSegments(oldSegments);
+        const fullRangeText = oldRange
+          ? normalizeQuote(newState.doc.textBetween(oldRange.from, oldRange.to, '\n', '\n'))
+          : '';
+        if (oldRange && fullRangeText === normalizeQuote(oldText)) {
+          const restoredRanges = collectNonSuggestionTextRanges(newState.doc, oldRange, id);
+          if (restoredRanges.length > 0) {
+            for (const restoredRange of restoredRanges) {
+              if (authoredMarkType) {
+                tr = tr.removeMark(restoredRange.from, restoredRange.to, authoredMarkType);
+              }
+              tr = tr.addMark(
+                restoredRange.from,
+                restoredRange.to,
+                suggestionMarkType.create({ id, kind: 'insert', by: stored?.by ?? 'unknown' }),
+              );
+            }
+            affectedInsertIds.add(id);
+          }
+        }
+      }
+      continue;
+    }
 
     if (
       options?.preferLocalInsertGrowthAtSelection === true

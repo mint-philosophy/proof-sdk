@@ -81,6 +81,11 @@ function run(): void {
     '# Untitled\n\nBaseline.\n\nTC two.\n',
     'Expected snapshot overlay to accept equivalent visible text and replace the mutation markdown',
   );
+  assert.equal(
+    overlaid.preserveMutationBaseDocument,
+    true,
+    'Expected snapshot overlay to mark the mutation context so async hydration preserves the client snapshot markdown',
+  );
   assert.deepEqual(
     JSON.parse(overlaid.doc.marks),
     snapshotMarks,

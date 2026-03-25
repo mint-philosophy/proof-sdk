@@ -20,6 +20,12 @@ function run(): void {
   const documentEngineSource = readFileSync(path.resolve(process.cwd(), 'server/document-engine.ts'), 'utf8');
   const suggestionsSource = readFileSync(path.resolve(process.cwd(), 'src/editor/plugins/suggestions.ts'), 'utf8');
 
+  assert(
+    agentRoutesSource.includes('preserveMutationBaseDocument: true,')
+      && documentEngineSource.includes('if (context?.mutationBase && !context.preserveMutationBaseDocument) {'),
+    'Expected snapshot-overlaid mark mutations to preserve the client markdown through async hydration instead of swapping back to persisted proof-span markdown',
+  );
+
   const acceptSuggestionBlock = sliceBetween(editorSource, '  acceptSuggestion(id: string): boolean {', '\n  /**');
   assert(acceptSuggestionBlock.includes('return this.markAccept(String(id));'), 'Expected acceptSuggestion to delegate to markAccept');
 

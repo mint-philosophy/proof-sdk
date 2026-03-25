@@ -437,6 +437,7 @@ function overlayMarkMutationPayloadSnapshot(
 
   return {
     ...context,
+    preserveMutationBaseDocument: true,
     doc: {
       ...context.doc,
       markdown: snapshotMarkdown,

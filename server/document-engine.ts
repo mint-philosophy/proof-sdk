@@ -92,6 +92,7 @@ type AsyncDocumentMutationPrecondition = {
 export type AsyncDocumentMutationContext = {
   doc: CanonicalReadableDocument;
   mutationBase?: AuthoritativeMutationBase | null;
+  preserveMutationBaseDocument?: boolean;
   enforceProjectionReadiness?: boolean;
   precondition?: AsyncDocumentMutationPrecondition;
   idempotencyKey?: string;
@@ -276,7 +277,7 @@ async function getAsyncMutationReadyDocumentWithVisibleFallback(
   }
 
   let doc = ready.doc;
-  if (context?.mutationBase) {
+  if (context?.mutationBase && !context.preserveMutationBaseDocument) {
     const persistedDoc = getDocumentBySlug(slug);
     const persistedMarkdown = persistedDoc?.markdown ?? '';
     const authoritativeMarkdown = doc.markdown ?? '';

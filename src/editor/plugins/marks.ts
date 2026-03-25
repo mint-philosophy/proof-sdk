@@ -1891,6 +1891,7 @@ function resolveBrokenPendingInsertAnchorRange(
 
   const desiredRange = resolveStoredMarkRange(doc, stored);
   if (!desiredRange) return null;
+  if (desiredRange.to <= desiredRange.from) return null;
 
   const liveSegments = collectSuggestionSegments(doc, id, 'insert');
   if (liveSegments.length === 0) return desiredRange;

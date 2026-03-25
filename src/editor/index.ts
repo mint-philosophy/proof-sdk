@@ -3146,6 +3146,19 @@ class ProofEditorImpl implements ProofEditor {
     return avatars;
   }
 
+  private hasActiveRemoteCollabPeer(): boolean {
+    const awareness = collabClient.getAwareness();
+    if (!awareness) return false;
+    const states = awareness.getStates?.();
+    if (!states) return false;
+    const myClientId = awareness.clientID;
+    let hasRemotePeer = false;
+    states.forEach((_state: any, clientId: number) => {
+      if (clientId !== myClientId) hasRemotePeer = true;
+    });
+    return hasRemotePeer;
+  }
+
   private ensureShareAgentPresenceIcons(agentIds: Iterable<string>): void {
     const activeIds = Array.from(new Set(
       Array.from(agentIds)
@@ -9321,8 +9334,9 @@ class ProofEditorImpl implements ProofEditor {
       this.initialMarksSynced = true;
     });
 
+    const shouldPreserveRejectResultAcrossReconnect = action === 'reject' && this.hasActiveRemoteCollabPeer();
     if (matchedServerResult) {
-      if (action === 'reject') {
+      if (shouldPreserveRejectResultAcrossReconnect) {
         this.pendingCollabReconnectTemplateOverride = null;
         this.skipNextCollabTemplateSeed = true;
         this.preserveEditorStateOnNextCollabReconnect = true;
@@ -9739,11 +9753,17 @@ class ProofEditorImpl implements ProofEditor {
       });
 
       tombstoneResolvedMarkIds([markId], { reason: 'deleted' });
+      const preserveRejectResultAcrossReconnect = this.hasActiveRemoteCollabPeer();
       const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)
-        || await this.applyShareMutationDocumentResult(result, {
-          skipReconnectTemplateSeed: true,
-          preserveEditorStateDuringReconnect: true,
-        });
+        || await this.applyShareMutationDocumentResult(
+          result,
+          preserveRejectResultAcrossReconnect
+            ? {
+                skipReconnectTemplateSeed: true,
+                preserveEditorStateDuringReconnect: true,
+              }
+            : undefined,
+        );
       if (success && this.editor) {
         await this.waitForStableShareReviewMutationState();
         captureEvent('suggestion_rejected', { count: 1 });

@@ -9630,12 +9630,14 @@ class ProofEditorImpl implements ProofEditor {
     }
 
     return this.runSerializedShareReviewMutation(async () => {
+      const sourceMark = this.getCurrentShareReviewStoredMark(markId);
       const ready = await this.flushShareReviewMutationState([markId]);
       if (!ready) return false;
       const actor = getCurrentActor();
       const snapshot = this.buildShareBatchSuggestionSnapshot();
+      const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);
       this.beginShareReviewTrace('accept', markId);
-      const result = await shareClient.acceptSuggestion(markId, actor, undefined, snapshot ?? undefined);
+      const result = await shareClient.acceptSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);
       if (!result || 'error' in result || result.success !== true) {
         this.traceShareReview('mutation.api-failed', {
           action: 'accept',
@@ -9655,7 +9657,7 @@ class ProofEditorImpl implements ProofEditor {
           : null,
       });
 
-      tombstoneResolvedMarkIds([markId], { reason: 'deleted' });
+      tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });
       const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)
         || await this.applyShareMutationDocumentResult(result);
       if (success && this.editor) {
@@ -9727,12 +9729,14 @@ class ProofEditorImpl implements ProofEditor {
     }
 
     return this.runSerializedShareReviewMutation(async () => {
+      const sourceMark = this.getCurrentShareReviewStoredMark(markId);
       const ready = await this.flushShareReviewMutationState([markId]);
       if (!ready) return false;
       const actor = getCurrentActor();
       const snapshot = this.buildShareBatchSuggestionSnapshot();
+      const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);
       this.beginShareReviewTrace('reject', markId);
-      const result = await shareClient.rejectSuggestion(markId, actor, undefined, snapshot ?? undefined);
+      const result = await shareClient.rejectSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);
       if (!result || 'error' in result || result.success !== true) {
         this.traceShareReview('mutation.api-failed', {
           action: 'reject',
@@ -9752,7 +9756,7 @@ class ProofEditorImpl implements ProofEditor {
           : null,
       });
 
-      tombstoneResolvedMarkIds([markId], { reason: 'deleted' });
+      tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });
       const preserveRejectResultAcrossReconnect = this.hasActiveRemoteCollabPeer();
       const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)
         || await this.applyShareMutationDocumentResult(
@@ -9808,6 +9812,114 @@ class ProofEditorImpl implements ProofEditor {
       .map(([id]) => id);
   }
 
+  private getCurrentShareReviewStoredMark(markId: string): StoredMark | null {
+    if (!this.editor) return null;
+
+    let sourceMark: StoredMark | null = null;
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const metadata = getMarkMetadataWithQuotes(view.state);
+      sourceMark = metadata[markId] ?? null;
+    });
+    return sourceMark;
+  }
+
+  private getAuthoritativePendingSuggestionIdsForShareReview(): string[] {
+    const authoritativeIds = this.getSortedPendingSuggestionIdsFromStoredMarks(this.lastReceivedServerMarks);
+    if (authoritativeIds.length > 0) return authoritativeIds;
+    return this.getSortedPendingSuggestionIdsForShareReview();
+  }
+
+  private parseShareReviewRelativeCharOffset(value: unknown): number | null {
+    if (typeof value !== 'string') return null;
+    const match = /^char:(-?\d+)$/.exec(value.trim());
+    if (!match) return null;
+    const parsed = Number.parseInt(match[1], 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private getShareReviewMarkStart(mark: StoredMark): number | null {
+    const rel = this.parseShareReviewRelativeCharOffset(mark.startRel);
+    if (rel !== null) return rel;
+    if (typeof mark.range?.from === 'number' && Number.isFinite(mark.range.from)) return mark.range.from;
+    return null;
+  }
+
+  private getShareReviewMarkEnd(mark: StoredMark): number | null {
+    const rel = this.parseShareReviewRelativeCharOffset(mark.endRel);
+    if (rel !== null) return rel;
+    if (typeof mark.range?.to === 'number' && Number.isFinite(mark.range.to)) return mark.range.to;
+    return null;
+  }
+
+  private getComparableShareReviewMarkText(mark: StoredMark): string {
+    const quote = typeof mark.quote === 'string' ? normalizeQuote(mark.quote) : '';
+    if (quote) return quote;
+    const content = typeof mark.content === 'string' ? normalizeQuote(mark.content) : '';
+    return content;
+  }
+
+  private scoreEquivalentShareReviewMark(source: StoredMark, candidate: StoredMark): number {
+    if (candidate.kind !== 'insert' && candidate.kind !== 'delete' && candidate.kind !== 'replace') {
+      return Number.NEGATIVE_INFINITY;
+    }
+    if (candidate.status !== 'pending') return Number.NEGATIVE_INFINITY;
+    if (candidate.kind !== source.kind) return Number.NEGATIVE_INFINITY;
+    if (source.by && candidate.by && candidate.by !== source.by) return Number.NEGATIVE_INFINITY;
+
+    const sourceText = this.getComparableShareReviewMarkText(source);
+    const candidateText = this.getComparableShareReviewMarkText(candidate);
+    const sourceStart = this.getShareReviewMarkStart(source);
+    const sourceEnd = this.getShareReviewMarkEnd(source);
+    const candidateStart = this.getShareReviewMarkStart(candidate);
+    const candidateEnd = this.getShareReviewMarkEnd(candidate);
+
+    let score = 0;
+    if (source.by && candidate.by && candidate.by === source.by) score += 40;
+
+    if (sourceText && candidateText) {
+      if (candidateText === sourceText) {
+        score += 220;
+      } else if (candidateText.includes(sourceText)) {
+        score += 180;
+      } else if (sourceText.includes(candidateText)) {
+        score += 120;
+      } else {
+        return Number.NEGATIVE_INFINITY;
+      }
+    } else if (sourceText || candidateText) {
+      return Number.NEGATIVE_INFINITY;
+    }
+
+    if (sourceStart !== null && candidateStart !== null) {
+      score += Math.max(0, 80 - Math.abs(candidateStart - sourceStart));
+    }
+    if (sourceEnd !== null && candidateEnd !== null) {
+      score += Math.max(0, 40 - Math.abs(candidateEnd - sourceEnd));
+    }
+
+    return score;
+  }
+
+  private resolveAuthoritativeShareReviewMarkId(markId: string, sourceMark: StoredMark | null): string {
+    const authoritativeMark = this.lastReceivedServerMarks[markId];
+    if (authoritativeMark?.status === 'pending') return markId;
+    if (!sourceMark) return markId;
+
+    let bestCandidateId: string | null = null;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (const [candidateId, candidateMark] of Object.entries(this.lastReceivedServerMarks)) {
+      const score = this.scoreEquivalentShareReviewMark(sourceMark, candidateMark);
+      if (score > bestScore) {
+        bestScore = score;
+        bestCandidateId = candidateId;
+      }
+    }
+
+    if (!bestCandidateId || bestScore < 180) return markId;
+    return bestCandidateId;
+  }
+
   private buildShareBatchSuggestionSnapshot(): { markdown: string; marks: Record<string, unknown> } | null {
     if (!this.editor) return null;
 
@@ -9847,20 +9959,22 @@ class ProofEditorImpl implements ProofEditor {
         }
         const actor = getCurrentActor();
         const snapshot = this.buildShareBatchSuggestionSnapshot();
-        const result = await shareClient.acceptSuggestions(initialIds, actor, undefined, snapshot ?? undefined);
+        const authoritativeIds = this.getAuthoritativePendingSuggestionIdsForShareReview();
+        const requestedIds = authoritativeIds.length > 0 ? authoritativeIds : initialIds;
+        const result = await shareClient.acceptSuggestions(requestedIds, actor, undefined, snapshot ?? undefined);
         if (!result || 'error' in result || result.success !== true) {
           console.error('[markAcceptAll] Failed to persist suggestion acceptance via share mutation:', result);
           return;
         }
 
-        tombstoneResolvedMarkIds(initialIds, { reason: 'deleted' });
+        tombstoneResolvedMarkIds(requestedIds, { reason: 'deleted' });
         const success = await this.applyShareMutationDocumentResult(result, {
           skipReconnectTemplateSeed: true,
           preserveEditorStateDuringReconnect: true,
         });
         if (success && this.editor) {
           await this.waitForStableShareReviewMutationState();
-          captureEvent('suggestion_accepted', { count: initialIds.length });
+          captureEvent('suggestion_accepted', { count: requestedIds.length });
           this.editor.action((ctx) => {
             const view = ctx.get(editorViewCtx);
             const stats = getAuthorshipStats(view);
@@ -9910,7 +10024,8 @@ class ProofEditorImpl implements ProofEditor {
         }
         const actor = getCurrentActor();
         const rejectedIds: string[] = [];
-        let pendingIds = [...initialIds];
+        let pendingIds = this.getAuthoritativePendingSuggestionIdsForShareReview();
+        if (pendingIds.length === 0) pendingIds = [...initialIds];
         let latestSuccessfulResult: {
           markdown?: string;
           marks?: Record<string, unknown> | null;

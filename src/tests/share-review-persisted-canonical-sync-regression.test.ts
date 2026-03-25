@@ -151,14 +151,16 @@ function run(): void {
     '\n  /**\n   * Reject a suggestion without changing the document\n   */',
   );
   assert(
-    acceptPersistedBlock.includes("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
-      && acceptPersistedBlock.indexOf("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
+    acceptPersistedBlock.includes("const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);")
+      && acceptPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
+      && acceptPersistedBlock.indexOf("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
         < acceptPersistedBlock.indexOf("const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
+      && acceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
       && acceptPersistedBlock.includes("const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
       && acceptPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(result);')
       && acceptPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to tombstone the resolved suggestion, reconcile the mutation, and wait for collab reconnect to settle before returning success',
+    'Expected markAcceptPersisted to remap stale UI ids to the authoritative pending mark, tombstone both local and remote ids, reconcile the mutation, and wait for collab reconnect to settle before returning success',
   );
 
   const rejectPersistedBlock = sliceBetween(
@@ -167,8 +169,10 @@ function run(): void {
     '\n  /**\n   * Accept all pending suggestions\n   */',
   );
   assert(
-    rejectPersistedBlock.includes("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
-      && rejectPersistedBlock.indexOf("tombstoneResolvedMarkIds([markId], { reason: 'deleted' });")
+    rejectPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
+      && rejectPersistedBlock.includes("const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);")
+      && rejectPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
+      && rejectPersistedBlock.indexOf("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
         < rejectPersistedBlock.indexOf("const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")
       && rejectPersistedBlock.includes('const preserveRejectResultAcrossReconnect = this.hasActiveRemoteCollabPeer();')
       && rejectPersistedBlock.includes("const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")

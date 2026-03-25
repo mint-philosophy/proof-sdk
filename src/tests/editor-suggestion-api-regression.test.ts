@@ -59,13 +59,21 @@ function run(): void {
   const sortedServerPendingIdsBlock = sliceBetween(
     editorSource,
     '  private getSortedPendingSuggestionIdsFromStoredMarks(marks: Record<string, StoredMark>): string[] {',
-    '\n  /**\n   * Accept all pending suggestions\n   */',
+    '\n  private buildShareBatchSuggestionSnapshot(): { markdown: string; marks: Record<string, unknown> } | null {',
   );
   assert(
     sortedServerPendingIdsBlock.includes("return (kind === 'insert' || kind === 'delete' || kind === 'replace') && mark.status === 'pending';")
       && sortedServerPendingIdsBlock.includes("const aMax = a.range?.to ?? a.range?.from ?? -1;")
       && sortedServerPendingIdsBlock.includes('return bMax - aMax;'),
     'Expected share Accept All to recompute pending suggestion order from the latest server marks after each persisted accept',
+  );
+  assert(
+    sortedServerPendingIdsBlock.includes('private getCurrentShareReviewStoredMark(markId: string): StoredMark | null {')
+      && sortedServerPendingIdsBlock.includes('private getAuthoritativePendingSuggestionIdsForShareReview(): string[] {')
+      && sortedServerPendingIdsBlock.includes('private resolveAuthoritativeShareReviewMarkId(markId: string, sourceMark: StoredMark | null): string {')
+      && sortedServerPendingIdsBlock.includes('const authoritativeMark = this.lastReceivedServerMarks[markId];')
+      && sortedServerPendingIdsBlock.includes('const score = this.scoreEquivalentShareReviewMark(sourceMark, candidateMark);'),
+    'Expected persisted share review actions to remap stale UI suggestion ids onto the latest authoritative pending marks before sending accept/reject mutations',
   );
   assert(
     flushShareReviewMutationStateBlock.includes('this.flushShareMarks({ persistContent: false, forcePersistMarks: true });')
@@ -81,14 +89,16 @@ function run(): void {
       && markAcceptAllBlock.includes('const ready = await this.flushShareReviewMutationState(initialIds);')
       && markAcceptAllBlock.includes('if (!ready) {')
       && markAcceptAllBlock.includes('const snapshot = this.buildShareBatchSuggestionSnapshot();')
-      && markAcceptAllBlock.includes('const result = await shareClient.acceptSuggestions(initialIds, actor, undefined, snapshot ?? undefined);')
+      && markAcceptAllBlock.includes('const authoritativeIds = this.getAuthoritativePendingSuggestionIdsForShareReview();')
+      && markAcceptAllBlock.includes('const requestedIds = authoritativeIds.length > 0 ? authoritativeIds : initialIds;')
+      && markAcceptAllBlock.includes('const result = await shareClient.acceptSuggestions(requestedIds, actor, undefined, snapshot ?? undefined);')
       && markAcceptAllBlock.includes('const success = await this.applyShareMutationDocumentResult(result, {')
       && markAcceptAllBlock.includes('skipReconnectTemplateSeed: true,')
       && markAcceptAllBlock.includes('preserveEditorStateDuringReconnect: true,')
-      && markAcceptAllBlock.includes("tombstoneResolvedMarkIds(initialIds, { reason: 'deleted' });")
+      && markAcceptAllBlock.includes("tombstoneResolvedMarkIds(requestedIds, { reason: 'deleted' });")
       && !markAcceptAllBlock.includes('await this.markAcceptPersisted(suggestionId);')
       && !markAcceptAllBlock.includes('await shareClient.acceptSuggestion(suggestionId, actor);'),
-    'Expected share-mode markAcceptAll to use the server-side batch accept mutation and perform a single final authoritative apply/reconnect without replaying the reconnect template over accepted content',
+    'Expected share-mode markAcceptAll to resolve stale batch targets against the post-flush authoritative mark set and perform a single final authoritative apply/reconnect without replaying the reconnect template over accepted content',
   );
   const markRejectAllBlock = sliceBetween(editorSource, '  markRejectAll(): number {', '\n  /**\n   * Delete a mark by ID\n   */');
   assert(
@@ -96,6 +106,8 @@ function run(): void {
       && markRejectAllBlock.includes('void this.runSerializedShareReviewMutation(async () => {')
       && markRejectAllBlock.includes('const ready = await this.flushShareReviewMutationState(initialIds);')
       && markRejectAllBlock.includes('if (!ready) {')
+      && markRejectAllBlock.includes('let pendingIds = this.getAuthoritativePendingSuggestionIdsForShareReview();')
+      && markRejectAllBlock.includes('if (pendingIds.length === 0) pendingIds = [...initialIds];')
       && markRejectAllBlock.includes('const snapshot = this.buildShareBatchSuggestionSnapshot();')
       && markRejectAllBlock.includes('const result = await shareClient.rejectSuggestion(suggestionId, actor, undefined, snapshot ?? undefined);')
       && markRejectAllBlock.includes('pendingIds = this.getSortedPendingSuggestionIdsFromStoredMarks(serverMarks)')
@@ -103,6 +115,24 @@ function run(): void {
       && markRejectAllBlock.includes("tombstoneResolvedMarkIds(rejectedIds, { reason: 'deleted' });")
       && !markRejectAllBlock.includes('await this.markRejectPersisted(suggestionId);'),
     'Expected share-mode markRejectAll to batch persisted rejects server-side and perform a single final authoritative apply/reconnect',
+  );
+
+  const markAcceptPersistedBlock = sliceBetween(editorSource, '  async markAcceptPersisted(markId: string): Promise<boolean> {', '\n  /**\n   * Reject a suggestion without changing the document\n   */');
+  assert(
+    markAcceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
+      && markAcceptPersistedBlock.includes('const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);')
+      && markAcceptPersistedBlock.includes('const result = await shareClient.acceptSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);')
+      && markAcceptPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });"),
+    'Expected persisted single-mark accept to remap stale UI ids onto the latest authoritative mark id before calling the share mutation route',
+  );
+
+  const markRejectPersistedBlock = sliceBetween(editorSource, '  async markRejectPersisted(markId: string): Promise<boolean> {', '\n  private getSortedPendingSuggestionIdsForShareReview(): string[] {');
+  assert(
+    markRejectPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
+      && markRejectPersistedBlock.includes('const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);')
+      && markRejectPersistedBlock.includes('const result = await shareClient.rejectSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);')
+      && markRejectPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });"),
+    'Expected persisted single-mark reject to remap stale UI ids onto the latest authoritative mark id before calling the share mutation route',
   );
 
   const handleMarksChangeBlock = sliceBetween(editorSource, '  private handleMarksChange(', '\n  private serializeMarkdown(');

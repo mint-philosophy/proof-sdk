@@ -277,7 +277,9 @@ function run(): void {
   );
   assert(
     acceptRouteBlock.includes('acquireRewriteLock(slug);')
-      && acceptRouteBlock.includes('const effectiveMutationContext = overlayMarkMutationPayloadSnapshot(mutationContext, payload);')
+      && acceptRouteBlock.includes('const effectivePayload = rewriteMarkMutationPayloadSnapshotTargets(payload, parseCanonicalMarks(mutationContext.doc.marks));')
+      && acceptRouteBlock.includes('const effectiveMutationContext = overlayMarkMutationPayloadSnapshot(mutationContext, effectivePayload);')
+      && acceptRouteBlock.includes("executeDocumentOperationAsync(slug, 'POST', '/marks/accept', effectivePayload, effectiveMutationContext)")
       && acceptRouteBlock.includes('if (!keepRewriteLockCooldown) {')
       && acceptRouteBlock.includes('releaseRewriteLockImmediately(slug);')
       && acceptRouteBlock.includes('void notifyCollabMutation(')
@@ -289,7 +291,7 @@ function run(): void {
       && acceptRouteBlock.includes('sendMutationResponse(res, 202, result.body, { route: mutationRoute, slug });')
       && acceptRouteBlock.includes('await invalidateLoadedCollabDocumentAndWait(slug);')
       && !acceptRouteBlock.includes("code: 'COLLAB_SYNC_FAILED'"),
-    'Expected /marks/accept to return canonical success immediately with pending collab status, then verify/invalidate in the background instead of blocking on post-commit drift checks',
+    'Expected /marks/accept to remap stale single-mark targets onto the current snapshot, return canonical success immediately with pending collab status, then verify/invalidate in the background instead of blocking on post-commit drift checks',
   );
 
   const rejectRouteBlock = sliceBetween(
@@ -299,11 +301,13 @@ function run(): void {
   );
   assert(
     rejectRouteBlock.includes('acquireRewriteLock(slug);')
-      && rejectRouteBlock.includes('const effectiveMutationContext = overlayMarkMutationPayloadSnapshot(mutationContext, payload);')
+      && rejectRouteBlock.includes('const effectivePayload = rewriteMarkMutationPayloadSnapshotTargets(payload, parseCanonicalMarks(mutationContext.doc.marks));')
+      && rejectRouteBlock.includes('const effectiveMutationContext = overlayMarkMutationPayloadSnapshot(mutationContext, effectivePayload);')
+      && rejectRouteBlock.includes("executeDocumentOperationAsync(slug, 'POST', '/marks/reject', effectivePayload, effectiveMutationContext)")
       && rejectRouteBlock.includes('if (!keepRewriteLockCooldown) {')
       && rejectRouteBlock.includes('releaseRewriteLockImmediately(slug);')
       && rejectRouteBlock.includes("details: 'suggestion.reject'"),
-    'Expected /marks/reject to overlay the client mark snapshot and hold the rewrite lock long enough to block stale collab writes during share review rejection',
+    'Expected /marks/reject to remap stale single-mark targets onto the current snapshot before overlaying it, and to hold the rewrite lock long enough to block stale collab writes during share review rejection',
   );
 
   const asyncFallbackAcceptBlock = sliceBetween(

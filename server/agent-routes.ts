@@ -47,6 +47,7 @@ import {
   type AsyncDocumentMutationContext,
   type EngineExecutionResult,
 } from './document-engine.js';
+import { rewriteMarkMutationPayloadSnapshotTargets } from './mark-mutation-snapshot-targets.js';
 import {
   recordAgentMutation,
   recordCollabRouteLatency,
@@ -3545,12 +3546,13 @@ agentRoutes.post('/:slug/marks/accept', async (req: Request, res: Response) => {
   const payload = asPayload(req.body);
   const mutationContext = await enforceMutationPrecondition(res, slug, mutationRoute, 'suggestion.accept', payload, replay);
   if (!mutationContext) return;
-  const effectiveMutationContext = overlayMarkMutationPayloadSnapshot(mutationContext, payload);
+  const effectivePayload = rewriteMarkMutationPayloadSnapshotTargets(payload, parseCanonicalMarks(mutationContext.doc.marks));
+  const effectiveMutationContext = overlayMarkMutationPayloadSnapshot(mutationContext, effectivePayload);
   let keepRewriteLockCooldown = false;
   acquireRewriteLock(slug);
   try {
-    const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/accept', payload, effectiveMutationContext);
-    maybeLogMarkHydrationMismatch(mutationRoute, slug, payload, effectiveMutationContext, result);
+    const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/accept', effectivePayload, effectiveMutationContext);
+    maybeLogMarkHydrationMismatch(mutationRoute, slug, effectivePayload, effectiveMutationContext, result);
     if (result.status >= 200 && result.status < 300) {
       keepRewriteLockCooldown = true;
       if (isRecord(result.body)) {
@@ -3694,12 +3696,13 @@ agentRoutes.post('/:slug/marks/reject', async (req: Request, res: Response) => {
   const payload = asPayload(req.body);
   const mutationContext = await enforceMutationPrecondition(res, slug, mutationRoute, 'suggestion.reject', payload, replay);
   if (!mutationContext) return;
-  const effectiveMutationContext = overlayMarkMutationPayloadSnapshot(mutationContext, payload);
+  const effectivePayload = rewriteMarkMutationPayloadSnapshotTargets(payload, parseCanonicalMarks(mutationContext.doc.marks));
+  const effectiveMutationContext = overlayMarkMutationPayloadSnapshot(mutationContext, effectivePayload);
   let keepRewriteLockCooldown = false;
   acquireRewriteLock(slug);
   try {
-    const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/reject', payload, effectiveMutationContext);
-    maybeLogMarkHydrationMismatch(mutationRoute, slug, payload, effectiveMutationContext, result);
+    const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/reject', effectivePayload, effectiveMutationContext);
+    maybeLogMarkHydrationMismatch(mutationRoute, slug, effectivePayload, effectiveMutationContext, result);
     storeIdempotentMutationResult(replay, mutationRoute, slug, result.status, result.body);
     if (result.status >= 200 && result.status < 300) {
       keepRewriteLockCooldown = true;

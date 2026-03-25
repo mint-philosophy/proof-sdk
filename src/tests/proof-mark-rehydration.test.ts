@@ -648,6 +648,73 @@ async function run(): Promise<void> {
     assert(authoredRejectFixture.beforeId in authoredRejectedMarks, 'Expected authored preservation reject to keep the leading authored mark id');
     assert(authoredRejectFixture.afterId in authoredRejectedMarks, 'Expected authored preservation reject to keep the trailing authored mark id');
 
+    const staleCollapsedRejectSlug = `rehydrate-stale-collapsed-reject-${Math.random().toString(36).slice(2, 10)}`;
+    const staleCollapsedPersistedMarkdown = '# Untitled\n\nBaseline.\n\n\n\n\n\n<span data-proof="suggestion" data-id="m1774457277970_3" data-by="human:Anonymous" data-kind="insert">TC two.</span>\n';
+    const staleCollapsedSnapshotMarkdown = '# Untitled\n\nBaseline.\n\nTC two.\n';
+    const staleCollapsedMarks = {
+      m1774457277970_3: {
+        kind: 'insert',
+        by: 'human:Anonymous',
+        createdAt: '2026-03-25T16:47:57.970Z',
+        status: 'pending',
+        content: 'TC two.',
+        range: { from: 22, to: 22 },
+        startRel: 'char:19',
+        endRel: 'char:26',
+        quote: 'TC two.',
+      } satisfies StoredMark,
+    };
+    db.createDocument(
+      staleCollapsedRejectSlug,
+      staleCollapsedPersistedMarkdown,
+      staleCollapsedMarks as Record<string, StoredMark>,
+      'Stale collapsed reject snapshot regression',
+    );
+    const staleCollapsedRejectDoc = db.getDocumentBySlug(staleCollapsedRejectSlug);
+    assert(staleCollapsedRejectDoc, 'Expected stale collapsed reject doc to exist');
+    const staleCollapsedRejectResult = await executeDocumentOperationAsync(
+      staleCollapsedRejectSlug,
+      'POST',
+      '/marks/reject',
+      {
+        markId: 'm1774457277970_3',
+        by: 'human:Anonymous',
+        markdown: staleCollapsedSnapshotMarkdown,
+        marks: staleCollapsedMarks,
+        baseRevision: staleCollapsedRejectDoc!.revision,
+      },
+      {
+        doc: staleCollapsedRejectDoc!,
+        mutationBase: {
+          token: 'mt1:stale-collapsed-reject',
+          source: 'live_yjs',
+          schemaVersion: 'mt1',
+          markdown: staleCollapsedSnapshotMarkdown,
+          marks: staleCollapsedMarks as Record<string, unknown>,
+          accessEpoch: 1,
+        },
+        precondition: { mode: 'revision', baseRevision: staleCollapsedRejectDoc!.revision },
+        preserveMutationBaseDocument: true,
+        enforceProjectionReadiness: true,
+      },
+    );
+    assertEqual(
+      staleCollapsedRejectResult.status,
+      200,
+      `Expected stale collapsed reject snapshot to succeed even while projection readiness is temporarily false, got ${staleCollapsedRejectResult.status}`,
+    );
+    const staleCollapsedRejectedDoc = db.getDocumentBySlug(staleCollapsedRejectSlug);
+    assertEqual(
+      stripAllProofSpanTags(staleCollapsedRejectedDoc?.markdown ?? '').trim(),
+      '# Untitled\n\nBaseline.',
+      'Expected stale collapsed reject snapshot to remove the remaining insert instead of failing hydration',
+    );
+    assertEqual(
+      Object.keys(parseStoredMarks(staleCollapsedRejectedDoc?.marks)).length,
+      0,
+      'Expected stale collapsed reject snapshot to clear the surviving pending suggestion metadata',
+    );
+
     console.log('✓ proof mark rehydration repairs legacy accept/reject/add-accepted and nested repair flows');
   } finally {
     try {

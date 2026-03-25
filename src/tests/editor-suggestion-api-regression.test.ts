@@ -22,8 +22,10 @@ function run(): void {
 
   assert(
     agentRoutesSource.includes('preserveMutationBaseDocument: true,')
+      && documentEngineSource.includes('context?.mutationBase')
+      && documentEngineSource.includes('|| context.preserveMutationBaseDocument')
       && documentEngineSource.includes('if (context?.mutationBase && !context.preserveMutationBaseDocument) {'),
-    'Expected snapshot-overlaid mark mutations to preserve the client markdown through async hydration instead of swapping back to persisted proof-span markdown',
+    'Expected snapshot-overlaid mark mutations to preserve the client markdown through async hydration, including through temporary projection-readiness gates, instead of swapping back to persisted proof-span markdown',
   );
 
   const acceptSuggestionBlock = sliceBetween(editorSource, '  acceptSuggestion(id: string): boolean {', '\n  /**');

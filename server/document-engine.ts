@@ -149,7 +149,10 @@ function getMutationReadyDocument(
 ):
   | { doc: MutationReadyDocument; error: null }
   | { doc: null; error: EngineExecutionResult } {
-  if (context?.mutationBase && !context.enforceProjectionReadiness) {
+  if (
+    context?.mutationBase
+    && (!context.enforceProjectionReadiness || context.preserveMutationBaseDocument)
+  ) {
     return { doc: context.doc, error: null };
   }
   const doc = context?.doc ?? getCanonicalReadableDocument(slug);
@@ -183,7 +186,10 @@ async function getMutationReadyDocumentAsync(
     | { doc: MutationReadyDocument; error: null }
     | { doc: null; error: EngineExecutionResult }
   > {
-  if (context?.mutationBase && !context.enforceProjectionReadiness) {
+  if (
+    context?.mutationBase
+    && (!context.enforceProjectionReadiness || context.preserveMutationBaseDocument)
+  ) {
     return { doc: context.doc, error: null };
   }
   let doc = context?.doc

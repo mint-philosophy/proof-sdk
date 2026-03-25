@@ -585,6 +585,7 @@ function buildTextPreservingInsertPersistenceTransaction(
     oldChangedRange.to,
   );
   if (oldInsertIds.length === 0) return null;
+  const oldInsertIdSet = new Set(oldInsertIds);
 
   const authoredType = newState.schema.marks.proofAuthored ?? null;
   const oldMetadata = getMarkMetadata(oldState);
@@ -604,6 +605,23 @@ function buildTextPreservingInsertPersistenceTransaction(
     const kind = metadata[id]?.kind;
     if (kind !== 'delete' && kind !== 'replace') continue;
     const range = resolveLiveSuggestionRange(newState.doc, id, kind);
+    if (range) {
+      tr = tr.removeMark(range.from, range.to, suggestionType);
+    }
+    if (metadata[id]) {
+      delete metadata[id];
+      metadataChanged = true;
+    }
+  }
+
+  const spuriousInsertIds = collectSuggestionIdsInRange(
+    newState.doc,
+    'insert',
+    newChangedRange.from,
+    newChangedRange.to,
+  ).filter((id) => !oldInsertIdSet.has(id));
+  for (const id of spuriousInsertIds) {
+    const range = resolveLiveSuggestionRange(newState.doc, id, 'insert');
     if (range) {
       tr = tr.removeMark(range.from, range.to, suggestionType);
     }

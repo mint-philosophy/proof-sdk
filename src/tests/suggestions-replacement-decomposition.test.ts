@@ -256,6 +256,88 @@ function run(): void {
   });
   assertEqual(repairedPauseAuthoredCount, 0, 'Pause rewrite fallback should strip authored marks from the restored insert range');
 
+  state = createState({ from: 18, to: 18 });
+  for (const char of 'TC para one from A.') {
+    const pos = state.selection.from;
+    state = state.apply(wrapTransactionForSuggestions(state.tr.insertText(char, pos, pos), state, true));
+  }
+  const splitGapOriginalInsert = getMarks(state).find((mark) => mark.kind === 'insert');
+  assert(splitGapOriginalInsert?.range, 'Expected original tracked insert before split-gap rewrite');
+  const splitGapOriginalMetadata = {
+    ...((marksPluginKey.getState(state) as { metadata?: Record<string, unknown> } | undefined)?.metadata ?? {}),
+  };
+  const splitGapOriginalId = splitGapOriginalInsert.id;
+  const splitGapText = 'TC para one from A.';
+  const splitGapSecondId = 'split-gap-second-insert';
+  const splitGapState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha beta gamma.'),
+        schema.text('TC', [schema.marks.proofSuggestion.create({
+          id: splitGapOriginalId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+        schema.text(' '),
+        schema.text('para one from A.', [schema.marks.proofSuggestion.create({
+          id: splitGapSecondId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).apply(EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha beta gamma.'),
+        schema.text('TC', [schema.marks.proofSuggestion.create({
+          id: splitGapOriginalId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+        schema.text(' '),
+        schema.text('para one from A.', [schema.marks.proofSuggestion.create({
+          id: splitGapSecondId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      ...splitGapOriginalMetadata,
+      [splitGapSecondId]: {
+        kind: 'insert',
+        by: 'unknown',
+        createdAt: '2026-03-25T00:00:00.000Z',
+        status: 'pending',
+        content: 'para one from A.',
+        range: { from: 21, to: 37 },
+      },
+    },
+  }));
+  assertEqual(
+    splitGapState.doc.textContent,
+    state.doc.textContent,
+    'Split-gap fixture should preserve the same plain text while fragmenting the insert suggestion into two ids plus a bare space',
+  );
+  const splitGapPersistenceFallbackTr = __debugBuildTextPreservingInsertPersistenceTransaction(state, splitGapState);
+  assert(splitGapPersistenceFallbackTr, 'Expected text-preserving rewrite fallback to merge a split insert gap back into the original suggestion');
+  const repairedSplitGapState = splitGapState.apply(splitGapPersistenceFallbackTr!);
+  const repairedSplitGapInsertMarks = getMarks(repairedSplitGapState).filter((mark) => mark.kind === 'insert');
+  assertEqual(repairedSplitGapInsertMarks.length, 1, 'Split-gap rewrite fallback should leave a single insert suggestion');
+  assertEqual(repairedSplitGapInsertMarks[0]?.id, splitGapOriginalId, 'Split-gap rewrite fallback should preserve the original insert mark id');
+  assertEqual(
+    (repairedSplitGapInsertMarks[0]?.data as InsertData | undefined)?.content,
+    splitGapText,
+    'Split-gap rewrite fallback should restore the full insert content including the space',
+  );
+
   const originalDateNow = Date.now;
   let now = 1_700_000_000_000;
   Date.now = () => now;

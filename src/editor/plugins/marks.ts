@@ -15,6 +15,11 @@ import type { Node as ProseMirrorNode, MarkType } from '@milkdown/kit/prose/mode
 import { ySyncPluginKey } from 'y-prosemirror';
 import { buildTextIndex, getTextForRange, mapTextOffsetsToRange, resolveQuoteRange } from '../utils/text-range';
 import { SHARE_CONTENT_FILTER_ALLOW_META } from './share-content-filter';
+import {
+  collectSuggestionSegments,
+  getSuggestionClusterRangeFromSegments,
+  getSuggestionTextFromSegments,
+} from './suggestion-boundaries';
 
 import {
   type Mark,
@@ -1834,6 +1839,71 @@ export function mergePendingServerMarks(
   return canonicalizeStoredMarks(merged);
 }
 
+function collectSuggestionMarkRemovalsById(
+  doc: ProseMirrorNode,
+  id: string,
+  kind: 'insert' | 'delete' | 'replace',
+): Array<{ from: number; to: number; mark: { type: MarkType; attrs: Record<string, unknown> } }> {
+  const removals: Array<{ from: number; to: number; mark: { type: MarkType; attrs: Record<string, unknown> } }> = [];
+  const seen = new Set<string>();
+
+  doc.descendants((node, pos) => {
+    if (!node.isText) return true;
+    for (const mark of node.marks) {
+      if (mark.type.name !== MARK_TYPE_NAMES.suggestion) continue;
+      if (mark.attrs.id !== id) continue;
+      if (normalizeSuggestionKind(mark.attrs.kind as string | null | undefined) !== kind) continue;
+      const key = `${pos}:${pos + node.nodeSize}:${id}:${kind}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      removals.push({
+        from: pos,
+        to: pos + node.nodeSize,
+        mark: mark as { type: MarkType; attrs: Record<string, unknown> },
+      });
+    }
+    return true;
+  });
+
+  return removals;
+}
+
+function getExpectedPendingInsertText(
+  doc: ProseMirrorNode,
+  stored: StoredMark,
+  range: MarkRange,
+): string {
+  const content = typeof stored.content === 'string' ? normalizeQuote(stored.content) : '';
+  if (content) return content;
+  const quote = typeof stored.quote === 'string' ? normalizeQuote(stored.quote) : '';
+  if (quote) return quote;
+  return normalizeQuote(getTextForRange(doc, range));
+}
+
+function resolveBrokenPendingInsertAnchorRange(
+  doc: ProseMirrorNode,
+  id: string,
+  stored: StoredMark,
+): MarkRange | null {
+  if (stored.kind !== 'insert' || stored.status === 'accepted' || stored.status === 'rejected') {
+    return null;
+  }
+
+  const desiredRange = resolveStoredMarkRange(doc, stored);
+  if (!desiredRange) return null;
+
+  const liveSegments = collectSuggestionSegments(doc, id, 'insert');
+  if (liveSegments.length === 0) return desiredRange;
+
+  const liveRange = getSuggestionClusterRangeFromSegments(liveSegments);
+  const liveText = normalizeQuote(getSuggestionTextFromSegments(liveSegments) ?? '');
+  const expectedText = getExpectedPendingInsertText(doc, stored, desiredRange);
+  const rangeMismatch = !liveRange || liveRange.from !== desiredRange.from || liveRange.to !== desiredRange.to;
+  const textMismatch = expectedText.length > 0 && liveText !== expectedText;
+
+  return rangeMismatch || textMismatch ? desiredRange : null;
+}
+
 export function buildCanonicalShareMarkMetadata(
   state: EditorState,
   metadata?: Record<string, StoredMark>,
@@ -1994,6 +2064,7 @@ export function applyRemoteMarks(
   let authoredHydrationFailures = 0;
   let authoredHydrationSuppressed = 0;
   const existingMetadata = getMarkMetadata(view.state);
+  const authoredMarkType = view.state.schema.marks.proofAuthored ?? null;
 
   // Merge with existing metadata so we don't lose local marks.
   // For tombstoned comment marks, we merge metadata (replies, thread, etc.)
@@ -2046,6 +2117,26 @@ export function applyRemoteMarks(
 
   if (hydrateAnchors) {
     for (const [id, stored] of filteredEntries) {
+      const brokenPendingInsertRange = resolveBrokenPendingInsertAnchorRange(tr.doc, id, stored);
+      if (brokenPendingInsertRange) {
+        const suggestionMarkType = getMarkTypeForKind(view.state, 'insert');
+        if (suggestionMarkType) {
+          const removals = collectSuggestionMarkRemovalsById(tr.doc, id, 'insert');
+          for (const removal of removals) {
+            tr = tr.removeMark(removal.from, removal.to, removal.mark);
+          }
+          if (authoredMarkType) {
+            tr = tr.removeMark(brokenPendingInsertRange.from, brokenPendingInsertRange.to, authoredMarkType);
+          }
+          tr = tr.addMark(
+            brokenPendingInsertRange.from,
+            brokenPendingInsertRange.to,
+            suggestionMarkType.create({ id, by: stored.by || 'unknown', kind: 'insert' }),
+          );
+          clearMarkAnchorHydrationFailure(id);
+          continue;
+        }
+      }
       if (existingIds.has(id)) continue; // Already has an anchor
       if (!stored.kind) continue;
       const isAuthored = stored.kind === 'authored';

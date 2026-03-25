@@ -592,6 +592,142 @@ test('applyRemoteMarks ignores mismatched relative anchors and falls back to quo
   assertEqual(anchoredText, 'beta', 'Quote fallback should anchor to the quoted text');
 });
 
+test('applyRemoteMarks repairs fragmented pending insert anchors on collab peers', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'text*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'insert' },
+          by: { default: 'unknown' },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      proofAuthored: {
+        attrs: {
+          by: { default: 'human:unknown' },
+          id: { default: null },
+        },
+        inclusive: true,
+        excludes: 'proofAuthored',
+        spanning: true,
+      },
+    },
+  });
+
+  const insertId = 'm-collab-fragmented-insert';
+  const fullText = 'Collab peer TC with track changes enabled in window B.';
+  const insertMark = schema.marks.proofSuggestion.create({ id: insertId, kind: 'insert', by: 'human:test' });
+  const authoredMark = schema.marks.proofAuthored.create({ by: 'human:test' });
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({
+        metadata: {
+          [insertId]: {
+            kind: 'insert' as const,
+            by: 'human:test',
+            createdAt: new Date('2026-03-25T00:00:00.000Z').toISOString(),
+            status: 'pending' as const,
+            content: fullText,
+            quote: fullText,
+            range: { from: 1, to: fullText.length + 1 },
+          },
+        },
+        activeMarkId: null,
+      }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('C', [insertMark]),
+        schema.text('ol', [authoredMark]),
+        schema.text('lab peer TC with track changes enabled in window B.', [insertMark]),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  });
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  applyRemoteMarks(view, {
+    [insertId]: {
+      kind: 'insert',
+      by: 'human:test',
+      createdAt: new Date('2026-03-25T00:00:00.000Z').toISOString(),
+      status: 'pending',
+      content: fullText,
+      quote: fullText,
+      range: { from: 1, to: fullText.length + 1 },
+    },
+  }, { hydrateAnchors: true });
+
+  const marksAfter = getMarks(state);
+  const repairedInsert = marksAfter.find((mark) => mark.id === insertId);
+  assert(repairedInsert, 'Expected fragmented collab insert to remain actionable after remote apply');
+  assertDeepEqual(
+    repairedInsert!.range,
+    { from: 1, to: fullText.length + 1 },
+    'Expected remote apply to restore the full pending insert range instead of leaving a suffix-only fragment',
+  );
+  assertEqual(
+    (repairedInsert!.data as InsertData | undefined)?.content,
+    fullText,
+    'Expected repaired insert metadata to preserve the full tracked text',
+  );
+
+  const suggestionNodes: string[] = [];
+  const authoredNodes: string[] = [];
+  state.doc.descendants((node) => {
+    if (!node.isText) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofSuggestion' && mark.attrs.id === insertId)) {
+      suggestionNodes.push(node.text ?? '');
+    }
+    if (node.marks.some((mark) => mark.type.name === 'proofAuthored')) {
+      authoredNodes.push(node.text ?? '');
+    }
+    return true;
+  });
+
+  assertEqual(
+    suggestionNodes.join(''),
+    fullText,
+    'Expected repaired collab insert anchor to cover the full text, including the previously authored prefix fragment',
+  );
+  assertEqual(
+    authoredNodes.join(''),
+    '',
+    'Expected remote repair to strip authored marks from the repaired pending insert range',
+  );
+});
+
 test('applyRemoteMarks reanchors authored marks from relative anchors when quote is missing', () => {
   const markId = 'authored:human:michael:stale-range';
   const authoredSchema = new Schema({

@@ -21,6 +21,7 @@ async function run(): Promise<void> {
   const requests: FetchRecord[] = [];
   let stateReads = 0;
   let delayedAcceptAttempts = 0;
+  let delayedRejectAttempts = 0;
 
   (globalThis as { window: Record<string, unknown> }).window = {
     location: new URL('https://proof-web-staging.up.railway.app/d/test-doc?token=share-token'),
@@ -72,6 +73,18 @@ async function run(): Promise<void> {
     if (url.pathname === '/api/agent/test-doc/marks/accept-all') {
       return jsonResponse({ success: true, marks: {}, markdown: 'Accepted all canonical markdown' });
     }
+    if (url.pathname === '/api/agent/test-doc/marks/reject' && body?.markId === 'mark-reject-delayed') {
+      delayedRejectAttempts += 1;
+      if (delayedRejectAttempts < 2) {
+        return jsonResponse({
+          success: false,
+          code: 'LIVE_DOC_UNAVAILABLE',
+          error: 'Live canonical document is unavailable on this hosted replica; retry after refreshing state',
+          retryWithState: '/api/agent/test-doc/state',
+        }, 409);
+      }
+      return jsonResponse({ success: true, marks: {}, markdown: 'Delayed rejected canonical markdown' });
+    }
     if (url.pathname === '/api/documents/test-doc/open-context') {
       return jsonResponse({
         success: true,
@@ -84,6 +97,14 @@ async function run(): Promise<void> {
               kind: 'insert',
               status: delayedAcceptAttempts >= 3 ? 'accepted' : 'pending',
             },
+            ...(delayedRejectAttempts < 2
+              ? {
+                  'mark-reject-delayed': {
+                    kind: 'insert',
+                    status: 'pending',
+                  },
+                }
+              : {}),
           },
           updatedAt: '2026-03-06T00:00:09.000Z',
         },
@@ -138,6 +159,18 @@ async function run(): Promise<void> {
       (reject && 'error' in reject) ? undefined : reject?.markdown,
       'Rejected canonical markdown',
       'rejectSuggestion should fall back to content when markdown is returned under the legacy key',
+    );
+
+    const delayedReject = await shareClient.rejectSuggestion('mark-reject-delayed', 'human:editor');
+    assert.equal(
+      (delayedReject && 'error' in delayedReject) ? false : delayedReject?.success,
+      true,
+      'rejectSuggestion should refresh state and retry when the server reports LIVE_DOC_UNAVAILABLE',
+    );
+    assert.equal(
+      (delayedReject && 'error' in delayedReject) ? undefined : delayedReject?.markdown,
+      'Delayed rejected canonical markdown',
+      'rejectSuggestion should return the eventual canonical markdown after LIVE_DOC_UNAVAILABLE retries',
     );
 
     const delayedAccept = await shareClient.acceptSuggestion('mark-accept-delayed', 'human:editor');
@@ -237,6 +270,11 @@ async function run(): Promise<void> {
       },
       'rejectSuggestion should send the caller-provided mark snapshot for single-mark reject',
     );
+    assert.equal(
+      requests.filter((request) => request.path === '/api/agent/test-doc/marks/reject' && request.body?.markId === 'mark-reject-delayed').length,
+      2,
+      'rejectSuggestion should retry LIVE_DOC_UNAVAILABLE after refreshing the latest state',
+    );
     assert.ok(
       acceptAllRequest?.headers.get('Idempotency-Key'),
       'acceptSuggestions should send an Idempotency-Key header when the server requires idempotent mutations',
@@ -264,9 +302,16 @@ async function run(): Promise<void> {
       43,
       'rejectSuggestion should continue reading the latest base state after prior mark mutations, including batch accept',
     );
+    const delayedRejectRequest = requests.find((request) =>
+      request.path === '/api/agent/test-doc/marks/reject' && request.body?.markId === 'mark-reject-delayed');
+    assert.equal(
+      delayedRejectRequest?.body?.baseRevision,
+      44,
+      'LIVE_DOC_UNAVAILABLE rejectSuggestion should start from the refreshed baseRevision before retrying',
+    );
     assert.equal(
       acceptAllRequest?.body?.baseRevision,
-      47,
+      50,
       'acceptSuggestions should include the latest refreshed baseRevision',
     );
     assert.notEqual(
@@ -276,13 +321,13 @@ async function run(): Promise<void> {
     );
 
     const resolveRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/resolve');
-    assert.equal(resolveRequest?.body?.baseRevision, 48, 'resolveComment should include the latest refreshed baseRevision after transient accept retries and batch accept');
+    assert.equal(resolveRequest?.body?.baseRevision, 51, 'resolveComment should include the latest refreshed baseRevision after transient accept/reject retries and batch accept');
 
     const unresolveRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/unresolve');
-    assert.equal(unresolveRequest?.body?.baseRevision, 49, 'unresolveComment should continue reading the latest baseRevision after prior retries');
+    assert.equal(unresolveRequest?.body?.baseRevision, 52, 'unresolveComment should continue reading the latest baseRevision after prior retries');
 
     const stateRequestCount = requests.filter((request) => request.path === '/api/agent/test-doc/state').length;
-    assert.equal(stateRequestCount, 9, 'share mark mutations should keep refreshing the mutation base across retries and batch accept');
+    assert.equal(stateRequestCount, 12, 'share mark mutations should keep refreshing the mutation base across LIVE_DOC_UNAVAILABLE retries and batch accept');
 
     console.log('share-client-mark-preconditions.test.ts passed');
   } finally {

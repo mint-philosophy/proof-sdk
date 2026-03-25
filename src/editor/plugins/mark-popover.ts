@@ -581,6 +581,7 @@ class MarkPopoverController {
   private suggestionReviewTransitionPending: boolean = false;
   private suggestionRailSignature: string = '';
   private reviewActionSequence: number = 0;
+  private reviewActionInFlight: boolean = false;
   private reviewActionErrorMarkId: string | null = null;
   private reviewActionErrorMessage: string | null = null;
 
@@ -1298,6 +1299,9 @@ class MarkPopoverController {
     _suggestionKind: 'insert' | 'delete' | 'replace',
     options?: { followupMode?: 'advance' | 'close' },
   ): void {
+    if (this.reviewActionInFlight) {
+      return;
+    }
     this.clearReviewActionRetryTimer();
     this.hideReviewContextMenu();
     this.clearReviewActionError(markId);
@@ -1345,6 +1349,7 @@ class MarkPopoverController {
     };
 
     const finish = (): void => {
+      this.reviewActionInFlight = false;
       this.clearReviewActionRetryTimer();
       this.clearReviewActionError(markId);
       if (options?.followupMode === 'close') {
@@ -1367,6 +1372,7 @@ class MarkPopoverController {
         ? (targetMarkId: string) => proof.markRejectPersisted(targetMarkId)
         : null);
     if (persistedActionForMark) {
+      this.reviewActionInFlight = true;
       // Persist first in share mode. Optimistic local accepts can race the server and
       // turn valid accepts into "Mark not found" responses, especially for deletions.
       const allowOptimisticAccept = false;
@@ -1396,8 +1402,12 @@ class MarkPopoverController {
         return true;
       };
       void runPersistedSequence().then((success) => {
-        if (this.reviewActionSequence !== reviewActionSequence) return;
+        if (this.reviewActionSequence !== reviewActionSequence) {
+          this.reviewActionInFlight = false;
+          return;
+        }
         if (!success) {
+          this.reviewActionInFlight = false;
           this.suggestionReviewTransitionPending = false;
           const reviewFailureMessage = this.setReviewActionError(markId, action);
           if (!optimisticApplied) {
@@ -1414,7 +1424,11 @@ class MarkPopoverController {
       }).catch((error) => {
         console.error('[mark-popover] Persisted review action failed:', error);
         const reviewFailureMessage = this.setReviewActionError(markId, action, error);
-        if (this.reviewActionSequence !== reviewActionSequence) return;
+        if (this.reviewActionSequence !== reviewActionSequence) {
+          this.reviewActionInFlight = false;
+          return;
+        }
+        this.reviewActionInFlight = false;
         this.suggestionReviewTransitionPending = false;
         if (!optimisticApplied) {
           setReviewButtonsBusy(false);
@@ -1425,6 +1439,7 @@ class MarkPopoverController {
       return;
     }
 
+    this.reviewActionInFlight = true;
     const attempt = (remainingRetries: number): void => {
       const pendingIds = this.getSortedPendingReviewActionIds(reviewedMarkIds);
       if (pendingIds.length === 0) {
@@ -1438,6 +1453,7 @@ class MarkPopoverController {
       }
 
       if (remainingRetries <= 0) {
+        this.reviewActionInFlight = false;
         const reviewFailureMessage = this.setReviewActionError(markId, action);
         this.openForMark(markId, undefined, { source: 'direct' });
         proof?.reportReviewActionFailure?.(reviewFailureMessage, { reopenMarkId: markId });

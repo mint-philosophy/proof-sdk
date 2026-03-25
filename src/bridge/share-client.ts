@@ -83,6 +83,7 @@ export type ShareRequestError = {
     message: string;
     retryAfterMs?: number | null;
     requestId?: string | null;
+    retryWithState?: string | null;
   };
 };
 
@@ -326,6 +327,7 @@ export class ShareClient {
       error?: unknown;
       code?: unknown;
       retryAfterMs?: unknown;
+      retryWithState?: unknown;
     },
   ): ShareRequestError {
     const code = typeof body.code === 'string' && body.code.trim().length > 0
@@ -337,6 +339,9 @@ export class ShareClient {
     const retryAfterMs = typeof body.retryAfterMs === 'number' && Number.isFinite(body.retryAfterMs)
       ? Math.max(0, Math.trunc(body.retryAfterMs))
       : null;
+    const retryWithState = typeof body.retryWithState === 'string' && body.retryWithState.trim().length > 0
+      ? body.retryWithState.trim()
+      : null;
     return {
       error: {
         status,
@@ -344,6 +349,7 @@ export class ShareClient {
         message,
         retryAfterMs,
         requestId,
+        retryWithState,
       },
     };
   }
@@ -410,14 +416,32 @@ export class ShareClient {
     return code === 'STALE_BASE'
       || code === 'PROJECTION_STALE'
       || code === 'AUTHORITATIVE_BASE_UNAVAILABLE'
+      || code === 'LIVE_DOC_UNAVAILABLE'
       || code === 'MARK_NOT_FOUND'
       || code === 'MARK_NOT_HYDRATED'
       || code === 'COLLAB_SYNC_FAILED'
       || message.includes('stale')
+      || message.includes('live canonical document is unavailable')
       || message.includes('shadow')
       || message.includes('projection')
       || message.includes('mutation base')
       || message.includes('not found');
+  }
+
+  private async refreshMutationBaseFromRequestError(
+    error: ShareRequestError,
+    options?: { token?: string },
+  ): Promise<void> {
+    const retryWithState = error.error.retryWithState?.trim();
+    if (!retryWithState || !this.slug) return;
+    const response = await fetch(`${this.getApiBase()}${retryWithState.replace(/^\/api/, '')}`, {
+      method: 'GET',
+      headers: this.getShareAuthHeaders(options?.token),
+    }).catch(() => null);
+    if (!response || !response.ok) return;
+    const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+    this.rememberObservedDocument(payload);
+    this.rememberObservedMutationBase(payload);
   }
 
   private resolveRecoveredMarkMutation(
@@ -538,6 +562,7 @@ export class ShareClient {
           return result;
         }
         lastError = result;
+        await this.refreshMutationBaseFromRequestError(result, args.options);
       }
 
       const recovered = this.resolveRecoveredMarkMutation(
@@ -548,7 +573,7 @@ export class ShareClient {
       if (recovered) return recovered;
 
       if (attempt < (MARK_MUTATION_RETRY_ATTEMPTS - 1)) {
-        await sleep(MUTATION_BASE_STATE_RETRY_DELAY_MS);
+        await sleep(lastError?.error.retryAfterMs ?? MUTATION_BASE_STATE_RETRY_DELAY_MS);
       }
     }
 
@@ -613,10 +638,11 @@ export class ShareClient {
           return result;
         }
         lastError = result;
+        await this.refreshMutationBaseFromRequestError(result, args.options);
       }
 
       if (attempt < (MARK_MUTATION_RETRY_ATTEMPTS - 1)) {
-        await sleep(MUTATION_BASE_STATE_RETRY_DELAY_MS);
+        await sleep(lastError?.error.retryAfterMs ?? MUTATION_BASE_STATE_RETRY_DELAY_MS);
       }
     }
 

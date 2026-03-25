@@ -56,6 +56,14 @@ function run(): void {
   );
 
   assert(
+    source.includes('private reviewActionInFlight: boolean = false;')
+      && source.includes('if (this.reviewActionInFlight) {')
+      && source.includes('this.reviewActionInFlight = true;')
+      && source.includes('this.reviewActionInFlight = false;'),
+    'Expected review actions to guard against duplicate dispatch while a persisted accept/reject is already in flight',
+  );
+
+  assert(
     source.includes("if (!options?.preserveReviewTransition && this.suggestionReviewFollowupTimer !== null) {")
       && source.includes('if (!options?.preserveReviewTransition) {')
       && source.includes("preserveReviewTransition?: boolean;"),

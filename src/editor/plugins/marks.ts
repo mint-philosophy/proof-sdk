@@ -1898,7 +1898,19 @@ function resolveBrokenPendingInsertAnchorRange(
 
   const liveRange = getSuggestionClusterRangeFromSegments(liveSegments);
   const liveText = normalizeQuote(getSuggestionTextFromSegments(liveSegments) ?? '');
+  const visibleLiveText = liveRange ? normalizeQuote(getTextForRange(doc, liveRange)) : liveText;
   const expectedText = getExpectedPendingInsertText(doc, stored, desiredRange);
+  if (
+    liveRange
+    && expectedText.length > 0
+    && visibleLiveText.length > expectedText.length
+    && (
+      (liveRange.from === desiredRange.from && visibleLiveText.startsWith(expectedText))
+      || (liveRange.to === desiredRange.to && visibleLiveText.endsWith(expectedText))
+    )
+  ) {
+    return null;
+  }
   const rangeMismatch = !liveRange || liveRange.from !== desiredRange.from || liveRange.to !== desiredRange.to;
   const textMismatch = expectedText.length > 0 && liveText !== expectedText;
 

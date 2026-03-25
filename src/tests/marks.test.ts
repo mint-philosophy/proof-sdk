@@ -828,6 +828,94 @@ test('applyRemoteMarks does not collapse healthy live inserts to a canonical sha
   );
 });
 
+test('applyRemoteMarks does not collapse a healthy live insert when stale remote metadata lags behind local growth', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'text*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'insert' },
+          by: { default: 'unknown' },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+    },
+  });
+
+  const insertId = 'm-stale-growth-insert';
+  const fullText = 'TC para one from A.';
+  const insertMark = schema.marks.proofSuggestion.create({ id: insertId, kind: 'insert', by: 'human:test' });
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text(fullText, [insertMark])]),
+    ]),
+    plugins: [marksStatePlugin],
+  });
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  applyRemoteMarks(view, {
+    [insertId]: {
+      kind: 'insert',
+      by: 'human:test',
+      createdAt: new Date('2026-03-25T00:00:00.000Z').toISOString(),
+      status: 'pending',
+      content: 'TC',
+      range: { from: 1, to: 1 },
+      startRel: undefined,
+      endRel: undefined,
+      quote: undefined,
+    },
+  }, { hydrateAnchors: true });
+
+  const suggestionNodes: string[] = [];
+  state.doc.descendants((node) => {
+    if (!node.isText) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofSuggestion' && mark.attrs.id === insertId)) {
+      suggestionNodes.push(node.text ?? '');
+    }
+    return true;
+  });
+
+  assertEqual(
+    suggestionNodes.join(''),
+    fullText,
+    'Expected stale remote insert metadata to leave the locally grown live insert span intact',
+  );
+});
+
 test('applyRemoteMarks reanchors authored marks from relative anchors when quote is missing', () => {
   const markId = 'authored:human:michael:stale-range';
   const authoredSchema = new Schema({

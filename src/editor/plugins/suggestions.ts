@@ -19,7 +19,7 @@ import {
   syncInsertSuggestionMetadataFromDoc,
 } from './suggestion-boundaries';
 import { shouldSuppressTrackChangesDeleteIntent, shouldSuppressTrackChangesKeydown } from './track-changes-delete-guard.js';
-import { isYjsChangeOriginTransaction } from './transaction-origins';
+import { isExplicitYjsChangeOriginTransaction } from './transaction-origins';
 import { generateMarkId, type MarkRange, type StoredMark } from '../../formats/marks';
 import { getCurrentActor } from '../actor';
 
@@ -931,7 +931,7 @@ export function wrapTransactionForSuggestions(
   if (!enabled || !tr.docChanged) {
     return tr;
   }
-  if (isYjsChangeOriginTransaction(tr)) {
+  if (isExplicitYjsChangeOriginTransaction(tr)) {
     return tr;
   }
 
@@ -1610,7 +1610,7 @@ export const suggestionsPlugin = $prose(() => {
         tr.getMeta('suggestions-wrapped')
         || tr.getMeta('document-load') !== undefined
         || tr.getMeta('history$') !== undefined
-        || isYjsChangeOriginTransaction(tr)
+        || isExplicitYjsChangeOriginTransaction(tr)
       ) || hasBlockingMarksMeta) {
         return null;
       }

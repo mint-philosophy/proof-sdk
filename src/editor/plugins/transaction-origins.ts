@@ -62,6 +62,26 @@ export function getYjsTransactionOriginInfo(transaction: unknown): YjsTransactio
   };
 }
 
+export function isExplicitYjsChangeOriginTransaction(transaction: unknown): boolean {
+  const pluginMeta = (transaction as { getMeta?: (key: unknown) => unknown } | null | undefined)?.getMeta?.(ySyncPluginKey) as
+    | { isChangeOrigin?: boolean }
+    | undefined;
+  if (pluginMeta?.isChangeOrigin === true) {
+    return true;
+  }
+
+  const rawMeta = getRawMeta(transaction);
+  if (!rawMeta) return false;
+  const rawMetaKeys = Object.keys(rawMeta).filter((key) => key.startsWith('y-sync'));
+  for (const key of rawMetaKeys) {
+    const value = rawMeta[key];
+    if (value && typeof value === 'object' && (value as { isChangeOrigin?: boolean }).isChangeOrigin === true) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function isYjsChangeOriginTransaction(transaction: unknown): boolean {
   return getYjsTransactionOriginInfo(transaction).isYjsOrigin;
 }

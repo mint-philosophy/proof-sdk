@@ -4,7 +4,7 @@ import { EditorState, Plugin } from '@milkdown/kit/prose/state';
 
 import { getMarks, marksPluginKey } from '../editor/plugins/marks.js';
 import { wrapTransactionForSuggestions } from '../editor/plugins/suggestions.js';
-import { getYjsTransactionOriginInfo } from '../editor/plugins/transaction-origins.js';
+import { getYjsTransactionOriginInfo, isExplicitYjsChangeOriginTransaction } from '../editor/plugins/transaction-origins.js';
 
 const schema = new Schema({
   nodes: {
@@ -73,10 +73,15 @@ function run(): void {
   const origin = getYjsTransactionOriginInfo(echoedWithRawYjsMeta);
   assert.equal(origin.isYjsOrigin, true, 'Expected raw y-sync meta to classify as Yjs-origin even without plugin-key resolution');
   assert.equal(origin.source, 'raw-meta-key', 'Expected raw y-sync key presence to explain the origin classification');
+  assert.equal(
+    isExplicitYjsChangeOriginTransaction(echoedWithRawYjsMeta),
+    false,
+    'Expected raw y-sync meta without isChangeOrigin not to bypass Track Changes wrapping',
+  );
 
   const wrappedEcho = wrapTransactionForSuggestions(echoedWithRawYjsMeta, state, true);
-  assert.equal(wrappedEcho, echoedWithRawYjsMeta, 'Expected Yjs-origin transactions to bypass track-changes wrapping');
-  assert.equal(wrappedEcho.getMeta('suggestions-wrapped'), undefined, 'Expected raw Yjs echo transactions to skip suggestions-wrapped metadata');
+  assert.notEqual(wrappedEcho, echoedWithRawYjsMeta, 'Expected raw y-sync meta without isChangeOrigin to still be wrapped for Track Changes');
+  assert.equal(wrappedEcho.getMeta('suggestions-wrapped'), true, 'Expected raw y-sync meta without isChangeOrigin to produce suggestions-wrapped output');
 
   const echoedWithChangeOrigin = state.tr.insertText('z', state.selection.from, state.selection.from) as typeof echoed & {
     meta?: Record<string, unknown>;
@@ -86,6 +91,11 @@ function run(): void {
     'y-sync$': { isChangeOrigin: true },
   };
 
+  assert.equal(
+    isExplicitYjsChangeOriginTransaction(echoedWithChangeOrigin),
+    true,
+    'Expected explicit isChangeOrigin transactions to keep bypassing Track Changes wrapping',
+  );
   const wrappedChangeOriginEcho = wrapTransactionForSuggestions(echoedWithChangeOrigin, state, true);
   assert.equal(wrappedChangeOriginEcho, echoedWithChangeOrigin, 'Expected raw isChangeOrigin Yjs echoes to bypass track-changes wrapping');
 

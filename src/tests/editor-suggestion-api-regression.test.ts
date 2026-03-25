@@ -198,8 +198,9 @@ function run(): void {
   assert(
     suggestionsAppendTransactionBlock.includes('const hasBlockingMarksMeta = trs.some((tr) => {')
       && suggestionsAppendTransactionBlock.includes("return (meta as { type?: unknown }).type !== 'INTERNAL';")
+      && suggestionsAppendTransactionBlock.includes('|| isExplicitYjsChangeOriginTransaction(tr)')
       && !suggestionsAppendTransactionBlock.includes("|| tr.getMeta(marksPluginKey) !== undefined"),
-    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions so collab-peer composition input still falls back to tracked suggestions',
+    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions and to skip only explicit Yjs change-origin echoes',
   );
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
@@ -207,11 +208,13 @@ function run(): void {
     setupSuggestionsInterceptorBlock.includes('const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (')
       && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesSystemTransactionsDepth > 0')
       && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesDuringCollabReconnect')
+      && setupSuggestionsInterceptorBlock.includes("const isRemoteContentChange = Boolean(tr?.docChanged) && isExplicitYjsChangeOriginTransaction(tr);")
+      && setupSuggestionsInterceptorBlock.includes('if (isExplicitYjsChangeOriginTransaction(tr)) {')
       && setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined;")
       && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
-    'Expected the suggestions interceptor to pass through collab/template system transactions without treating generic addToHistory=false composition traffic as undo/redo history',
+    'Expected the suggestions interceptor to pass through collab/template system transactions, while skipping TC wrapping only for explicit Yjs change-origin echoes instead of any raw y-sync metadata',
   );
 
   const applyPendingCollabTemplateBlock = sliceBetween(editorSource, '  private applyPendingCollabTemplate(): void {', '\n  private disconnectCollabService(): void {');

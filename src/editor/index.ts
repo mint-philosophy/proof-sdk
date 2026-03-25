@@ -69,6 +69,7 @@ import {
 import {
   getYjsTransactionOriginInfo,
   isYjsChangeOriginTransaction as isRemoteYjsChangeOriginTransaction,
+  isExplicitYjsChangeOriginTransaction,
 } from './plugins/transaction-origins';
 import {
   markPopoverPlugin,
@@ -5643,7 +5644,7 @@ class ProofEditorImpl implements ProofEditor {
         const beforeSelectionFrom = beforeState.selection.from;
         const beforeSelectionEmpty = beforeState.selection.empty;
         const yjsOrigin = getYjsTransactionOriginInfo(tr);
-        const isRemoteContentChange = Boolean(tr?.docChanged) && yjsOrigin.isYjsOrigin;
+        const isRemoteContentChange = Boolean(tr?.docChanged) && isExplicitYjsChangeOriginTransaction(tr);
         const isMarksOnlyChange = tr?.getMeta?.(marksPluginKey) !== undefined;
         const isDocumentLoad = tr?.getMeta?.('document-load') !== undefined;
         const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (
@@ -5705,7 +5706,7 @@ class ProofEditorImpl implements ProofEditor {
           }
 
           // Don't intercept Yjs-origin collaborative transactions.
-          if (yjsOrigin.isYjsOrigin) {
+          if (isExplicitYjsChangeOriginTransaction(tr)) {
             clearPendingDomSuggestionSelection();
             resetSuggestionsInsertCoalescing();
             originalDispatch(tr);

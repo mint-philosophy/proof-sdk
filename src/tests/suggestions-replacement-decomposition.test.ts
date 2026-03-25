@@ -10,6 +10,7 @@ import {
   __debugBuildTextPreservingInsertPersistenceTransaction,
   __debugResolveTrackedDeleteRange,
   __debugResolveTrackedTextInputRange,
+  __debugHasActiveInsertCoalescingCandidate,
   wrapTransactionForSuggestions,
 } from '../editor/plugins/suggestions.js';
 import type { InsertData } from '../formats/marks.js';
@@ -198,6 +199,10 @@ function run(): void {
     (authoredOverlapInsert.data as InsertData | undefined)?.content,
     'TC ',
     'Wrapped tracked typing should preserve whitespace inside the pending insert metadata',
+  );
+  assert(
+    __debugHasActiveInsertCoalescingCandidate(state, state.selection.from),
+    'A tracked insert that has grown to include trailing whitespace should still register as an active coalescing candidate at the live cursor',
   );
 
   state = createState({ from: 18, to: 18 });

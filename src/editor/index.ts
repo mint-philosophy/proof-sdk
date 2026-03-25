@@ -60,6 +60,7 @@ import {
   toggleSuggestions as toggleSuggestionsPlugin,
   isSuggestionsEnabled as isSuggestionsEnabledPlugin,
   resetSuggestionsInsertCoalescing,
+  hasActiveInsertCoalescingCandidate,
   transactionCarriesInsertedSuggestionMarks,
   wrapTransactionForSuggestions,
 } from './plugins/suggestions';
@@ -5743,6 +5744,7 @@ class ProofEditorImpl implements ProofEditor {
     if (!view.hasFocus()) return false;
     if (!beforeState.selection.empty) return false;
     if ((Date.now() - this.lastLocalTypingAt) > this.collabTypingRecoveryGraceMs) return false;
+    if (hasActiveInsertCoalescingCandidate(beforeState, beforeState.selection.from)) return true;
     return carriesIncomingSuggestionMarks || isExplicitYjsChangeOriginTransaction(transaction);
   }
 

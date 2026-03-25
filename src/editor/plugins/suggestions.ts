@@ -1054,6 +1054,22 @@ export function __debugBuildAdjacentSplitInsertMergeTransaction(
   return buildAdjacentSplitInsertMergeTransaction(oldState, newState);
 }
 
+export function hasActiveInsertCoalescingCandidate(
+  state: EditorState,
+  pos: number,
+): boolean {
+  const actor = getCurrentActor();
+  const metadata = getMarkMetadata(state);
+  return getCoalescableInsertCandidate(state.doc, metadata, pos, actor, Date.now()) !== null;
+}
+
+export function __debugHasActiveInsertCoalescingCandidate(
+  state: EditorState,
+  pos: number,
+): boolean {
+  return hasActiveInsertCoalescingCandidate(state, pos);
+}
+
 function detectSelectionReplacement(
   tr: Transaction,
   state: EditorState

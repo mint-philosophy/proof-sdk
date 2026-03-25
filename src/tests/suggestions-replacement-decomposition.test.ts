@@ -566,6 +566,63 @@ function run(): void {
     'Collab chunk merge should absorb adjacent marked chunks and the short plain tail into one insert suggestion',
   );
 
+  const collabPlainPrefixState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('TC collab'),
+        schema.text(' two.', [schema.marks.proofSuggestion.create({
+          id: collabChunkSecondId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).apply(EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('TC collab'),
+        schema.text(' two.', [schema.marks.proofSuggestion.create({
+          id: collabChunkSecondId,
+          kind: 'insert',
+          by: 'unknown',
+        })]),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  }).tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      [collabChunkSecondId]: {
+        kind: 'insert',
+        by: 'unknown',
+        createdAt: new Date(Date.now() - 100).toISOString(),
+        status: 'pending',
+        content: ' two.',
+        range: { from: 10, to: 15 },
+      },
+    },
+  }));
+  const healedCollabPlainPrefixTr = __debugBuildAdjacentSplitInsertMergeTransaction(
+    collabPlainPrefixState,
+    collabPlainPrefixState,
+  );
+  assert(
+    healedCollabPlainPrefixTr,
+    'Collab split healing should pull a plain paragraph prefix back into a recent pending insert suffix',
+  );
+  const healedCollabPlainPrefixState = collabPlainPrefixState.apply(healedCollabPlainPrefixTr!);
+  const healedCollabPlainPrefixMarks = getMarks(healedCollabPlainPrefixState).filter((mark) => mark.kind === 'insert');
+  assertEqual(healedCollabPlainPrefixMarks.length, 1, 'Plain-prefix collab healing should leave one insert suggestion');
+  assertEqual(healedCollabPlainPrefixMarks[0]?.id, collabChunkSecondId, 'Plain-prefix collab healing should preserve the pending insert id');
+  assertEqual(
+    (healedCollabPlainPrefixMarks[0]?.data as InsertData | undefined)?.content,
+    'TC collab two.',
+    'Plain-prefix collab healing should restore the full paragraph text into the pending insert metadata',
+  );
+
   const crossParagraphOriginalId = 'cross-paragraph-original';
   const crossParagraphSecondId = 'cross-paragraph-second';
   const crossParagraphState = EditorState.create({

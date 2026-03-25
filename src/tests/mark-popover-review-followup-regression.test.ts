@@ -17,6 +17,15 @@ function run(): void {
   );
 
   assert(
+    source.includes('const getActiveSuggestionActionTarget = (): {')
+      && source.includes('const activeMarkId = this.activeMarkId ?? mark.id;')
+      && source.includes("nextMarkId: this.getAdjacentSuggestionMarkId(activeMark.id, 'next'),")
+      && source.includes("this.runSuggestionReviewAction(target.markId, 'reject', target.nextMarkId, target.kind, {")
+      && source.includes("this.runSuggestionReviewAction(target.markId, 'accept', target.nextMarkId, target.kind, {"),
+    'Expected review action buttons to resolve the active mark and next target at click time so a stale popover cannot keep firing the previous mark id after navigation',
+  );
+
+  assert(
     source.includes('let stableFollowupMarkId: string | null = null;')
       && source.includes('if (stableFollowupMarkId === followupMarkId || remainingAttempts <= 0) {')
       && source.includes('stableFollowupMarkId = followupMarkId;')

@@ -2622,6 +2622,22 @@ class MarkPopoverController {
     const canEdit = canEditInRuntime();
     const previousMarkId = this.getAdjacentSuggestionMarkId(mark.id, 'prev');
     const nextMarkId = this.getAdjacentSuggestionMarkId(mark.id, 'next');
+    const getActiveSuggestionActionTarget = (): {
+      markId: string;
+      nextMarkId: string | null;
+      kind: 'insert' | 'delete' | 'replace';
+    } | null => {
+      const activeMarkId = this.activeMarkId ?? mark.id;
+      const activeMark = getMarks(this.view.state).find((item) => item.id === activeMarkId);
+      if (!activeMark || (activeMark.kind !== 'insert' && activeMark.kind !== 'delete' && activeMark.kind !== 'replace')) {
+        return null;
+      }
+      return {
+        markId: activeMark.id,
+        nextMarkId: this.getAdjacentSuggestionMarkId(activeMark.id, 'next'),
+        kind: activeMark.kind,
+      };
+    };
 
     const applyButton = document.createElement('button');
     applyButton.type = 'button';
@@ -2629,7 +2645,9 @@ class MarkPopoverController {
     applyButton.title = 'Accept change and move to the next one (Shift+click to stay here, Cmd/Ctrl+Alt+A)';
     installTouchSafeButton(applyButton, (event) => {
       if (!canEdit) return;
-      this.runSuggestionReviewAction(mark.id, 'accept', nextMarkId, mark.kind, {
+      const target = getActiveSuggestionActionTarget();
+      if (!target) return;
+      this.runSuggestionReviewAction(target.markId, 'accept', target.nextMarkId, target.kind, {
         followupMode: event.shiftKey ? 'close' : 'advance',
       });
     }, {
@@ -2647,7 +2665,9 @@ class MarkPopoverController {
     rejectButton.title = 'Reject change and move to the next one (Shift+click to stay here, Cmd/Ctrl+Alt+R)';
     installTouchSafeButton(rejectButton, (event) => {
       if (!canEdit) return;
-      this.runSuggestionReviewAction(mark.id, 'reject', nextMarkId, mark.kind, {
+      const target = getActiveSuggestionActionTarget();
+      if (!target) return;
+      this.runSuggestionReviewAction(target.markId, 'reject', target.nextMarkId, target.kind, {
         followupMode: event.shiftKey ? 'close' : 'advance',
       });
     }, {

@@ -827,6 +827,14 @@ function areInlineRunsAdjacent(
   return left.to === right.from;
 }
 
+function startsAtTextblockBoundary(
+  doc: ProseMirrorNode,
+  position: number,
+): boolean {
+  const resolved = doc.resolve(position);
+  return resolved.parent.isTextblock && resolved.parentOffset === 0;
+}
+
 function buildAdjacentSplitInsertMergeTransaction(
   oldState: EditorState,
   newState: EditorState,
@@ -867,6 +875,48 @@ function buildAdjacentSplitInsertMergeTransaction(
         ? { kind: right.kind, id: right.id, by: right.by, text: right.text, from: right.from, to: right.to }
         : right,
     });
+
+    if (left.kind === 'plain' && gap?.kind === 'insert') {
+      if (!areInlineRunsAdjacent(left, gap)) {
+        continue;
+      }
+      const rightMeta = metadata[gap.id];
+      if (!rightMeta || rightMeta.kind !== 'insert') {
+        continue;
+      }
+      if (rightMeta.status && rightMeta.status !== 'pending') {
+        continue;
+      }
+      if (!startsAtTextblockBoundary(newState.doc, left.from)) {
+        continue;
+      }
+      if (left.text.length === 0 || left.text.length > 16) {
+        continue;
+      }
+      if (!isRecentPendingInsertFragment(rightMeta)) {
+        continue;
+      }
+
+      const rightBy = rightMeta.by ?? gap.by;
+      if (authoredType) {
+        tr = tr.removeMark(left.from, left.to, authoredType);
+      }
+      tr = tr.addMark(
+        left.from,
+        left.to,
+        suggestionType.create({ id: gap.id, kind: 'insert', by: rightBy }),
+      );
+
+      metadataChanged = true;
+      mergedInsertIds.add(gap.id);
+      console.log('[suggestions.mergeAdjacentInsertSplit]', {
+        leftId: null,
+        rightId: gap.id,
+        gapText: left.text,
+      });
+      index += 1;
+      continue;
+    }
 
     if (left.kind !== 'insert') continue;
     const leftMeta = metadata[left.id];

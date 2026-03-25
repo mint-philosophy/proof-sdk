@@ -98,6 +98,23 @@ function getLiveInsertSuggestionText(doc: ProseMirrorNode, id: string): string |
   return getSuggestionTextFromSegments(segments);
 }
 
+function stripAuthoredMarksFromPendingInsertRanges(
+  tr: Transaction,
+  authoredType: MarkType | null,
+  metadata: Record<string, StoredMark>,
+): Transaction {
+  if (!authoredType) return tr;
+
+  let nextTr = tr;
+  for (const [id, stored] of Object.entries(metadata)) {
+    if (stored?.kind !== 'insert' || stored?.status === 'accepted' || stored?.status === 'rejected') continue;
+    const range = resolveLiveInsertSuggestionRange(nextTr.doc, id);
+    if (!range || range.to <= range.from) continue;
+    nextTr = nextTr.removeMark(range.from, range.to, authoredType);
+  }
+  return nextTr;
+}
+
 function collectSuggestionIdsInRange(
   doc: ProseMirrorNode,
   kind: SuggestionKind,
@@ -638,6 +655,7 @@ function buildTextPreservingInsertPersistenceTransaction(
   const syncedMetadata = syncInsertSuggestionMetadataFromDoc(tr.doc, metadata, oldInsertIds);
   metadataChanged = metadataChanged || syncedMetadata !== metadata;
   metadata = syncedMetadata;
+  tr = stripAuthoredMarksFromPendingInsertRanges(tr, authoredType, metadata);
 
   if (tr.steps.length === 0 && !metadataChanged) return null;
   const finalTr = metadataChanged ? syncSuggestionMetadataTransaction(newState, tr, metadata) : tr;
@@ -737,6 +755,7 @@ function buildPlainInsertionSuggestionFallbackTransaction(
     });
   }
 
+  tr = stripAuthoredMarksFromPendingInsertRanges(tr, authoredType, metadata);
   if (tr.steps.length === 0 && !metadataChanged) return null;
   const finalTr = metadataChanged ? syncSuggestionMetadataTransaction(newState, tr, metadata) : tr;
   finalTr.setMeta('suggestions-wrapped', true);
@@ -966,6 +985,7 @@ export function wrapTransactionForSuggestions(
   }
 
   const suggestionType = state.schema.marks.proofSuggestion;
+  const authoredType = state.schema.marks.proofAuthored ?? null;
 
   if (!suggestionType) {
     console.warn('[suggestions] Missing proofSuggestion mark type');
@@ -1144,6 +1164,7 @@ export function wrapTransactionForSuggestions(
     }
 
     let finalTr = newTr;
+    finalTr = stripAuthoredMarksFromPendingInsertRanges(finalTr, authoredType, metadata);
     if (metadataChanged) {
       finalTr = syncSuggestionMetadataTransaction(state, finalTr, metadata);
     }
@@ -1549,6 +1570,7 @@ export function wrapTransactionForSuggestions(
   }
 
   let finalTr = newTr;
+  finalTr = stripAuthoredMarksFromPendingInsertRanges(finalTr, authoredType, metadata);
   if (metadataChanged) {
     finalTr = syncSuggestionMetadataTransaction(state, finalTr, metadata);
   }

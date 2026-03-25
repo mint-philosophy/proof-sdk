@@ -177,6 +177,29 @@ function run(): void {
   assertEqual(insertedAuthoredCount, 0, 'Composition fallback should strip authored marks from the inserted range');
 
   state = createState({ from: 18, to: 18 });
+  state = state.apply(
+    state.tr.addMark(1, state.doc.content.size, authoredType.create({ by: 'human:Anonymous' }))
+  );
+  for (const char of ['T', 'C', ' ']) {
+    const pos = state.selection.from;
+    state = state.apply(wrapTransactionForSuggestions(state.tr.insertText(char, pos, pos), state, true));
+  }
+  const authoredOverlapInsert = getMarks(state).find((mark) => mark.kind === 'insert');
+  assert(authoredOverlapInsert?.range, 'Expected tracked typing to produce an insert mark after authored baseline content');
+  let authoredLeakCount = 0;
+  state.doc.nodesBetween(authoredOverlapInsert.range!.from, authoredOverlapInsert.range!.to, (node) => {
+    if (!node.isText) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofAuthored')) authoredLeakCount += 1;
+    return true;
+  });
+  assertEqual(authoredLeakCount, 0, 'Wrapped tracked typing should strip inherited authored marks from the full pending insert range');
+  assertEqual(
+    (authoredOverlapInsert.data as InsertData | undefined)?.content,
+    'TC ',
+    'Wrapped tracked typing should preserve whitespace inside the pending insert metadata',
+  );
+
+  state = createState({ from: 18, to: 18 });
   state = state.apply(wrapTransactionForSuggestions(state.tr.insertText(' brave', 18, 18), state, true));
   const prePauseInsert = getMarks(state).find((mark) => mark.kind === 'insert');
   assert(prePauseInsert?.range, 'Expected pre-pause tracked insert range');

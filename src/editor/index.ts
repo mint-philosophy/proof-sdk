@@ -5599,11 +5599,11 @@ class ProofEditorImpl implements ProofEditor {
     beforeState: any,
     dispatchBase: (transaction: any) => void,
   ): void {
-    const repair = buildRemoteInsertSuggestionBoundaryRepair(beforeState, view.state);
+    const currentMetadata = getMarkMetadata(view.state);
+    const repair = buildRemoteInsertSuggestionBoundaryRepair(beforeState, view.state, currentMetadata);
     if (!repair) return;
 
     let repairTr = repair.transaction;
-    const currentMetadata = getMarkMetadata(view.state);
     const syncedMetadata = syncInsertSuggestionMetadataFromDoc(
       repairTr.doc,
       currentMetadata,

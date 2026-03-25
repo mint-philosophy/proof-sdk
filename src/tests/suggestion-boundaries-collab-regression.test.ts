@@ -133,6 +133,22 @@ function run(): void {
     'Expected metadata repair to keep the serialized insert quote aligned with the repaired live text',
   );
 
+  const growingInsertMetadata = {
+    'insert-1': {
+      kind: 'insert' as const,
+      by: 'user:test',
+      status: 'pending' as const,
+      content: 'This REMOTE is a collab test insertion.',
+      quote: 'This REMOTE is a collab test insertion.',
+    },
+  };
+  const skippedRepair = buildRemoteInsertSuggestionBoundaryRepair(initialState, corruptedState, growingInsertMetadata);
+  assert.equal(
+    skippedRepair,
+    null,
+    'Expected boundary repair to ignore legitimate insert growth when local metadata already matches the expanded insert text',
+  );
+
   console.log('suggestion-boundaries-collab-regression.test.ts passed');
 }
 

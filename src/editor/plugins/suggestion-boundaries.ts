@@ -247,6 +247,7 @@ function collectSuggestionMarkRemovals(
 export function buildRemoteInsertSuggestionBoundaryRepair(
   oldState: EditorState,
   newState: EditorState,
+  metadata?: Record<string, StoredMark>,
 ): { transaction: Transaction; affectedInsertIds: string[] } | null {
   if (!newState.schema.marks.proofSuggestion) return null;
 
@@ -264,6 +265,19 @@ export function buildRemoteInsertSuggestionBoundaryRepair(
     const oldText = getSuggestionTextFromSegments(oldSegments) ?? '';
     const newText = getSuggestionTextFromSegments(newSegments) ?? '';
     if (oldText === newText) continue;
+
+    const stored = metadata?.[id];
+    if (stored?.kind === 'insert' && stored.status !== 'accepted' && stored.status !== 'rejected') {
+      const normalizedNewText = normalizeQuote(newText);
+      const normalizedStoredContent = typeof stored.content === 'string' ? normalizeQuote(stored.content) : '';
+      const normalizedStoredQuote = typeof stored.quote === 'string' ? normalizeQuote(stored.quote) : '';
+      if (
+        normalizedNewText.length > 0
+        && (normalizedStoredContent === normalizedNewText || normalizedStoredQuote === normalizedNewText)
+      ) {
+        continue;
+      }
+    }
 
     const insertion = detectSingleInsertion(oldText, newText);
     if (!insertion) continue;

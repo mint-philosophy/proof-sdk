@@ -1600,13 +1600,18 @@ export const suggestionsPlugin = $prose(() => {
       }
 
       if (!isEnabled || !trs.some((tr) => tr.docChanged)) return null;
+      const hasBlockingMarksMeta = trs.some((tr) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta === undefined) return false;
+        if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return true;
+        return (meta as { type?: unknown }).type !== 'INTERNAL';
+      });
       if (trs.some((tr) =>
         tr.getMeta('suggestions-wrapped')
-        || tr.getMeta(marksPluginKey) !== undefined
         || tr.getMeta('document-load') !== undefined
         || tr.getMeta('history$') !== undefined
         || isYjsChangeOriginTransaction(tr)
-      )) {
+      ) || hasBlockingMarksMeta) {
         return null;
       }
 

@@ -190,6 +190,17 @@ function run(): void {
       && suggestionsSource.includes('resetSuggestionsInsertCoalescing();'),
     'Expected toggling track changes on or off to clear stale insert coalescing state',
   );
+  const suggestionsAppendTransactionBlock = sliceBetween(
+    suggestionsSource,
+    '    appendTransaction(trs, oldState, newState) {',
+    '\n\n    props: {',
+  );
+  assert(
+    suggestionsAppendTransactionBlock.includes('const hasBlockingMarksMeta = trs.some((tr) => {')
+      && suggestionsAppendTransactionBlock.includes("return (meta as { type?: unknown }).type !== 'INTERNAL';")
+      && !suggestionsAppendTransactionBlock.includes("|| tr.getMeta(marksPluginKey) !== undefined"),
+    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions so collab-peer composition input still falls back to tracked suggestions',
+  );
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
   assert(

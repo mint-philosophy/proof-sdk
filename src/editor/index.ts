@@ -1024,6 +1024,112 @@ export interface ProofEditor {
   isReviewLocked(): boolean;
 }
 
+type TransactionDocChangeRange = {
+  from: number;
+  to: number;
+};
+
+type TransactionDocChangeNodeSummary = {
+  from: number;
+  to: number;
+  text: string;
+  marks: string[];
+};
+
+type TransactionDocChangeSummary = {
+  from: number;
+  to: number;
+  text: string;
+  hasSuggestion: boolean;
+  hasAuthored: boolean;
+  nodes: TransactionDocChangeNodeSummary[];
+};
+
+function clipTransactionDebugText(text: string, maxLength: number = 120): string {
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}…`;
+}
+
+function describeTransactionDebugMark(mark: { type?: { name?: string }; attrs?: Record<string, unknown> } | null | undefined): string {
+  const name = mark?.type?.name ?? 'unknown';
+  if (name === 'proofSuggestion') {
+    const kind = typeof mark?.attrs?.kind === 'string' ? mark.attrs.kind : '';
+    const id = typeof mark?.attrs?.id === 'string' ? mark.attrs.id : '';
+    return `${name}${kind ? `:${kind}` : ''}${id ? `:${id}` : ''}`;
+  }
+  return name;
+}
+
+function collectTransactionDocChangeRanges(transaction: { mapping?: { maps?: Array<{ forEach: (f: (oldStart: number, oldEnd: number, newStart: number, newEnd: number) => void) => void }> } }): TransactionDocChangeRange[] {
+  const ranges: TransactionDocChangeRange[] = [];
+  for (const stepMap of transaction.mapping?.maps ?? []) {
+    stepMap.forEach((_oldStart, _oldEnd, newStart, newEnd) => {
+      if (newEnd <= newStart) return;
+      ranges.push({ from: newStart, to: newEnd });
+    });
+  }
+
+  if (ranges.length <= 1) return ranges;
+
+  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  const merged: TransactionDocChangeRange[] = [ranges[0]!];
+  for (const range of ranges.slice(1)) {
+    const previous = merged[merged.length - 1]!;
+    if (range.from <= previous.to) {
+      previous.to = Math.max(previous.to, range.to);
+      continue;
+    }
+    merged.push({ from: range.from, to: range.to });
+  }
+  return merged;
+}
+
+function summarizeTransactionDocChangeNodes(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+): TransactionDocChangeNodeSummary[] {
+  const nodes: TransactionDocChangeNodeSummary[] = [];
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (!node.isText) return true;
+    const overlapFrom = Math.max(from, pos);
+    const overlapTo = Math.min(to, pos + node.nodeSize);
+    if (overlapTo <= overlapFrom) return true;
+    const rawText = node.text?.slice(overlapFrom - pos, overlapTo - pos) ?? '';
+    if (!rawText) return true;
+    nodes.push({
+      from: overlapFrom,
+      to: overlapTo,
+      text: clipTransactionDebugText(rawText),
+      marks: node.marks.map((mark) => describeTransactionDebugMark(mark)),
+    });
+    return true;
+  });
+  return nodes;
+}
+
+function summarizeIncomingYjsDocChange(
+  transaction: { doc?: ProseMirrorNode; mapping?: { maps?: Array<{ forEach: (f: (oldStart: number, oldEnd: number, newStart: number, newEnd: number) => void) => void }> } },
+): TransactionDocChangeSummary[] {
+  const doc = transaction.doc;
+  if (!doc) return [];
+
+  return collectTransactionDocChangeRanges(transaction)
+    .map((range) => {
+      const nodes = summarizeTransactionDocChangeNodes(doc, range.from, range.to);
+      const marks = nodes.flatMap((node) => node.marks);
+      return {
+        from: range.from,
+        to: range.to,
+        text: clipTransactionDebugText(doc.textBetween(range.from, range.to, '\n', '\n')),
+        hasSuggestion: marks.some((mark) => mark.startsWith('proofSuggestion')),
+        hasAuthored: marks.includes('proofAuthored'),
+        nodes,
+      };
+    })
+    .filter((range) => range.text.length > 0 || range.nodes.length > 0);
+}
+
 class ProofEditorImpl implements ProofEditor {
   editor: Editor | null = null;
   heatMapMode: 'hidden' | 'subtle' | 'background' | 'full' = 'background';
@@ -5050,7 +5156,10 @@ class ProofEditorImpl implements ProofEditor {
     this.applyingCollabRemote = true;
     this.suppressMarksSync = true;
     try {
-      this.applyExternalMarks(this.lastReceivedServerMarks, { pruneMissingSuggestions: true });
+      // Live collab marks snapshots can lag behind the Yjs fragment for a moment.
+      // Do not treat a missing pending suggestion id here as authoritative removal;
+      // server-backed refresh/review flows still use pruneMissingSuggestions.
+      this.applyExternalMarks(this.lastReceivedServerMarks);
       this.resyncPendingInsertMetadataAfterRemoteApply(this.lastReceivedServerMarks);
     } finally {
       this.suppressMarksSync = false;
@@ -5658,15 +5767,16 @@ class ProofEditorImpl implements ProofEditor {
         );
         const isSuggestionMetaChange = tr?.getMeta?.(suggestionsPluginKey) !== undefined;
         const isHistoryChange = tr?.getMeta?.('history$') !== undefined;
+        const pluginState = suggestionsPluginKey.getState(view.state);
+        const suggestionsEnabled = pluginState?.enabled ?? false;
+        const incomingYjsChangeSummary = yjsOrigin.isYjsOrigin && tr?.docChanged
+          ? summarizeIncomingYjsDocChange(tr)
+          : [];
         const isLocalContentChange = Boolean(tr?.docChanged)
           && !isRemoteContentChange
           && !isMarksOnlyChange
           && !isDocumentLoad
           && !isSystemTrackChangesSuppressed;
-
-        // Check if suggestions are enabled
-        const pluginState = suggestionsPluginKey.getState(view.state);
-        const suggestionsEnabled = pluginState?.enabled ?? false;
 
         if (isRemoteContentChange) {
           this.recordContentChangeSource('remote');
@@ -5675,6 +5785,22 @@ class ProofEditorImpl implements ProofEditor {
           this.recordContentChangeSource('local');
         } else if (tr?.docChanged) {
           this.recordContentChangeSource('system');
+        }
+
+        if (incomingYjsChangeSummary.length > 0) {
+          const payload = {
+            source: yjsOrigin.source,
+            explicitChangeOrigin: isExplicitYjsChangeOriginTransaction(tr),
+            carriesIncomingSuggestionMarks,
+            isRemoteContentChange,
+            suggestionsEnabled,
+            changes: incomingYjsChangeSummary,
+          };
+          console.log('[tc.yjsIncoming]', payload);
+          recordClientIncidentEvent({
+            type: 'tc.yjsIncoming',
+            data: payload,
+          });
         }
 
         if (suggestionsEnabled && tr.docChanged) {

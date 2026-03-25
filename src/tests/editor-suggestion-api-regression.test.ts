@@ -176,12 +176,15 @@ function run(): void {
   );
   assert(
     applyAuthoritativeShareMarksBlock.includes('this.resyncPendingInsertMetadataAfterRemoteApply(serverMarks);')
+      && applyAuthoritativeShareMarksBlock.includes('this.applyExternalMarks(serverMarks, { pruneMissingSuggestions: true });')
       && resyncPendingInsertMetadataBlock.includes("filter(([, mark]) => mark?.kind === 'insert' && mark?.status === 'pending')")
       && resyncPendingInsertMetadataBlock.includes('const localMetadata = getMarkMetadataWithQuotes(view.state);')
       && resyncPendingInsertMetadataBlock.includes('const syncedMetadata = syncInsertSuggestionMetadataFromDoc(view.state.doc, localMetadata, insertIds);')
       && resyncPendingInsertMetadataBlock.includes('setMarkMetadata(view, syncedMetadata);')
+      && applyLatestCollabMarksBlock.includes('this.applyExternalMarks(this.lastReceivedServerMarks);')
+      && !applyLatestCollabMarksBlock.includes('this.applyExternalMarks(this.lastReceivedServerMarks, { pruneMissingSuggestions: true });')
       && applyLatestCollabMarksBlock.includes('this.resyncPendingInsertMetadataAfterRemoteApply(this.lastReceivedServerMarks);'),
-    'Expected remote collab mark application to resync pending insert metadata from the live doc before peer-local snapshots are reused',
+    'Expected live collab mark application to avoid pruning missing pending suggestions while still resyncing pending insert metadata from the live doc',
   );
 
   assert(

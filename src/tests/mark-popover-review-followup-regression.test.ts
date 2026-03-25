@@ -39,6 +39,14 @@ function run(): void {
   );
 
   assert(
+    source.includes('setReviewButtonsBusy(false);')
+      && source.includes('const fallbackMarkId = this.getFirstPendingSuggestionMarkId();')
+      && source.includes("this.openForMark(fallbackMarkId, undefined, {")
+      && source.includes("preserveReviewTransition: true,"),
+    'Expected successful persisted review actions to re-enable the current action row before follow-up, and expected suggestion updates to immediately reopen the remaining pending suggestion if the active mark disappears mid-transition',
+  );
+
+  assert(
     source.includes("if (!options?.preserveReviewTransition && this.suggestionReviewFollowupTimer !== null) {")
       && source.includes('if (!options?.preserveReviewTransition) {')
       && source.includes("preserveReviewTransition?: boolean;"),

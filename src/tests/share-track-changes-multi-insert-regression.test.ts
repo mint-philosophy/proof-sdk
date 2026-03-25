@@ -313,6 +313,63 @@ async function run(): Promise<void> {
       'Expected run 34 accept-all to clear all accepted insert marks',
     );
 
+    const rejectParagraphOneId = 'reject-paragraph-one';
+    const rejectParagraphTwoId = 'reject-paragraph-two';
+    const rejectLiveDoc = schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Baseline.'),
+      ]),
+      schema.node('paragraph', null, [
+        schema.text('TC reject one.', [schema.marks.proofSuggestion.create({ id: rejectParagraphOneId, kind: 'insert', by: 'human:editor' })]),
+      ]),
+      schema.node('paragraph', null, [
+        schema.text('TC reject two.', [schema.marks.proofSuggestion.create({ id: rejectParagraphTwoId, kind: 'insert', by: 'human:editor' })]),
+      ]),
+    ]);
+
+    const rejectState = EditorState.create({
+      schema,
+      doc: rejectLiveDoc,
+      plugins: [marksStatePlugin],
+    });
+    const rejectLiveMetadata = getMarkMetadataWithQuotes(rejectState);
+    const rejectPersistedMetadata = buildCanonicalShareMarkMetadata(rejectState, rejectLiveMetadata);
+    const rejectMarkdown = 'Baseline.\n\nTC reject one.\n\nTC reject two.\n';
+    const rejectSlug = `share-track-changes-reject-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(
+      rejectSlug,
+      rejectMarkdown,
+      rejectPersistedMetadata as Record<string, StoredMark>,
+      'Share track changes reject sibling insert regression',
+    );
+
+    const rejected = await executeDocumentOperationAsync(rejectSlug, 'POST', '/marks/reject', {
+      markId: rejectParagraphTwoId,
+      by: 'human:test',
+    });
+    assertEqual(rejected.status, 200, `Expected multi-paragraph reject to succeed, got ${rejected.status}`);
+    const expectedRejectedMarkdown = 'Baseline.\n\n<span data-proof="suggestion" data-id="reject-paragraph-one" data-by="human:editor" data-kind="insert">TC reject one.</span>\n';
+    assertEqual(
+      String(rejected.body.markdown ?? ''),
+      expectedRejectedMarkdown,
+      `Expected rejecting one inserted paragraph to preserve the sibling pending insert paragraph in canonical markdown, got ${JSON.stringify(rejected.body.markdown)}`,
+    );
+    const rejectedMarks = (rejected.body.marks ?? {}) as Record<string, StoredMark>;
+    assert(rejectParagraphOneId in rejectedMarks, 'Expected sibling pending insert metadata to survive after rejecting another paragraph insert');
+    assert(!(rejectParagraphTwoId in rejectedMarks), 'Expected rejected insert metadata to be removed');
+    const rejectedStored = db.getDocumentBySlug(rejectSlug);
+    assertEqual(
+      rejectedStored?.markdown,
+      expectedRejectedMarkdown,
+      `Expected rejecting one inserted paragraph to preserve the sibling pending insert paragraph in the canonical row, got ${JSON.stringify(rejectedStored?.markdown)}`,
+    );
+    const rejectedProjection = db.getDocumentProjectionBySlug(rejectSlug);
+    assertEqual(
+      rejectedProjection?.markdown,
+      expectedRejectedMarkdown,
+      `Expected rejecting one inserted paragraph to preserve the sibling pending insert paragraph in the projection row, got ${JSON.stringify(rejectedProjection?.markdown)}`,
+    );
+
     console.log('share-track-changes-multi-insert-regression.test.ts passed');
   } finally {
     if (prevDatabasePath === undefined) delete process.env.DATABASE_PATH;

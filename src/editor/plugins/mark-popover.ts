@@ -1396,6 +1396,7 @@ class MarkPopoverController {
           return;
         }
         if (!optimisticApplied) {
+          setReviewButtonsBusy(false);
           finish();
         }
       }).catch((error) => {
@@ -1938,6 +1939,13 @@ class MarkPopoverController {
         const mark = marks.find(item => item.id === this.activeMarkId);
         if (!mark) {
           if (this.suggestionReviewTransitionPending) {
+            const fallbackMarkId = this.getFirstPendingSuggestionMarkId();
+            if (fallbackMarkId) {
+              this.openForMark(fallbackMarkId, undefined, {
+                source: 'direct',
+                preserveReviewTransition: true,
+              });
+            }
             return;
           }
           this.close();

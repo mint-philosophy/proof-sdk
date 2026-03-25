@@ -687,6 +687,27 @@ type InlineInsertRun =
   | { kind: 'plain'; from: number; to: number; text: string }
   | { kind: 'other'; from: number; to: number; text: string };
 
+function summarizeInlineInsertRuns(runs: InlineInsertRun[]): Array<Record<string, unknown>> {
+  return runs.map((run) => {
+    if (run.kind === 'insert') {
+      return {
+        kind: run.kind,
+        from: run.from,
+        to: run.to,
+        id: run.id,
+        by: run.by,
+        text: run.text,
+      };
+    }
+    return {
+      kind: run.kind,
+      from: run.from,
+      to: run.to,
+      text: run.text,
+    };
+  });
+}
+
 function collectInlineInsertRuns(doc: ProseMirrorNode): InlineInsertRun[] {
   const runs: InlineInsertRun[] = [];
 
@@ -777,6 +798,7 @@ function buildAdjacentSplitInsertMergeTransaction(
   if (oldPendingInsertIds.size === 0) return null;
 
   const runs = collectInlineInsertRuns(newState.doc);
+  console.log('[suggestions.mergeCheck.runs]', summarizeInlineInsertRuns(runs));
   const mergedInsertIds = new Set<string>();
 
   for (let index = 0; index <= runs.length - 3; index += 1) {
@@ -784,19 +806,65 @@ function buildAdjacentSplitInsertMergeTransaction(
     const gap = runs[index + 1];
     const right = runs[index + 2];
     if (!left || !gap || !right) continue;
+    console.log('[suggestions.mergeCheck.window]', {
+      index,
+      left: left.kind === 'insert'
+        ? { kind: left.kind, id: left.id, by: left.by, text: left.text, from: left.from, to: left.to }
+        : left,
+      gap,
+      right: right.kind === 'insert'
+        ? { kind: right.kind, id: right.id, by: right.by, text: right.text, from: right.from, to: right.to }
+        : right,
+    });
     if (left.kind !== 'insert' || gap.kind !== 'plain' || right.kind !== 'insert') continue;
-    if (!isWhitespaceOnly(gap.text)) continue;
-    if (left.id === right.id) continue;
-    if (!oldPendingInsertIds.has(left.id) || oldPendingInsertIds.has(right.id)) continue;
+    if (!isWhitespaceOnly(gap.text)) {
+      console.log('[suggestions.mergeCheck.skip]', { reason: 'gap-not-whitespace', gapText: gap.text });
+      continue;
+    }
+    if (left.id === right.id) {
+      console.log('[suggestions.mergeCheck.skip]', { reason: 'same-id', id: left.id });
+      continue;
+    }
+    if (!oldPendingInsertIds.has(left.id) || oldPendingInsertIds.has(right.id)) {
+      console.log('[suggestions.mergeCheck.skip]', {
+        reason: 'old-pending-id-shape',
+        leftId: left.id,
+        rightId: right.id,
+        leftWasPending: oldPendingInsertIds.has(left.id),
+        rightWasPending: oldPendingInsertIds.has(right.id),
+      });
+      continue;
+    }
 
     const leftMeta = metadata[left.id];
     const rightMeta = metadata[right.id];
-    if (!leftMeta || leftMeta.kind !== 'insert' || !rightMeta || rightMeta.kind !== 'insert') continue;
-    if ((leftMeta.status && leftMeta.status !== 'pending') || (rightMeta.status && rightMeta.status !== 'pending')) continue;
+    if (!leftMeta || leftMeta.kind !== 'insert' || !rightMeta || rightMeta.kind !== 'insert') {
+      console.log('[suggestions.mergeCheck.skip]', { reason: 'missing-insert-metadata', leftId: left.id, rightId: right.id });
+      continue;
+    }
+    if ((leftMeta.status && leftMeta.status !== 'pending') || (rightMeta.status && rightMeta.status !== 'pending')) {
+      console.log('[suggestions.mergeCheck.skip]', {
+        reason: 'non-pending-status',
+        leftId: left.id,
+        rightId: right.id,
+        leftStatus: leftMeta.status,
+        rightStatus: rightMeta.status,
+      });
+      continue;
+    }
 
     const leftBy = leftMeta.by ?? left.by;
     const rightBy = rightMeta.by ?? right.by;
-    if (leftBy !== rightBy) continue;
+    if (leftBy !== rightBy) {
+      console.log('[suggestions.mergeCheck.skip]', {
+        reason: 'different-actors',
+        leftId: left.id,
+        rightId: right.id,
+        leftBy,
+        rightBy,
+      });
+      continue;
+    }
 
     if (authoredType) {
       tr = tr.removeMark(gap.from, gap.to, authoredType);
@@ -1432,6 +1500,14 @@ export function wrapTransactionForSuggestions(
         if (candidate && whitespaceOnly) {
           // Whitespace with active candidate: extend the mark to include it.
           // This keeps "Proof is" as one suggestion instead of splitting at the space.
+          console.log('[suggestions.insertDecision]', {
+            case: 'coalesce-whitespace',
+            insertedText,
+            from: safeFrom,
+            candidateId: candidate.id,
+            candidateRange: candidate.range,
+            direction: candidate.direction,
+          });
           const existingMeta = metadata[candidate.id];
           const existingContent = typeof existingMeta?.content === 'string' ? existingMeta.content : '';
           const updatedContent = candidate.direction === 'append'
@@ -1465,6 +1541,14 @@ export function wrapTransactionForSuggestions(
           setSelectionAfterInsertedText(newTr, candidate.insertPos + insertedText.length);
         } else if (candidate) {
           // Non-whitespace with active candidate: coalesce into existing mark
+          console.log('[suggestions.insertDecision]', {
+            case: 'coalesce-text',
+            insertedText,
+            from: safeFrom,
+            candidateId: candidate.id,
+            candidateRange: candidate.range,
+            direction: candidate.direction,
+          });
           const existingMeta = metadata[candidate.id];
           const existingContent = typeof existingMeta?.content === 'string' ? existingMeta.content : '';
           const updatedContent = candidate.direction === 'append'
@@ -1503,6 +1587,14 @@ export function wrapTransactionForSuggestions(
         } else {
           const editableInsert = findEditableInsertSuggestionAtPosition(newTr.doc, safeFrom, actor);
           if (editableInsert) {
+            console.log('[suggestions.insertDecision]', {
+              case: 'editable-insert',
+              insertedText,
+              from: safeFrom,
+              suggestionId: editableInsert.id,
+              range: editableInsert.range,
+              offset: editableInsert.offset,
+            });
             const existingMeta = metadata[editableInsert.id];
             const liveContent = getLiveInsertSuggestionText(newTr.doc, editableInsert.id) ?? '';
             const insertOffset = Math.max(0, Math.min(editableInsert.offset, liveContent.length));
@@ -1543,6 +1635,13 @@ export function wrapTransactionForSuggestions(
             setSelectionAfterInsertedText(newTr, safeFrom + insertedText.length);
           } else if (whitespaceOnly) {
             // Standalone whitespace, no active candidate: create a tracked suggestion mark.
+            console.log('[suggestions.insertDecision]', {
+              case: 'new-whitespace-mark',
+              insertedText,
+              from: safeFrom,
+              actor,
+              cachedCandidate: null,
+            });
             const suggestionId = generateMarkId();
             const createdAt = new Date().toISOString();
 
@@ -1573,6 +1672,13 @@ export function wrapTransactionForSuggestions(
             setSelectionAfterInsertedText(newTr, safeFrom + insertedText.length);
           } else {
             // New non-whitespace text, no candidate: create fresh suggestion mark
+            console.log('[suggestions.insertDecision]', {
+              case: 'new-text-mark',
+              insertedText,
+              from: safeFrom,
+              actor,
+              cachedCandidate: null,
+            });
             const suggestionId = generateMarkId();
             const createdAt = new Date().toISOString();
 

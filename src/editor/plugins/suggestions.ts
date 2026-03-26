@@ -1264,7 +1264,33 @@ function buildPlainInsertionSuggestionFallbackTransaction(
     return finalTr;
   }
 
-  const candidate = getCoalescableInsertCandidate(newState.doc, metadata, diff.from, actor, now);
+  let candidate = getCoalescableInsertCandidate(newState.doc, metadata, diff.from, actor, now);
+
+  // Whitespace gap repair (same as step-loop path)
+  if (!candidate) {
+    const cached = lastInsertByActor.get(actor);
+    if (cached && cached.to === diff.from && (now - cached.updatedAt) <= COALESCE_WINDOW_MS) {
+      const liveRange = resolveLiveInsertSuggestionRange(newState.doc, cached.id);
+      if (liveRange && liveRange.to < diff.from) {
+        const gapText = newState.doc.textBetween(liveRange.to, diff.from, '');
+        if (gapText.length > 0 && isWhitespaceOnly(gapText)) {
+          console.log('[suggestions.whitespaceGapRepair.fallback]', {
+            cachedId: cached.id,
+            liveRange,
+            gapFrom: liveRange.to,
+            gapTo: diff.from,
+          });
+          tr = tr.addMark(
+            liveRange.to,
+            diff.from,
+            suggestionType.create({ id: cached.id, kind: 'insert', by: actor }),
+          );
+          candidate = getCoalescableInsertCandidate(tr.doc, metadata, diff.from, actor, now);
+        }
+      }
+    }
+  }
+
   if (candidate) {
     tr = tr.addMark(
       diff.from,
@@ -1900,7 +1926,39 @@ export function wrapTransactionForSuggestions(
 
         const now = Date.now();
         const whitespaceOnly = isWhitespaceOnly(insertedText);
-        const candidate = getCoalescableInsertCandidate(newTr.doc, metadata, safeFrom, actor, now);
+        let candidate = getCoalescableInsertCandidate(newTr.doc, metadata, safeFrom, actor, now);
+
+        // Whitespace gap repair: if the candidate lookup failed but the cache
+        // says the mark should extend to the cursor, and the gap between the
+        // live mark end and the cursor is whitespace, re-apply the mark to the
+        // gap. This fixes mark fragmentation caused by non-inclusive marks
+        // losing their whitespace boundary between dispatch cycles.
+        if (!candidate) {
+          const cached = lastInsertByActor.get(actor);
+          if (cached && cached.to === safeFrom && (now - cached.updatedAt) <= COALESCE_WINDOW_MS) {
+            const liveRange = resolveLiveInsertSuggestionRange(newTr.doc, cached.id);
+            if (liveRange && liveRange.to < safeFrom) {
+              const gapText = newTr.doc.textBetween(liveRange.to, safeFrom, '');
+              if (gapText.length > 0 && isWhitespaceOnly(gapText)) {
+                console.log('[suggestions.whitespaceGapRepair]', {
+                  cachedId: cached.id,
+                  liveRange,
+                  gapFrom: liveRange.to,
+                  gapTo: safeFrom,
+                  gapText,
+                });
+                // Re-apply the suggestion mark to the whitespace gap
+                newTr.addMark(
+                  liveRange.to,
+                  safeFrom,
+                  suggestionType.create({ id: cached.id, kind: 'insert', by: actor }),
+                );
+                // Retry candidate lookup against repaired document
+                candidate = getCoalescableInsertCandidate(newTr.doc, metadata, safeFrom, actor, now);
+              }
+            }
+          }
+        }
 
         if (candidate && whitespaceOnly) {
           // Whitespace with active candidate: extend the mark to include it.

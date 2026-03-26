@@ -73,6 +73,14 @@ export function resetSuggestionsInsertCoalescing(): void {
   lastInsertByActor.clear();
 }
 
+/** Reset all module-level TC state for fresh document loads.
+ *  Prevents stale suggestionsModuleEnabled from a previous document
+ *  leaking into a new one during SPA navigation. */
+export function resetSuggestionsModuleState(): void {
+  suggestionsModuleEnabled = false;
+  lastInsertByActor.clear();
+}
+
 export function hasRecentSuggestionsInsertCoalescingState(): boolean {
   const actor = getCurrentActor();
   const cached = lastInsertByActor.get(actor);

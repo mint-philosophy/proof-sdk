@@ -182,17 +182,24 @@ function run(): void {
     '\n  /**\n   * Toggle suggestion mode\n   */',
   );
   assert(
-    setSuggestionsEnabledBlock.includes('currentEnabled = isSuggestionsEnabledPlugin(view.state);')
-      && setSuggestionsEnabledBlock.includes('if (currentEnabled !== enabled) {')
+    setSuggestionsEnabledBlock.includes('const pluginEnabled = pluginState?.enabled ?? false;')
+      && setSuggestionsEnabledBlock.includes('if (pluginEnabled !== enabled) {')
       && setSuggestionsEnabledBlock.includes('enableSuggestionsPlugin(view);')
       && setSuggestionsEnabledBlock.includes('disableSuggestionsPlugin(view);')
-      && setSuggestionsEnabledBlock.includes("console.log('[setSuggestionsEnabled]', currentEnabled ? 'enabled' : 'disabled');"),
-    'Expected the shared suggestions setter to dispatch the plugin enable/disable transaction and verify the resulting state',
+      && setSuggestionsEnabledBlock.includes("console.log('[setSuggestionsEnabled.result]', currentEnabled ? 'enabled' : 'disabled');"),
+    'Expected the shared suggestions setter to read plugin state directly (not OR-combined isSuggestionsEnabled), dispatch the plugin enable/disable transaction, and verify the resulting state',
   );
 
   assert(
     editorSource.includes('isSuggestionsEnabled: () => window.proof.isSuggestionsEnabled(),'),
     'Expected __PROOF_EDITOR__ to expose isSuggestionsEnabled so QA can verify the actual suggestions plugin state',
+  );
+
+  assert(
+    editorSource.includes('resetSuggestionsModuleState();')
+      && suggestionsSource.includes('export function resetSuggestionsModuleState(): void {')
+      && suggestionsSource.includes('suggestionsModuleEnabled = false;'),
+    'Expected loadDocument to reset the module-level TC flag so stale suggestionsModuleEnabled from a previous doc does not leak across SPA navigation',
   );
 
   assert(

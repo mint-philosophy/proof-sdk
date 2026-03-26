@@ -65,6 +65,7 @@ import {
   transactionCarriesInsertedSuggestionMarks,
   wrapTransactionForSuggestions,
   isSuggestionsModuleEnabled,
+  resetSuggestionsModuleState,
 } from './plugins/suggestions';
 import {
   buildRemoteInsertSuggestionBoundaryRepair,
@@ -6269,9 +6270,25 @@ class ProofEditorImpl implements ProofEditor {
     this.lastMarkdown = cleanContent;
     this.suppressMarksSync = true;
 
+    // Reset TC module state for fresh document — prevents stale
+    // suggestionsModuleEnabled from a previous doc leaking across
+    // SPA navigation (the plugin state may also be stale).
+    resetSuggestionsModuleState();
+
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
       const parser = ctx.get(parserCtx);
+
+      // If the suggestions plugin still thinks TC is on (stale from previous doc),
+      // reset it before loading the new document.
+      const staleSuggestionsState = suggestionsPluginKey.getState(view.state);
+      if (staleSuggestionsState?.enabled) {
+        console.log('[loadDocument] Resetting stale suggestions plugin state');
+        const resetTr = view.state.tr
+          .setMeta(suggestionsPluginKey, { enabled: false })
+          .setMeta('document-load', true);
+        view.dispatch(resetTr);
+      }
 
       const buildLegacyMetadata = (mark: Mark): StoredMark => {
         const base: StoredMark = {
@@ -7189,9 +7206,18 @@ class ProofEditorImpl implements ProofEditor {
     let currentEnabled = false;
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      currentEnabled = isSuggestionsEnabledPlugin(view.state);
-      console.log('[setSuggestionsEnabled]', { requested: enabled, currentEnabled, willChange: currentEnabled !== enabled });
-      if (currentEnabled !== enabled) {
+      // Read plugin state directly — not isSuggestionsEnabled() which OR-combines
+      // the module flag and can return stale true after doc navigation, making
+      // setSuggestionsEnabled(true) a no-op even when the plugin state is false.
+      const pluginState = suggestionsPluginKey.getState(view.state);
+      const pluginEnabled = pluginState?.enabled ?? false;
+      console.log('[setSuggestionsEnabled]', {
+        requested: enabled,
+        pluginEnabled,
+        moduleEnabled: isSuggestionsModuleEnabled(),
+        willChange: pluginEnabled !== enabled,
+      });
+      if (pluginEnabled !== enabled) {
         if (enabled) {
           enableSuggestionsPlugin(view);
         } else {

@@ -7,7 +7,7 @@
 
 import { $ctx, $prose } from '@milkdown/kit/utils';
 import { Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from '@milkdown/kit/prose/state';
-import type { MarkType, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
+import type { Mark, MarkType, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 import type { EditorView } from '@milkdown/kit/prose/view';
 
 import { marksPluginKey, getMarkMetadata, buildSuggestionMetadata, syncSuggestionMetadataTransaction } from './marks';
@@ -1576,6 +1576,10 @@ export function wrapTransactionForSuggestions(
     if (stepJson.stepType === 'replace' && stepJson.slice?.content) {
       const { hasNonText } = collectSliceText(stepJson.slice.content);
       if (hasNonText) {
+        console.log('[suggestions.wrapForSuggestions.structuralPassthrough]', {
+          stepType: stepJson.stepType,
+          sliceContentTypes: stepJson.slice.content.map((n: SliceNode) => n.type),
+        });
         return tr;
       }
     }
@@ -2509,8 +2513,61 @@ export const suggestionsPlugin = $prose(() => {
       },
 
       handleKeyDown(view, event) {
+        // Diagnostic: log Enter key events regardless of TC state
+        if (event.key === 'Enter') {
+          const enabled = isSuggestionsEnabled(view.state);
+          console.log('[suggestions.handleKeyDown.enter]', {
+            enabled,
+            from: view.state.selection.from,
+            defaultPrevented: event.defaultPrevented,
+            composing: event.isComposing || view.composing,
+          });
+        }
+
         if (!isSuggestionsEnabled(view.state)) return false;
         if (event.defaultPrevented || event.isComposing || view.composing) return false;
+
+        // Handle Enter explicitly when TC is on to create paragraph breaks.
+        // ProseMirror's default Enter→splitBlock path does not fire reliably
+        // under all input methods (CGEvent keystrokes, programmatic input).
+        // Handling Enter here guarantees a clean paragraph split with proper
+        // mark cleanup — the new paragraph starts without suggestion marks.
+        if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
+          const { state } = view;
+          const { from } = state.selection;
+          const $from = state.doc.resolve(from);
+
+          // Code blocks: insert literal newline, not paragraph split
+          if ($from.parent.type.name === 'code_block') {
+            view.dispatch(state.tr.insertText('\n', from, from));
+            return true;
+          }
+
+          // Create the paragraph split
+          const tr = state.tr.split(from);
+          if (!tr.docChanged) {
+            // Split not possible at this position — fall through to default
+            return false;
+          }
+
+          // Strip suggestion marks from stored marks so the new paragraph
+          // starts without them. handleTextInput will add fresh marks when
+          // the user types the next character.
+          const suggestionType = state.schema.marks.proofSuggestion;
+          if (suggestionType) {
+            const currentStored = tr.storedMarks ?? $from.marks();
+            const clean = currentStored.filter((m: Mark) => m.type !== suggestionType);
+            tr.setStoredMarks(clean);
+          }
+          console.log('[suggestions.handleKeyDown.enter.split]', {
+            from,
+            depth: $from.depth,
+            parentType: $from.parent.type.name,
+          });
+          view.dispatch(tr);
+          return true;
+        }
+
         if (event.key !== 'Backspace' && event.key !== 'Delete') return false;
         if (shouldSuppressTrackChangesKeydown(event)) {
           rememberModifiedDeleteIntent(view, event, { handled: true });

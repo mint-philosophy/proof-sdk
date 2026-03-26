@@ -354,7 +354,14 @@ async function resolveRouteMutationBase(slug: string): Promise<AuthoritativeMuta
   const resolved = await resolveAuthoritativeMutationBase(slug, {
     liveRequired: activeCollabClients > 0,
   });
-  return resolved.ok ? resolved.base : null;
+  if (resolved.ok) return resolved.base;
+  if (activeCollabClients > 0) {
+    const fallback = await resolveAuthoritativeMutationBase(slug, {
+      liveRequired: false,
+    });
+    if (fallback.ok) return fallback.base;
+  }
+  return null;
 }
 
 function sameRouteMutationBaseContent(

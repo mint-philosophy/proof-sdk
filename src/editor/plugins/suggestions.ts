@@ -2463,9 +2463,51 @@ export const suggestionsPlugin = $prose(() => {
     props: {
       handleDOMEvents: {
         beforeinput(view, event) {
+          const inputEvent = event as InputEvent;
+
+          // Handle insertParagraph (Enter key) regardless of TC state.
+          // ProseMirror's default Enter→splitBlock path does not fire for all
+          // input methods (CDP dispatchKeyEvent, programmatic input). Catching
+          // insertParagraph in beforeinput ensures paragraph breaks work
+          // regardless of how Enter arrives.
+          if (inputEvent.inputType === 'insertParagraph') {
+            const { state } = view;
+            const { from } = state.selection;
+            const $from = state.doc.resolve(from);
+
+            // Code blocks: insert literal newline
+            if ($from.parent.type.name === 'code_block') {
+              view.dispatch(state.tr.insertText('\n', from, from));
+              event.preventDefault();
+              return true;
+            }
+
+            const tr = state.tr.split(from);
+            if (tr.docChanged) {
+              // If TC is on, strip suggestion marks from stored marks so the
+              // new paragraph starts clean — handleTextInput adds fresh marks.
+              const enabled = isSuggestionsEnabled(state);
+              if (enabled) {
+                const suggestionType = state.schema.marks.proofSuggestion;
+                if (suggestionType) {
+                  const currentStored = tr.storedMarks ?? $from.marks();
+                  const clean = currentStored.filter((m: Mark) => m.type !== suggestionType);
+                  tr.setStoredMarks(clean);
+                }
+              }
+              console.log('[suggestions.beforeinput.insertParagraph.split]', {
+                from,
+                enabled,
+                depth: $from.depth,
+              });
+              view.dispatch(tr);
+              event.preventDefault();
+              return true;
+            }
+          }
+
           if (!isSuggestionsEnabled(view.state)) return false;
           if (view.composing) return false;
-          const inputEvent = event as InputEvent;
           const pendingIntent = takePendingModifiedDeleteIntent(view);
           const intent = __debugResolveTrackedDeleteIntentForBeforeInput(
             inputEvent.inputType ?? '',

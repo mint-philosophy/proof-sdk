@@ -2774,7 +2774,7 @@ async function updateSuggestionStatusAsync(
       nextMarks: nextMarks as unknown as Record<string, unknown>,
       source: `engine:${status}:${actor}:materialized`,
       baseRevision: doc.revision,
-      strictLiveDoc: true,
+      strictLiveDoc: false,
       guardPathologicalGrowth: true,
     });
     if (!mutation.ok) {
@@ -2843,7 +2843,7 @@ async function updateSuggestionStatusAsync(
           nextMarks: nextMarks as unknown as Record<string, unknown>,
           source: `engine:${status}:${actor}:fallback`,
           baseRevision: doc.revision,
-          strictLiveDoc: true,
+          strictLiveDoc: false,
           guardPathologicalGrowth: true,
         });
         if (!mutation.ok) {
@@ -2895,7 +2895,7 @@ async function updateSuggestionStatusAsync(
         nextMarks: nextMarks as unknown as Record<string, unknown>,
         source: `engine:${status}:${actor}:fallback`,
         baseRevision: doc.revision,
-        strictLiveDoc: true,
+        strictLiveDoc: false,
         guardPathologicalGrowth: true,
       });
       if (!mutation.ok) {
@@ -2976,7 +2976,7 @@ async function updateSuggestionStatusAsync(
     nextMarks,
     source: `engine:${status}:${actor}`,
     ...buildCanonicalMutationBaseArgs(doc, context),
-    strictLiveDoc: true,
+    strictLiveDoc: false,
     guardPathologicalGrowth: true,
   });
   if (!mutation.ok) {
@@ -3254,7 +3254,7 @@ async function acceptAllSuggestionsAsync(
     nextMarks: nextMarks as unknown as Record<string, unknown>,
     source: `engine:accepted.batch:${actor}`,
     ...buildCanonicalMutationBaseArgs(doc, context),
-    strictLiveDoc: true,
+    strictLiveDoc: false,
     guardPathologicalGrowth: true,
   });
   if (!mutation.ok) {

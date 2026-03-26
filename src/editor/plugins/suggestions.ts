@@ -2252,7 +2252,9 @@ export function wrapTransactionForSuggestions(
  */
 export function isSuggestionsEnabled(state: EditorState): boolean {
   const pluginState = suggestionsPluginKey.getState(state);
-  return pluginState?.enabled ?? false;
+  const pluginEnabled = pluginState?.enabled ?? false;
+  // Module flag is the authoritative source — plugin state can lag behind
+  return pluginEnabled || suggestionsModuleEnabled;
 }
 
 /**

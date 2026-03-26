@@ -7190,6 +7190,7 @@ class ProofEditorImpl implements ProofEditor {
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
       currentEnabled = isSuggestionsEnabledPlugin(view.state);
+      console.log('[setSuggestionsEnabled]', { requested: enabled, currentEnabled, willChange: currentEnabled !== enabled });
       if (currentEnabled !== enabled) {
         if (enabled) {
           enableSuggestionsPlugin(view);
@@ -7202,7 +7203,7 @@ class ProofEditorImpl implements ProofEditor {
         setSuggestionDisplayMode(view, 'simple');
         view.dom.dataset.trackChangesView = 'simple';
       }
-      console.log('[setSuggestionsEnabled]', currentEnabled ? 'enabled' : 'disabled');
+      console.log('[setSuggestionsEnabled.result]', currentEnabled ? 'enabled' : 'disabled');
     });
     this.updateShareBannerTrackChangesDisplay();
     return currentEnabled;

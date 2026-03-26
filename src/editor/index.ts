@@ -11525,19 +11525,15 @@ class ProofEditorImpl implements ProofEditor {
           if (parent.type.name === 'code_block') {
             // In code block, just insert newline
             tr = tr.insertText('\n', from, to);
+          } else if (parent.isTextblock) {
+            // Normal case: cursor is inside a paragraph or other text block — split it
+            tr = tr.split(from);
           } else {
-            // Split the block (create new paragraph)
-            const canSplit = tr.doc.resolve(from).parent.type.spec.content?.includes('block');
-            if (canSplit || tr.doc.resolve(from).depth > 0) {
-              tr = tr.split(from);
-            } else {
-              // Fallback: insert hard break
-              const hardBreak = state.schema.nodes.hard_break;
-              if (hardBreak) {
-                tr = tr.replaceSelectionWith(hardBreak.create());
-              } else {
-                tr = tr.insertText('\n', from, to);
-              }
+            // Cursor is at a block boundary (e.g., end of doc after last paragraph).
+            // Insert a new empty paragraph instead of splitting.
+            const paragraphType = state.schema.nodes.paragraph;
+            if (paragraphType) {
+              tr = tr.insert(from, paragraphType.createAndFill()!);
             }
           }
           handled = true;

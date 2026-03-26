@@ -225,6 +225,25 @@ function resolveTrackedTextInputRange(
     return { from: selection.from, to: selection.to };
   }
 
+  // Skip past delete marks at cursor position so new text appears after
+  // the deletion rather than being trapped before it.
+  if (from === to) {
+    const $pos = state.doc.resolve(from);
+    const nodeAfter = $pos.nodeAfter;
+    if (nodeAfter?.isText) {
+      const deleteMark = nodeAfter.marks.find((m) =>
+        m.type.name === 'proofSuggestion'
+        && normalizeSuggestionKind(m.attrs.kind) === 'delete'
+      );
+      if (deleteMark && typeof deleteMark.attrs.id === 'string') {
+        const deleteRange = resolveLiveDeleteSuggestionRange(state.doc, deleteMark.attrs.id);
+        if (deleteRange && deleteRange.from === from) {
+          return { from: deleteRange.to, to: deleteRange.to };
+        }
+      }
+    }
+  }
+
   return { from, to };
 }
 
@@ -835,6 +854,37 @@ function startsAtTextblockBoundary(
   return resolved.parent.isTextblock && resolved.parentOffset === 0;
 }
 
+/**
+ * Check whether the text at [from, to) in newDoc already existed as plain
+ * (non-suggestion) content at the same position range in oldDoc.  If it did,
+ * the text was authored content typed with TC off and must NOT be absorbed
+ * into an adjacent insert suggestion by the merge logic.
+ */
+function isPreExistingPlainText(
+  oldDoc: ProseMirrorNode,
+  from: number,
+  to: number,
+  text: string,
+): boolean {
+  if (from >= oldDoc.content.size || to > oldDoc.content.size) return false;
+  try {
+    const oldText = oldDoc.textBetween(from, to, '', '');
+    if (oldText !== text) return false;
+    // Verify the old text had no suggestion marks at this range
+    let hasSuggestion = false;
+    oldDoc.nodesBetween(from, to, (node) => {
+      if (!node.isText) return true;
+      if (node.marks.some((m) => m.type.name === 'proofSuggestion')) {
+        hasSuggestion = true;
+      }
+      return !hasSuggestion;
+    });
+    return !hasSuggestion;
+  } catch {
+    return false;
+  }
+}
+
 function buildAdjacentSplitInsertMergeTransaction(
   oldState: EditorState,
   newState: EditorState,
@@ -894,6 +944,9 @@ function buildAdjacentSplitInsertMergeTransaction(
         continue;
       }
       if (!isRecentPendingInsertFragment(rightMeta)) {
+        continue;
+      }
+      if (isPreExistingPlainText(oldState.doc, left.from, left.to, left.text)) {
         continue;
       }
 
@@ -988,6 +1041,15 @@ function buildAdjacentSplitInsertMergeTransaction(
         });
         continue;
       }
+      if (isPreExistingPlainText(oldState.doc, gap.from, gap.to, gap.text)) {
+        console.log('[suggestions.mergeCheck.skip]', {
+          reason: 'gap-is-pre-existing-authored-text',
+          leftId: left.id,
+          rightId: right.id,
+          gapText: gap.text,
+        });
+        continue;
+      }
 
       if (authoredType) {
         tr = tr.removeMark(gap.from, gap.to, authoredType);
@@ -1046,6 +1108,7 @@ function buildAdjacentSplitInsertMergeTransaction(
         && areInlineRunsAdjacent(gap, right)
         && isRecentPendingInsertFragment(leftMeta)
         && right.text.length <= 4
+        && !isPreExistingPlainText(oldState.doc, right.from, right.to, right.text)
       ) {
         if (authoredType) {
           tr = tr.removeMark(right.from, right.to, authoredType);
@@ -1071,6 +1134,9 @@ function buildAdjacentSplitInsertMergeTransaction(
 
     if (gap?.kind === 'plain' && !right && isRecentPendingInsertFragment(leftMeta) && gap.text.length <= 4) {
       if (!areInlineRunsAdjacent(left, gap)) {
+        continue;
+      }
+      if (isPreExistingPlainText(oldState.doc, gap.from, gap.to, gap.text)) {
         continue;
       }
       if (authoredType) {
@@ -2161,7 +2227,34 @@ export const suggestionsPlugin = $prose(() => {
         });
       }
 
-      if (!isEnabled || !trs.some((tr) => tr.docChanged)) return null;
+      if (!isEnabled) {
+        // When TC is off, strip any suggestion marks that leaked onto new content
+        // (e.g. from mark boundary inheritance or stale stored marks)
+        if (trs.some((tr) => tr.docChanged && !tr.getMeta('suggestions-wrapped') && !tr.getMeta('document-load'))) {
+          const suggestionType = newState.schema.marks.proofSuggestion;
+          if (suggestionType) {
+            const diff = oldState.doc.content.findDiffStart(newState.doc.content);
+            if (typeof diff === 'number') {
+              const diffEnd = oldState.doc.content.findDiffEnd(newState.doc.content);
+              if (diffEnd && diffEnd.b > diff) {
+                let hasLeakedMark = false;
+                newState.doc.nodesBetween(diff, diffEnd.b, (node) => {
+                  if (!node.isText) return true;
+                  if (node.marks.some((m) => m.type === suggestionType)) hasLeakedMark = true;
+                  return !hasLeakedMark;
+                });
+                if (hasLeakedMark) {
+                  const tr = newState.tr.removeMark(diff, diffEnd.b, suggestionType);
+                  tr.setMeta('suggestions-wrapped', true);
+                  return tr;
+                }
+              }
+            }
+          }
+        }
+        return null;
+      }
+      if (!trs.some((tr) => tr.docChanged)) return null;
       const hasWrappedSuggestionTransaction = trs.some((tr) => tr.getMeta('suggestions-wrapped'));
       const hasBlockingMarksMeta = trs.some((tr) => {
         const meta = tr.getMeta(marksPluginKey);

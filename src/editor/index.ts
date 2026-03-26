@@ -11688,6 +11688,7 @@ if (window.location?.pathname?.startsWith('/d/')) {
         // ignore focus failures
       }
     },
+    simulateKeypress: (key: string) => window.proof.simulateKeypress(key),
   };
 }
 

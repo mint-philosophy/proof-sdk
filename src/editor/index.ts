@@ -7230,6 +7230,15 @@ class ProofEditorImpl implements ProofEditor {
         view.dom.dataset.trackChangesView = 'simple';
       }
       console.log('[setSuggestionsEnabled.result]', currentEnabled ? 'enabled' : 'disabled');
+
+      // Restore editor focus after toggle — clicking the TC button via
+      // programmatic click (CDP, accessibility API) may not fire pointerdown's
+      // preventDefault, causing the editor to blur and lose cursor position.
+      // Refocusing here restores the DOM selection from ProseMirror's internal
+      // selection state, so subsequent typing lands at the correct position.
+      if (!view.hasFocus()) {
+        view.focus();
+      }
     });
     this.updateShareBannerTrackChangesDisplay();
     return currentEnabled;
@@ -7253,6 +7262,9 @@ class ProofEditorImpl implements ProofEditor {
         view.dom.dataset.trackChangesView = 'simple';
       }
       console.log('[toggleSuggestions] Suggestions:', enabled ? 'enabled' : 'disabled');
+      if (!view.hasFocus()) {
+        view.focus();
+      }
     });
     this.updateShareBannerTrackChangesDisplay();
     return enabled;

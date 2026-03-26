@@ -2288,7 +2288,9 @@ export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Tr
  * Toggle suggestions
  */
 export function toggleSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): boolean {
-  const enabled = isSuggestionsEnabled(view.state);
+  const pluginEnabled = isSuggestionsEnabled(view.state);
+  const enabled = pluginEnabled || suggestionsModuleEnabled;
+  console.log('[suggestions.toggleSuggestions]', { pluginEnabled, suggestionsModuleEnabled, willDisable: enabled });
   if (enabled) {
     disableSuggestions(view);
   } else {

@@ -348,7 +348,13 @@ export interface EditSession {
 let markIdCounter = 0;
 
 export function generateMarkId(): string {
-  return `m${Date.now()}_${++markIdCounter}`;
+  const id = `m${Date.now()}_${++markIdCounter}`;
+  // Diagnostic: trace every mark ID creation to find TC-off mark leakage
+  try {
+    const stack = new Error().stack?.split('\n').slice(1, 4).map(l => l.trim()).join(' << ') ?? '';
+    console.log('[generateMarkId]', id, stack);
+  } catch { /* best-effort diagnostic */ }
+  return id;
 }
 
 export function generateThreadId(): string {

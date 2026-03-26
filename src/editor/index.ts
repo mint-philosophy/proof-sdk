@@ -5909,10 +5909,20 @@ class ProofEditorImpl implements ProofEditor {
           }
 
           // Wrap the transaction to convert edits to suggestions
+          console.log('[tc.dispatch.wrap]', {
+            suggestionsEnabled,
+            docChanged: tr.docChanged,
+            selFrom: tr.selection?.from,
+          });
           const wrappedTr = wrapTransactionForSuggestions(tr, view.state, true);
           dispatchWithRevision(wrappedTr);
         } else {
           if (tr?.docChanged) {
+            console.log('[tc.dispatch.passthrough]', {
+              suggestionsEnabled,
+              docChanged: true,
+              selFrom: tr.selection?.from,
+            });
             this.pendingDomSuggestionSelection = null;
           }
           dispatchWithRevision(tr);

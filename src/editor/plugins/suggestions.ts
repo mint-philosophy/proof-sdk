@@ -855,34 +855,42 @@ function startsAtTextblockBoundary(
 }
 
 /**
- * Check whether the text at [from, to) in newDoc already existed as plain
- * (non-suggestion) content at the same position range in oldDoc.  If it did,
- * the text was authored content typed with TC off and must NOT be absorbed
- * into an adjacent insert suggestion by the merge logic.
+ * Check whether the text at [from, to) in newState already existed as plain
+ * (non-suggestion) content in oldState.  If it did, the text was authored
+ * content typed with TC off and must NOT be absorbed into an adjacent
+ * insert suggestion by the merge logic.
+ *
+ * Uses findDiffStart/findDiffEnd to avoid position-shift bugs:
+ * content outside the diff range is definitely unchanged (pre-existing).
+ * Content inside the diff range falls back to a full-text search in oldDoc.
  */
 function isPreExistingPlainText(
-  oldDoc: ProseMirrorNode,
+  oldState: EditorState,
+  newState: EditorState,
   from: number,
   to: number,
   text: string,
 ): boolean {
-  if (from >= oldDoc.content.size || to > oldDoc.content.size) return false;
+  if (text.length === 0) return false;
+
+  const diffStart = oldState.doc.content.findDiffStart(newState.doc.content);
+  if (typeof diffStart !== 'number') return true; // docs identical
+
+  const diffEnd = oldState.doc.content.findDiffEnd(newState.doc.content);
+  if (!diffEnd) return true; // docs identical
+
+  // Content entirely before or after the changed range is unchanged
+  if (to <= diffStart || from >= diffEnd.b) return true;
+
+  // The plain run overlaps the diff range — it might be newly inserted.
+  // Conservative fallback: search oldDoc's full text for the string.
+  // False positives (text found elsewhere) are safe — we just skip the merge.
   try {
-    const oldText = oldDoc.textBetween(from, to, '', '');
-    if (oldText !== text) return false;
-    // Verify the old text had no suggestion marks at this range
-    let hasSuggestion = false;
-    oldDoc.nodesBetween(from, to, (node) => {
-      if (!node.isText) return true;
-      if (node.marks.some((m) => m.type.name === 'proofSuggestion')) {
-        hasSuggestion = true;
-      }
-      return !hasSuggestion;
-    });
-    return !hasSuggestion;
-  } catch {
-    return false;
-  }
+    const oldFullText = oldState.doc.textBetween(0, oldState.doc.content.size, '\0', '\0');
+    if (oldFullText.includes(text)) return true;
+  } catch { /* fall through */ }
+
+  return false;
 }
 
 function buildAdjacentSplitInsertMergeTransaction(
@@ -946,7 +954,7 @@ function buildAdjacentSplitInsertMergeTransaction(
       if (!isRecentPendingInsertFragment(rightMeta)) {
         continue;
       }
-      if (isPreExistingPlainText(oldState.doc, left.from, left.to, left.text)) {
+      if (isPreExistingPlainText(oldState, newState, left.from, left.to, left.text)) {
         continue;
       }
 
@@ -1041,7 +1049,7 @@ function buildAdjacentSplitInsertMergeTransaction(
         });
         continue;
       }
-      if (isPreExistingPlainText(oldState.doc, gap.from, gap.to, gap.text)) {
+      if (isPreExistingPlainText(oldState, newState, gap.from, gap.to, gap.text)) {
         console.log('[suggestions.mergeCheck.skip]', {
           reason: 'gap-is-pre-existing-authored-text',
           leftId: left.id,
@@ -1108,7 +1116,7 @@ function buildAdjacentSplitInsertMergeTransaction(
         && areInlineRunsAdjacent(gap, right)
         && isRecentPendingInsertFragment(leftMeta)
         && right.text.length <= 4
-        && !isPreExistingPlainText(oldState.doc, right.from, right.to, right.text)
+        && !isPreExistingPlainText(oldState, newState, right.from, right.to, right.text)
       ) {
         if (authoredType) {
           tr = tr.removeMark(right.from, right.to, authoredType);
@@ -1136,7 +1144,7 @@ function buildAdjacentSplitInsertMergeTransaction(
       if (!areInlineRunsAdjacent(left, gap)) {
         continue;
       }
-      if (isPreExistingPlainText(oldState.doc, gap.from, gap.to, gap.text)) {
+      if (isPreExistingPlainText(oldState, newState, gap.from, gap.to, gap.text)) {
         continue;
       }
       if (authoredType) {
@@ -1784,6 +1792,64 @@ export function wrapTransactionForSuggestions(
       }
       // CASE 2: Pure insertion (no deletion)
       else if (insertedText && !deletedText) {
+        // Delete mark cursor skip: if the insertion position is at the left
+        // boundary of a delete suggestion, move it past the delete so new text
+        // appears after the deletion rather than before it.
+        // This runs in wrapTransactionForSuggestions (not just handleTextInput)
+        // so it also catches DOM-observer-driven input from CGEvent keystrokes.
+        if (safeFrom === safeTo) {
+          try {
+            const $insPos = newTr.doc.resolve(safeFrom);
+            const afterNode = $insPos.nodeAfter;
+            if (afterNode?.isText) {
+              const delMark = afterNode.marks.find((m: any) =>
+                m.type.name === 'proofSuggestion'
+                && normalizeSuggestionKind(m.attrs.kind) === 'delete'
+              );
+              if (delMark && typeof delMark.attrs.id === 'string') {
+                const delRange = resolveLiveDeleteSuggestionRange(newTr.doc, delMark.attrs.id);
+                if (delRange && delRange.from === safeFrom) {
+                  console.log('[suggestions.deleteMarkCursorSkip]', {
+                    from: safeFrom,
+                    skipTo: delRange.to,
+                    deleteId: delMark.attrs.id,
+                  });
+                  // Adjust insertion: insert text, then move it past the delete mark.
+                  // We do this by changing the insertion position in the newTr.
+                  const skipTo = Math.min(delRange.to, newTr.doc.content.size);
+                  newTr.insertText(insertedText, skipTo);
+                  const suggestionId = generateMarkId();
+                  const createdAt = new Date().toISOString();
+                  newTr.addMark(
+                    skipTo,
+                    skipTo + insertedText.length,
+                    suggestionType.create({ id: suggestionId, kind: 'insert', by: actor }),
+                  );
+                  writeOffset += insertedText.length;
+                  metadata = {
+                    ...metadata,
+                    [suggestionId]: {
+                      ...buildSuggestionMetadata('insert', actor, insertedText, createdAt),
+                      ...buildCollapsedInsertAnchorMetadata(skipTo),
+                    },
+                  };
+                  metadataChanged = true;
+                  lastInsertByActor.set(actor, {
+                    id: suggestionId,
+                    from: skipTo,
+                    to: skipTo + insertedText.length,
+                    by: actor,
+                    updatedAt: Date.now(),
+                  });
+                  setSelectionAfterInsertedText(newTr, skipTo + insertedText.length);
+                  // Skip to next step — this insertion is handled
+                  continue;
+                }
+              }
+            }
+          } catch { /* fall through to normal insertion logic */ }
+        }
+
         const now = Date.now();
         const whitespaceOnly = isWhitespaceOnly(insertedText);
         const candidate = getCoalescableInsertCandidate(newTr.doc, metadata, safeFrom, actor, now);
@@ -2180,6 +2246,15 @@ export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Tra
 export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {
   resetSuggestionsInsertCoalescing();
   const tr = view.state.tr.setMeta(suggestionsPluginKey, { enabled: false });
+  // Clear stored marks containing proofSuggestion to prevent mark leakage
+  // into the next character typed with TC off
+  const suggestionType = view.state.schema.marks.proofSuggestion;
+  if (suggestionType) {
+    const storedMarks = view.state.storedMarks ?? view.state.selection.$from.marks();
+    if (storedMarks.some((m) => m.type === suggestionType)) {
+      tr.setStoredMarks(storedMarks.filter((m) => m.type !== suggestionType));
+    }
+  }
   view.dispatch(tr);
 }
 
@@ -2229,7 +2304,7 @@ export const suggestionsPlugin = $prose(() => {
 
       if (!isEnabled) {
         // When TC is off, strip any suggestion marks that leaked onto new content
-        // (e.g. from mark boundary inheritance or stale stored marks)
+        // (e.g. from mark boundary inheritance, stale stored marks, or Yjs sync)
         if (trs.some((tr) => tr.docChanged && !tr.getMeta('suggestions-wrapped') && !tr.getMeta('document-load'))) {
           const suggestionType = newState.schema.marks.proofSuggestion;
           if (suggestionType) {
@@ -2244,6 +2319,11 @@ export const suggestionsPlugin = $prose(() => {
                   return !hasLeakedMark;
                 });
                 if (hasLeakedMark) {
+                  console.log('[suggestions.appendTransaction.tcOffStrip]', {
+                    diff,
+                    diffEndB: diffEnd.b,
+                    isEnabled,
+                  });
                   const tr = newState.tr.removeMark(diff, diffEnd.b, suggestionType);
                   tr.setMeta('suggestions-wrapped', true);
                   return tr;
@@ -2251,6 +2331,19 @@ export const suggestionsPlugin = $prose(() => {
               }
             }
           }
+        }
+        // Also clear stored marks when TC is off — prevents proofSuggestion from
+        // leaking onto the next typed character via ProseMirror's stored marks
+        const storedMarks = newState.storedMarks;
+        if (storedMarks?.some((m) => m.type.name === 'proofSuggestion')) {
+          console.log('[suggestions.appendTransaction.clearStoredMarks]', {
+            storedMarkTypes: storedMarks.map((m) => m.type.name),
+          });
+          const tr = newState.tr.setStoredMarks(
+            storedMarks.filter((m) => m.type.name !== 'proofSuggestion'),
+          );
+          tr.setMeta('suggestions-wrapped', true);
+          return tr;
         }
         return null;
       }

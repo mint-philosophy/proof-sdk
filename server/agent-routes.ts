@@ -644,8 +644,14 @@ function hasProjectedMarkFallback(
   const markId = typeof payload.markId === 'string' && payload.markId.trim().length > 0
     ? payload.markId.trim()
     : null;
-  if (!markId) return false;
-  return Object.prototype.hasOwnProperty.call(mutationBase.marks, markId);
+  if (markId) {
+    return Object.prototype.hasOwnProperty.call(mutationBase.marks, markId);
+  }
+  const markIds = Array.isArray(payload.markIds)
+    ? payload.markIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0).map((id) => id.trim())
+    : [];
+  if (markIds.length === 0) return false;
+  return markIds.every((id) => Object.prototype.hasOwnProperty.call(mutationBase.marks, id));
 }
 
 function deriveAgentNameFromId(id: string): string {

@@ -318,20 +318,27 @@ function getCoalescableInsertCandidate(
   now: number
 ): { id: string; range: MarkRange; direction: 'append' | 'prepend'; insertPos: number } | null {
   const cached = lastInsertByActor.get(by);
-  if (!cached) return null;
-  if (now - cached.updatedAt > COALESCE_WINDOW_MS) {
+  if (!cached) {
+    console.log('[coalesce.debug] no cached entry for actor', by);
+    return null;
+  }
+  const elapsed = now - cached.updatedAt;
+  if (elapsed > COALESCE_WINDOW_MS) {
+    console.log('[coalesce.debug] expired', { elapsed, COALESCE_WINDOW_MS, cachedId: cached.id });
     lastInsertByActor.delete(by);
     return null;
   }
 
   const stored = metadata[cached.id];
   if (stored?.kind && stored.kind !== 'insert') {
+    console.log('[coalesce.debug] wrong kind', { cachedId: cached.id, kind: stored.kind });
     lastInsertByActor.delete(by);
     return null;
   }
 
   const status = stored?.status;
   if (status && status !== 'pending') {
+    console.log('[coalesce.debug] wrong status', { cachedId: cached.id, status });
     lastInsertByActor.delete(by);
     return null;
   }
@@ -339,9 +346,12 @@ function getCoalescableInsertCandidate(
   const range = resolveLiveInsertSuggestionRange(doc, cached.id)
     ?? (stored?.kind === 'insert' && stored.range ? { from: stored.range.from, to: stored.range.to } : null);
   if (!range) {
+    console.log('[coalesce.debug] range not found', { cachedId: cached.id, storedKind: stored?.kind, storedRange: stored?.range });
     lastInsertByActor.delete(by);
     return null;
   }
+
+  console.log('[coalesce.debug] range resolved', { cachedId: cached.id, range, pos, elapsed });
 
   if (range.to === pos) {
     return { id: cached.id, range, direction: 'append', insertPos: pos };
@@ -350,6 +360,8 @@ function getCoalescableInsertCandidate(
   if (range.from === pos) {
     return { id: cached.id, range, direction: 'prepend', insertPos: pos };
   }
+
+  console.log('[coalesce.debug] position mismatch', { cachedId: cached.id, rangeFrom: range.from, rangeTo: range.to, pos });
 
   const trailingDeleteRange = findTrailingDeleteRangeForInsert(doc, range, by, pos);
   if (trailingDeleteRange) {

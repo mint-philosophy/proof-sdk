@@ -11662,6 +11662,137 @@ class ProofEditorImpl implements ProofEditor {
 
     return result;
   }
+
+  /**
+   * Set the editor selection to a specific range.
+   * @param from - Start position
+   * @param to - End position (defaults to from for a collapsed cursor)
+   * @returns true if successful
+   */
+  setSelection(from: number, to?: number): boolean {
+    if (!this.editor) {
+      console.warn('[setSelection] Editor not initialized');
+      return false;
+    }
+
+    let success = false;
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const { state } = view;
+      const resolvedTo = to ?? from;
+
+      const docSize = state.doc.content.size;
+      if (from < 0 || resolvedTo < 0 || from > docSize || resolvedTo > docSize) {
+        console.warn('[setSelection] Position out of range:', { from, to: resolvedTo, docSize });
+        return;
+      }
+
+      const selection = TextSelection.create(state.doc, from, resolvedTo);
+      const tr = state.tr.setSelection(selection);
+      view.dispatch(tr);
+      success = true;
+      console.log('[setSelection] Set selection:', { from, to: resolvedTo });
+    });
+
+    return success;
+  }
+
+  /**
+   * Find text in the document and return its position range.
+   * Searches within individual text nodes first; for cross-node matches,
+   * searches each block's textContent.
+   * @param text - Text to search for
+   * @returns Position range { from, to } or null if not found
+   */
+  findText(text: string): { from: number; to: number } | null {
+    if (!this.editor) {
+      console.warn('[findText] Editor not initialized');
+      return null;
+    }
+
+    let result: { from: number; to: number } | null = null;
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const { doc } = view.state;
+
+      // First pass: search within individual text nodes (fast path)
+      doc.descendants((node, pos) => {
+        if (result) return false;
+        if (node.isText && node.text) {
+          const idx = node.text.indexOf(text);
+          if (idx >= 0) {
+            result = { from: pos + idx, to: pos + idx + text.length };
+            return false;
+          }
+        }
+      });
+
+      // Second pass: search across text nodes within each block
+      if (!result) {
+        doc.forEach((blockNode, blockOffset) => {
+          if (result) return;
+          const blockText = blockNode.textContent;
+          const idx = blockText.indexOf(text);
+          if (idx < 0) return;
+
+          // Map text offset to document position within this block
+          const blockPos = blockOffset + 1; // +1 for block open tag
+          let charCount = 0;
+          let fromPos = -1;
+          let toPos = -1;
+          blockNode.forEach((child, childOffset) => {
+            if (toPos >= 0) return;
+            if (child.isText && child.text) {
+              const childStart = blockPos + childOffset;
+              const textEnd = charCount + child.text.length;
+
+              if (fromPos < 0 && idx >= charCount && idx < textEnd) {
+                fromPos = childStart + (idx - charCount);
+              }
+              if (fromPos >= 0) {
+                const endIdx = idx + text.length;
+                if (endIdx <= textEnd) {
+                  toPos = childStart + (endIdx - charCount);
+                }
+              }
+              charCount += child.text.length;
+            }
+          });
+
+          if (fromPos >= 0 && toPos >= 0) {
+            result = { from: fromPos, to: toPos };
+          }
+        });
+      }
+
+      if (result) {
+        console.log('[findText] Found:', { text, ...(result as { from: number; to: number }) });
+      } else {
+        console.warn('[findText] Not found:', text);
+      }
+    });
+
+    return result;
+  }
+
+  /**
+   * Get the document content size.
+   * @returns Document content size or -1 if editor not initialized
+   */
+  getDocSize(): number {
+    if (!this.editor) {
+      console.warn('[getDocSize] Editor not initialized');
+      return -1;
+    }
+
+    let size = -1;
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      size = view.state.doc.content.size;
+    });
+
+    return size;
+  }
 }
 
 // Initialize global proof instance
@@ -11689,6 +11820,11 @@ if (window.location?.pathname?.startsWith('/d/')) {
       }
     },
     simulateKeypress: (key: string) => window.proof.simulateKeypress(key),
+    simulateTyping: (text: string) => window.proof.simulateTyping(text),
+    getCursorPosition: () => window.proof.getCursorPosition(),
+    setSelection: (from: number, to?: number) => (window.proof as ProofEditorImpl).setSelection(from, to),
+    findText: (text: string) => (window.proof as ProofEditorImpl).findText(text),
+    getDocSize: () => (window.proof as ProofEditorImpl).getDocSize(),
   };
 }
 

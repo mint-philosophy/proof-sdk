@@ -64,6 +64,7 @@ import {
   hasRecentSuggestionsInsertCoalescingState,
   transactionCarriesInsertedSuggestionMarks,
   wrapTransactionForSuggestions,
+  isSuggestionsModuleEnabled,
 } from './plugins/suggestions';
 import {
   buildRemoteInsertSuggestionBoundaryRepair,
@@ -5808,7 +5809,9 @@ class ProofEditorImpl implements ProofEditor {
         const isSuggestionMetaChange = tr?.getMeta?.(suggestionsPluginKey) !== undefined;
         const isHistoryChange = tr?.getMeta?.('history$') !== undefined;
         const pluginState = suggestionsPluginKey.getState(view.state);
-        const suggestionsEnabled = pluginState?.enabled ?? false;
+        const pluginEnabled = pluginState?.enabled ?? false;
+        // AND with module-level flag — catches stale plugin state reads
+        const suggestionsEnabled = pluginEnabled && isSuggestionsModuleEnabled();
         const incomingYjsChangeSummary = yjsOrigin.isYjsOrigin && tr?.docChanged
           ? summarizeIncomingYjsDocChange(tr)
           : [];

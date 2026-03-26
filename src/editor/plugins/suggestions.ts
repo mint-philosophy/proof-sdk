@@ -56,6 +56,19 @@ const lastInsertByActor = new Map<string, InsertCoalesceState>();
 const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
 const PENDING_DELETE_INTENT_TTL_MS = 1500;
 
+/**
+ * Module-level enabled flag — independent of ProseMirror plugin state.
+ * This provides a reliable fallback when plugin state reads return stale data
+ * (e.g. due to dispatch interceptor timing issues with the DOM observer).
+ * Updated synchronously by enableSuggestions/disableSuggestions.
+ */
+let suggestionsModuleEnabled = false;
+
+/** Check the module-level enabled flag (independent of plugin state). */
+export function isSuggestionsModuleEnabled(): boolean {
+  return suggestionsModuleEnabled;
+}
+
 export function resetSuggestionsInsertCoalescing(): void {
   lastInsertByActor.clear();
 }
@@ -1523,6 +1536,17 @@ export function wrapTransactionForSuggestions(
   if (!enabled || !tr.docChanged) {
     return tr;
   }
+  // Module-level defense: even if the dispatch interceptor passed enabled=true,
+  // refuse to wrap when the module flag says TC is off. This catches stale
+  // plugin state reads in the dispatch interceptor.
+  if (!suggestionsModuleEnabled) {
+    console.log('[suggestions.wrapTransactionForSuggestions.moduleDisabled]', {
+      enabled,
+      suggestionsModuleEnabled,
+      docChanged: tr.docChanged,
+    });
+    return tr;
+  }
   if (isExplicitYjsChangeOriginTransaction(tr)) {
     return tr;
   }
@@ -2235,6 +2259,7 @@ export function isSuggestionsEnabled(state: EditorState): boolean {
  * Enable suggestions
  */
 export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {
+  suggestionsModuleEnabled = true;
   resetSuggestionsInsertCoalescing();
   const tr = view.state.tr.setMeta(suggestionsPluginKey, { enabled: true });
   view.dispatch(tr);
@@ -2244,6 +2269,7 @@ export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Tra
  * Disable suggestions
  */
 export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {
+  suggestionsModuleEnabled = false;
   resetSuggestionsInsertCoalescing();
   const tr = view.state.tr.setMeta(suggestionsPluginKey, { enabled: false });
   // Clear stored marks containing proofSuggestion to prevent mark leakage
@@ -2286,7 +2312,15 @@ export const suggestionsPlugin = $prose(() => {
       apply(tr, value): SuggestionState {
         const meta = tr.getMeta(suggestionsPluginKey);
         if (meta !== undefined) {
-          return { ...value, ...meta };
+          const next = { ...value, ...meta };
+          if (next.enabled !== value.enabled) {
+            console.log('[suggestions.pluginState.transition]', {
+              from: value.enabled,
+              to: next.enabled,
+              docChanged: tr.docChanged,
+            });
+          }
+          return next;
         }
         return value;
       },
@@ -2302,10 +2336,14 @@ export const suggestionsPlugin = $prose(() => {
         });
       }
 
-      if (!isEnabled) {
-        // When TC is off, strip any suggestion marks that leaked onto new content
-        // (e.g. from mark boundary inheritance, stale stored marks, or Yjs sync)
-        if (trs.some((tr) => tr.docChanged && !tr.getMeta('suggestions-wrapped') && !tr.getMeta('document-load'))) {
+      // Use module flag as fallback — catches cases where plugin state
+      // reads return stale data in the dispatch interceptor
+      const effectivelyDisabled = !isEnabled || !suggestionsModuleEnabled;
+      if (effectivelyDisabled) {
+        // When TC is off, strip any suggestion marks that leaked onto new content.
+        // We check ALL doc-changing transactions, including those marked as
+        // 'suggestions-wrapped' — if TC is off, wrapped marks are leaks too.
+        if (trs.some((tr) => tr.docChanged && !tr.getMeta('document-load'))) {
           const suggestionType = newState.schema.marks.proofSuggestion;
           if (suggestionType) {
             const diff = oldState.doc.content.findDiffStart(newState.doc.content);
@@ -2323,6 +2361,8 @@ export const suggestionsPlugin = $prose(() => {
                     diff,
                     diffEndB: diffEnd.b,
                     isEnabled,
+                    suggestionsModuleEnabled,
+                    hadWrappedTr: trs.some((tr) => tr.getMeta('suggestions-wrapped')),
                   });
                   const tr = newState.tr.removeMark(diff, diffEnd.b, suggestionType);
                   tr.setMeta('suggestions-wrapped', true);
@@ -2338,6 +2378,7 @@ export const suggestionsPlugin = $prose(() => {
         if (storedMarks?.some((m) => m.type.name === 'proofSuggestion')) {
           console.log('[suggestions.appendTransaction.clearStoredMarks]', {
             storedMarkTypes: storedMarks.map((m) => m.type.name),
+            suggestionsModuleEnabled,
           });
           const tr = newState.tr.setStoredMarks(
             storedMarks.filter((m) => m.type.name !== 'proofSuggestion'),

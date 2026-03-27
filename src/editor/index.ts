@@ -1644,7 +1644,14 @@ class ProofEditorImpl implements ProofEditor {
             try {
               this.editor.action((ctx) => {
                 const view = ctx.get(editorViewCtx);
-                mergedIncomingMarks = mergePendingServerMarks(getMarkMetadataWithQuotes(view.state), incomingMarks);
+                const pmMetadata = getMarkMetadataWithQuotes(view.state);
+                // Include lastReceivedServerMarks as fallback for marks not yet
+                // applied to ProseMirror (e.g. during initial collab hydration).
+                // PM state wins for marks that exist in both via spread order.
+                mergedIncomingMarks = mergePendingServerMarks(
+                  { ...this.lastReceivedServerMarks, ...pmMetadata },
+                  incomingMarks,
+                );
               });
             } catch (error) {
               console.warn('[collab.onMarks] Failed to merge incoming marks with local state:', error);

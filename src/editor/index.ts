@@ -9714,11 +9714,28 @@ class ProofEditorImpl implements ProofEditor {
       });
 
       tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });
-      const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)
-        || await this.applyShareMutationDocumentResult(result, {
-          skipReconnectTemplateSeed: true,
-          preserveEditorStateDuringReconnect: true,
-        });
+      let success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result);
+      if (!success) {
+        // Local resolution failed (markdown comparison mismatch). Collab was already
+        // disconnected by tryResolveShareReviewMutationLocally. Load the canonical
+        // server state directly with marks embedded, then clear the suppress flag so
+        // TC stays visible. Skip the collab reconnect cycle here — Y.js sync would
+        // overwrite the marks. The collab refresh timer will reconnect naturally.
+        const markdown = typeof result?.markdown === 'string' ? result.markdown : null;
+        const marks = (result?.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
+          ? result.marks as Record<string, StoredMark>
+          : {};
+        if (markdown !== null) {
+          this.pendingCollabReconnectTemplateOverride = null;
+          this.skipNextCollabTemplateSeed = false;
+          this.loadCanonicalShareDocument(markdown, marks);
+          this.suppressTrackChangesDuringCollabReconnect = false;
+          this.updateShareEditGate();
+          success = true;
+        } else {
+          success = await this.applyShareMutationDocumentResult(result);
+        }
+      }
       if (success && this.editor) {
         if (this.hasActiveRemoteCollabPeer()) {
           await this.waitForStableShareReviewMutationState();

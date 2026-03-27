@@ -2212,7 +2212,11 @@ class ProofEditorImpl implements ProofEditor {
         // The earlier applyLatestCollabMarksToEditor call in the sync handler often
         // fires before Y.js has pushed content, hitting the isEditorDocStructurallyEmpty
         // guard. This is the reliable point where the doc has content.
-        this.applyLatestCollabMarksToEditor();
+        //
+        // Use syncToYjs so marks are written into the Y.js document — without this,
+        // finalizeMarkTransaction sets ySyncPluginKey.isChangeOrigin which tells
+        // y-prosemirror NOT to sync, and the next Y.js reconciliation strips them.
+        this.rehydrateServerMarksAfterCollabHydration();
         return;
       }
 
@@ -2233,7 +2237,7 @@ class ProofEditorImpl implements ProofEditor {
         finish();
         this.markInitialCollabHydrationComplete();
         this.updateShareEditGate();
-        this.applyLatestCollabMarksToEditor();
+        this.rehydrateServerMarksAfterCollabHydration();
         return;
       }
       requestAnimationFrame(() => attempt(count + 1));
@@ -5111,7 +5115,7 @@ class ProofEditorImpl implements ProofEditor {
 
   applyExternalMarks(
     marks: Record<string, StoredMark>,
-    options?: { pruneMissingSuggestions?: boolean },
+    options?: { pruneMissingSuggestions?: boolean; syncToYjs?: boolean },
   ): void {
     if (!this.editor) return;
 
@@ -5122,6 +5126,7 @@ class ProofEditorImpl implements ProofEditor {
       applyRemoteMarks(view, marks, {
         hydrateAnchors: this.collabCanEdit,
         pruneMissingSuggestions: options?.pruneMissingSuggestions === true,
+        syncToYjs: options?.syncToYjs === true,
       });
     });
   }
@@ -5205,6 +5210,45 @@ class ProofEditorImpl implements ProofEditor {
           localTextPreview: view.state.doc.textBetween(0, view.state.doc.content.size, '\n', '\n').slice(0, 160),
         }, Object.prototype.hasOwnProperty.call(metadata, traceMarkId) ? 'warn' : 'info');
       });
+    }
+  }
+
+  /**
+   * After collab hydration, re-apply server marks with syncToYjs so they
+   * survive Y.js reconciliation, and re-enable TC if pending suggestion marks
+   * exist. loadDocument's stale-state guard disables suggestions on every doc
+   * load; without re-enabling, marks won't render as rails after refresh.
+   */
+  private rehydrateServerMarksAfterCollabHydration(): void {
+    if (!this.isShareMode || !this.collabEnabled || !this.editor) return;
+    if (this.isEditorDocStructurallyEmpty()) return;
+
+    const serverMarks = this.lastReceivedServerMarks;
+    const hasPendingSuggestions = Object.values(serverMarks).some(
+      (m) => (m.kind === 'insert' || m.kind === 'delete' || m.kind === 'replace')
+        && m.status !== 'accepted' && m.status !== 'rejected'
+    );
+
+    // Apply marks with syncToYjs — omits ySyncPluginKey.isChangeOrigin so
+    // y-prosemirror writes the marks into the Y.js document rather than
+    // treating them as ephemeral ProseMirror-only state.
+    this.applyingCollabRemote = true;
+    this.suppressMarksSync = true;
+    try {
+      this.applyExternalMarks(serverMarks, { syncToYjs: true });
+      this.resyncPendingInsertMetadataAfterRemoteApply(serverMarks);
+    } finally {
+      this.suppressMarksSync = false;
+      this.applyingCollabRemote = false;
+    }
+
+    // Re-enable track changes so suggestion marks render as rails.
+    // loadDocument disables suggestions as a stale-state guard; nothing
+    // in the normal collab reconnect path re-enables them.
+    if (hasPendingSuggestions) {
+      this.setSuggestionsEnabled(true);
+      this.suppressTrackChangesDuringCollabReconnect = false;
+      this.updateShareEditGate();
     }
   }
 

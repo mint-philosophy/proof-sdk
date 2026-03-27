@@ -994,7 +994,7 @@ function finalizeMarkTransaction(
   view: EditorView,
   tr: Transaction,
   metadata: Record<string, StoredMark>,
-  options?: { isRemote?: boolean; skipDocStamp?: boolean }
+  options?: { isRemote?: boolean; skipDocStamp?: boolean; syncToYjs?: boolean }
 ): void {
   const normalized = normalizeMetadata(metadata, tr.doc);
   if (!options?.skipDocStamp) {
@@ -1002,7 +1002,12 @@ function finalizeMarkTransaction(
   }
   tr = tr.setMeta(marksPluginKey, { type: 'SET_METADATA', metadata: normalized });
   if (options?.isRemote) {
-    tr = tr.setMeta(ySyncPluginKey, { isChangeOrigin: true });
+    // When syncToYjs is true, omit isChangeOrigin so y-prosemirror syncs
+    // the marks into the Y.js document. Used after collab hydration to
+    // ensure suggestion marks survive subsequent Y.js reconciliation.
+    if (!options?.syncToYjs) {
+      tr = tr.setMeta(ySyncPluginKey, { isChangeOrigin: true });
+    }
     tr = tr.setMeta('addToHistory', false);
   }
   view.dispatch(tr);
@@ -2061,6 +2066,7 @@ export function applyRemoteMarks(
     hydrateAnchors?: boolean;
     pruneMissingSuggestions?: boolean;
     hydrateAuthoredAnchors?: boolean;
+    syncToYjs?: boolean;
   }
 ): void {
   const canonicalMetadata = canonicalizeStoredMarks(metadata);
@@ -2209,7 +2215,7 @@ export function applyRemoteMarks(
     );
   }
 
-  finalizeMarkTransaction(view, tr, canonicalizeStoredMarks(merged), { isRemote: true, skipDocStamp: !hydrateAnchors });
+  finalizeMarkTransaction(view, tr, canonicalizeStoredMarks(merged), { isRemote: true, skipDocStamp: !hydrateAnchors, syncToYjs: options?.syncToYjs });
 }
 
 export function setActiveMark(view: EditorView, markId: string | null): void {

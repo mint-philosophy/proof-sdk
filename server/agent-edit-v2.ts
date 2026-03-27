@@ -126,13 +126,13 @@ const COLLAB_WRITE_STABILITY_SAMPLE_MS = parsePositiveInt(process.env.AGENT_EDIT
 
 function getStrictLiveClientCount(slug: string): number {
   const breakdown = getActiveCollabClientBreakdown(slug);
-  return isHostedRewriteEnvironment() ? breakdown.total : breakdown.anyEpochCount;
+  return isHostedRewriteEnvironment() ? breakdown.total : breakdown.exactEpochCount;
 }
 
 async function getStrictLiveClientCountWithGrace(slug: string): Promise<number> {
   let breakdown = getActiveCollabClientBreakdown(slug);
-  if (!isHostedRewriteEnvironment()) return breakdown.anyEpochCount;
-  if (breakdown.total === 0 || breakdown.anyEpochCount > 0) return breakdown.total;
+  if (!isHostedRewriteEnvironment()) return breakdown.exactEpochCount;
+  if (breakdown.total === 0 || breakdown.exactEpochCount > 0) return breakdown.total;
 
   const timeoutMs = parsePositiveInt(process.env.HOSTED_LIVE_DOC_GRACE_MS, 1500);
   const pollMs = parsePositiveInt(process.env.HOSTED_LIVE_DOC_GRACE_POLL_MS, 100);
@@ -141,7 +141,7 @@ async function getStrictLiveClientCountWithGrace(slug: string): Promise<number> 
   while (Date.now() < deadline) {
     await delay(pollMs);
     breakdown = getActiveCollabClientBreakdown(slug);
-    if (breakdown.total === 0 || breakdown.anyEpochCount > 0) {
+    if (breakdown.total === 0 || breakdown.exactEpochCount > 0) {
       break;
     }
   }

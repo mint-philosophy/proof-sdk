@@ -245,9 +245,17 @@ async function run(): Promise<void> {
     } catch {
       // ignore
     }
+    await sleep(50);
     ydoc.destroy();
     try {
-      wss.close();
+      for (const client of wss.clients) {
+        try {
+          client.terminate();
+        } catch {
+          // ignore
+        }
+      }
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
     } catch {
       // ignore
     }
@@ -263,7 +271,11 @@ async function run(): Promise<void> {
   }
 }
 
-run().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+run()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });

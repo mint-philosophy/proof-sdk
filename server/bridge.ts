@@ -24,12 +24,14 @@ import {
 import {
   annotateRewriteDisruptionMetadata,
   classifyRewriteBarrierFailureReason,
-  evaluateRewriteLiveClientGate,
+  evaluateRewriteLiveClientGateWithOptions,
   rewriteBarrierFailedResponseBody,
   rewriteBlockedResponseBody,
 } from './rewrite-policy.js';
 import { traceServerIncident, toErrorTraceData } from './incident-tracing.js';
 import { getMutationContractStage, validateOpPrecondition } from './mutation-stage.js';
+import { reportBugBridgeRouter } from './report-bug-bridge.js';
+import { readRequestId } from './request-context.js';
 
 export const bridgeRouter = Router({ mergeParams: true });
 export function createBridgeMountRouter(middleware?: RequestHandler): Router {
@@ -41,6 +43,7 @@ export function createBridgeMountRouter(middleware?: RequestHandler): Router {
   }
   return router;
 }
+bridgeRouter.use(reportBugBridgeRouter);
 const AUTHLESS_RATE_LIMIT_PER_MIN = 60;
 const AUTHED_RATE_LIMIT_PER_MIN = 240;
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -479,7 +482,7 @@ bridgeRouter.use(async (req: Request, res: Response) => {
     }
   }
 
-  const payloadValidation = validateRoutePayload(method, bridgePath, requestBody);
+  const payloadValidation = validateRoutePayload(method, canonicalBridgePath, requestBody);
   if (payloadValidation) {
     res.status(400).json(payloadValidation);
     return;
@@ -517,7 +520,10 @@ bridgeRouter.use(async (req: Request, res: Response) => {
       });
       return;
     }
-    const rewriteGate = evaluateRewriteLiveClientGate(slug, requestBody);
+    const rewriteGate = evaluateRewriteLiveClientGateWithOptions(slug, requestBody, {
+      route: 'POST /d/:slug/bridge/rewrite',
+      requestId: readRequestId(req),
+    });
     if (rewriteGate.blocked) {
       recordRewriteLiveClientBlock(
         'POST /d/:slug/bridge/rewrite',
@@ -630,11 +636,14 @@ bridgeRouter.use(async (req: Request, res: Response) => {
     requestBody.__agentId = agentId.trim();
   }
 
-  const serverResult = method === 'POST' && bridgePath === '/rewrite'
+  const serverResult = method === 'POST' && canonicalBridgePath === '/rewrite'
     ? await executeCanonicalRewrite(slug, requestBody)
     : await executeDocumentOperationAsync(slug, method, canonicalBridgePath, requestBody);
   if (method === 'POST' && canonicalBridgePath === '/rewrite' && serverResult.status >= 200 && serverResult.status < 300) {
-    const rewriteGate = evaluateRewriteLiveClientGate(slug, requestBody);
+    const rewriteGate = evaluateRewriteLiveClientGateWithOptions(slug, requestBody, {
+      route: 'POST /d/:slug/bridge/rewrite',
+      requestId: readRequestId(req),
+    });
     serverResult.body = annotateRewriteDisruptionMetadata(serverResult.body, rewriteGate);
   }
   if (serverResult.status !== 404) {
@@ -657,7 +666,7 @@ bridgeRouter.use(async (req: Request, res: Response) => {
     const result = await sendBridgeRequest(
       slug,
       method,
-      canonicalBridgePath,
+      bridgePath,
       requestBody,
     );
     res.setHeader('x-proof-bridge-execution', 'viewer');

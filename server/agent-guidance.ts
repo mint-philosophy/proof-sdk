@@ -1,5 +1,4 @@
 export const CANONICAL_CREATE_API_PATH = '/documents';
-export const HOSTED_COMPAT_CREATE_API_PATH = '/share/markdown';
 export const LEGACY_CREATE_API_PATH = '/api/documents';
 export const COMPAT_CREATE_API_PATH = '/api/share/markdown';
 export const AGENT_DOCS_PATH = '/agent-docs';
@@ -7,23 +6,23 @@ export const REPORT_BUG_API_PATH = '/api/bridge/report_bug';
 export const REPORT_BUG_DOC_ALIAS_PATH = '/d/:slug/bridge/report_bug';
 export const REPORT_BUG_OPEN_SOURCE_REPO_URL = 'https://github.com/EveryInc/proof-sdk';
 export const ACTIVE_INCIDENT_CODE = 'heavy_load_degradation';
-export const ACTIVE_INCIDENT_SUMMARY = 'Proof SDK may be experiencing degraded performance due to heavy load.';
-export const ACTIVE_INCIDENT_REPORT_HINT = 'If the issue may be related, still report it, but include timing, request ID, retry behavior, and whether the symptom looked slow, stale, or timeout-related.';
-export const ACTIVE_INCIDENT_AGENT_NOTE = 'An active performance incident may be in progress. Retry once if the action was non-destructive. If it still looks wrong, report the failure with concrete evidence.';
+export const ACTIVE_INCIDENT_SUMMARY = 'Proof performance is currently degraded due to heavy load.';
+export const ACTIVE_INCIDENT_REPORT_HINT = 'If the issue may be related, still report it, but include the timing, request ID, whether retry helped, and whether the symptom looked slow, stale, or timeout-related.';
+export const ACTIVE_INCIDENT_AGENT_NOTE = 'An active performance incident is in progress. Retry once if the action was non-destructive. If it still looks wrong, report the failure with concrete evidence instead of paraphrasing it.';
 export const ACTIVE_INCIDENT_EVIDENCE_EXAMPLES = [
   'Exact request URL, method, status, and x-request-id for the failing call',
-  'Whether retrying once changed the outcome',
-  'Document slug and which route or bridge flow was affected',
-  'A short timeline with timestamps',
-  'Raw response body or console/network error text',
+  'Whether retrying once changed the outcome (for example: timed out twice, or second try succeeded)',
+  'Document slug and whether it was a homepage, library, shared doc, state read, collab refresh, or write path',
+  'A short timeline with timestamps, such as page loaded at 12:03:10, write timed out at 12:03:18, retry succeeded at 12:03:31',
+  'Raw response body or console/network error text instead of a summary',
 ];
 
-export const DIRECT_SHARE_AUTH_FIX = 'Add Authorization: Bearer <your-api-key> or use an x-share-token from a document create/share response.';
+export const DIRECT_SHARE_AUTH_FIX = 'Add header: Authorization: Bearer <your-api-key> (or complete the hosted sign-in flow and retry with a session token)';
 export const AUTH_HEADER_FORMAT = 'Authorization: Bearer <token>';
 export const ALT_SHARE_TOKEN_HEADER_FORMAT = 'x-share-token: <token>';
 export const TOKEN_FROM_URL_HINT = 'If you received a URL with ?token=, use that token as Authorization: Bearer <token> (or x-share-token).';
 export const TOKEN_MISSING_HINT = 'This link has no token. Ask for a tokenized link if you need a stable shareable URL.';
-export const CREATE_NO_HEADERS_HINT = `Agents: to create a web doc without client headers, call POST ${CANONICAL_CREATE_API_PATH}. Hosted compatibility route: POST ${HOSTED_COMPAT_CREATE_API_PATH}.`;
+export const CREATE_NO_HEADERS_HINT = `Agents: to create a web doc without client headers, call POST ${CANONICAL_CREATE_API_PATH}.`;
 
 function withOrigin(path: string, origin?: string): string {
   if (!origin) return path;
@@ -77,6 +76,7 @@ export function buildReportBugHelp(input: {
   suggestedContext?: string | null;
   suggestedEvidence?: string[];
 } = {}): Record<string, unknown> {
+  const suggestedEvidence = uniqueStrings(input.suggestedEvidence ?? []);
   return {
     action: 'report_bug',
     description: 'Call report_bug with what you know. If it returns needs_more_info, ask those questions and call it again.',
@@ -87,7 +87,7 @@ export function buildReportBugHelp(input: {
     rawEvidenceAccepted: true,
     suggestedSummary: input.suggestedSummary ?? 'Describe the bug in one sentence.',
     suggestedContext: input.suggestedContext ?? 'Describe what you were trying to do and what looked wrong.',
-    suggestedEvidence: uniqueStrings(input.suggestedEvidence ?? []),
+    suggestedEvidence,
     knownIncident: {
       code: ACTIVE_INCIDENT_CODE,
       status: 'active',

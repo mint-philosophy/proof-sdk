@@ -10,11 +10,14 @@ import {
 import type { ShareRole } from './share-types.js';
 import {
   extractCollabTokenFromHeaders,
-  getRecentCollabSessionLeaseCount,
   getCollabSessionClaims,
+  getLiveCollabBlockStatus,
+  getRecentCollabSessionLeaseCount,
   handleCollabWebSocketConnection,
   logCollabSocketErrorWithSuppression,
 } from './collab.js';
+import { traceServerIncident, toErrorTraceData } from './incident-tracing.js';
+import { getCurrentRequestId } from './request-context.js';
 
 interface Client {
   ws: WebSocket;
@@ -60,6 +63,10 @@ interface PendingBridgeRequest {
   reject: (reason?: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
   targetClientId: string;
+  slug: string;
+  method: string;
+  path: string;
+  originRequestId: string | null;
 }
 
 // Map of slug -> Set of connected clients
@@ -122,6 +129,20 @@ function rejectPendingForClient(clientId: string): void {
     if (pending.targetClientId !== clientId) continue;
     clearTimeout(pending.timer);
     pendingBridgeRequests.delete(requestId);
+    traceServerIncident({
+      requestId: pending.originRequestId,
+      slug: pending.slug,
+      subsystem: 'ws',
+      level: 'warn',
+      eventType: 'bridge.viewer_disconnected',
+      message: 'Pending bridge request lost its viewer before completion',
+      data: {
+        bridgeRequestId: requestId,
+        method: pending.method,
+        path: pending.path,
+        targetClientId: pending.targetClientId,
+      },
+    });
     pending.reject(createBridgeError('Viewer disconnected', 'VIEWER_DISCONNECTED', 503));
   }
 }
@@ -130,9 +151,6 @@ export function getActiveCollabClientBreakdown(slug: string): ActiveCollabClient
   const auth = getDocumentAuthStateBySlug(slug);
   const accessEpoch = typeof auth?.access_epoch === 'number' ? auth.access_epoch : null;
   const exactEpochCount = countActiveCollabConnections(slug, accessEpoch);
-  // Hosted safety gates should conservatively block if any authenticated collab
-  // session for the slug is still live, even when the current access epoch has
-  // just rolled and stale clients have not reconnected yet.
   const anyEpochCount = exactEpochCount > 0
     ? exactEpochCount
     : countActiveCollabConnections(slug, null);
@@ -146,11 +164,15 @@ export function getActiveCollabClientBreakdown(slug: string): ActiveCollabClient
     documentLeaseExactCount: documentLeaseBreakdown.exactEpochCount,
     documentLeaseAnyEpochCount: documentLeaseBreakdown.anyEpochCount,
     recentLeaseCount,
-    total: Math.max(anyEpochCount, documentLeaseBreakdown.anyEpochCount, recentLeaseCount),
+    total: Math.max(exactEpochCount, documentLeaseBreakdown.exactEpochCount, recentLeaseCount),
   };
 }
 
 export function getActiveCollabClientCount(slug: string): number {
+  // Mutation paths should only require a live Yjs room when the current access
+  // epoch still has authenticated collaborators or an epoch-matching lease.
+  // Stale prior-epoch connections/leases stay visible in the breakdown for
+  // diagnostics, but they should not force LIVE_DOC_UNAVAILABLE on fresh writes.
   return getActiveCollabClientBreakdown(slug).total;
 }
 
@@ -175,6 +197,20 @@ export function setupWebSocket(wss: WebSocketServer): void {
           code: summary.code,
           statusCode: summary.statusCode,
           message: summary.message,
+        });
+        traceServerIncident({
+          slug,
+          subsystem: 'ws',
+          level: 'error',
+          eventType: 'socket.error',
+          message: 'WebSocket router observed a socket error',
+          data: {
+            mode: isCollabConnection ? 'collab' : 'bridge',
+            clientId: bridgeClientId,
+            code: summary.code,
+            statusCode: summary.statusCode,
+            errorMessage: summary.message,
+          },
         });
       }
       if (bridgeClientId) {
@@ -204,6 +240,10 @@ export function setupWebSocket(wss: WebSocketServer): void {
           ws.close(4401, 'Collab token slug mismatch');
           return;
         }
+        if (!slug) {
+          url.searchParams.set('slug', claims.slug);
+          req.url = `${url.pathname}?${url.searchParams.toString()}`;
+        }
         const doc = getDocumentAuthStateBySlug(claims.slug);
         const accessEpoch = typeof doc?.access_epoch === 'number' ? doc.access_epoch : null;
         const shareState = doc?.share_state ?? null;
@@ -213,7 +253,8 @@ export function setupWebSocket(wss: WebSocketServer): void {
           && shareState !== 'DELETED'
           && accessEpochMatches
           && !((shareState === 'REVOKED' || shareState === 'PAUSED') && collabRole !== 'owner_bot');
-        if (!sessionAllowed) {
+        const liveCollabAllowed = !getLiveCollabBlockStatus(claims.slug).active;
+        if (!sessionAllowed || !liveCollabAllowed) {
           ws.close(4401, 'Invalid or expired collab session token');
           return;
         }
@@ -417,10 +458,26 @@ function sendBridgeRequestToClient(
   body: Record<string, unknown>
 ): Promise<unknown> {
   const requestId = crypto.randomUUID();
+  const originRequestId = getCurrentRequestId();
   return new Promise((resolve, reject) => {
     const timeoutMs = getBridgeTimeoutMs();
     const timer = setTimeout(() => {
       pendingBridgeRequests.delete(requestId);
+      traceServerIncident({
+        requestId: originRequestId,
+        slug: target.slug,
+        subsystem: 'ws',
+        level: 'warn',
+        eventType: 'bridge.timeout',
+        message: 'Viewer did not respond to bridge request before timeout',
+        data: {
+          bridgeRequestId: requestId,
+          method,
+          path,
+          timeoutMs,
+          targetClientId: target.clientId,
+        },
+      });
       reject(createBridgeError('Browser did not respond in time', 'TIMEOUT', 504, { timeoutMs }));
     }, timeoutMs);
 
@@ -429,6 +486,10 @@ function sendBridgeRequestToClient(
       reject,
       timer,
       targetClientId: target.clientId,
+      slug: target.slug,
+      method,
+      path,
+      originRequestId,
     });
 
     try {
@@ -443,6 +504,21 @@ function sendBridgeRequestToClient(
       clearTimeout(timer);
       pendingBridgeRequests.delete(requestId);
       const message = error instanceof Error ? error.message : String(error);
+      traceServerIncident({
+        requestId: originRequestId,
+        slug: target.slug,
+        subsystem: 'ws',
+        level: 'error',
+        eventType: 'bridge.send_failed',
+        message: 'Failed to dispatch bridge request to viewer',
+        data: {
+          bridgeRequestId: requestId,
+          method,
+          path,
+          targetClientId: target.clientId,
+          ...toErrorTraceData(error),
+        },
+      });
       reject(createBridgeError(message || 'Failed to send bridge request', 'VIEWER_DISCONNECTED', 503));
     }
   });

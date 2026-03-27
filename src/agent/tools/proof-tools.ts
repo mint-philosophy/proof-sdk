@@ -20,6 +20,7 @@ import {
 } from '../../editor/plugins/marks';
 import { resolveSelector, resolveSelectorRange, type SelectorRange } from '../../editor/utils/selectors';
 import { buildTextIndex, getTextForRange, mapTextOffsetsToRange, resolveQuoteRange } from '../../editor/utils/text-range';
+import { bridge } from '../../bridge/native-bridge';
 
 // ============================================================================
 // Editor Bridge Interface
@@ -359,8 +360,7 @@ export function getProofTools(context: DocumentContext): AgentTool[] {
       },
       handler: async (args) => {
         const { message } = args as { message: string };
-        window.dispatchEvent(new CustomEvent('proof:conflict-dialog', { detail: { message } }));
-        console.warn('[ProofTools] Conflict dialog requested:', message);
+        bridge.sendMessage('externalChangeDialog', { message });
         return { success: true, message: 'Conflict dialog shown to user' };
       },
     },

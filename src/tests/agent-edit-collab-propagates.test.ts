@@ -200,12 +200,14 @@ async function run(): Promise<void> {
     assert(Number.isInteger(statePayload.revision) && statePayload.revision > 0, 'Expected revision');
 
     const appendText = `APPENDED-${randomUUID()}`;
+    const idempotencyKey = `agent-edit-collab-propagates-${Date.now()}`;
     const editRes = await fetch(`${httpBase}/api/agent/${created.slug}/edit/v2`, {
       method: 'POST',
       headers: {
         ...CLIENT_HEADERS,
         'Content-Type': 'application/json',
         'x-share-token': created.ownerSecret,
+        'x-idempotency-key': idempotencyKey,
       },
       body: JSON.stringify({
         by: 'ai:test',

@@ -104,6 +104,38 @@ async function run(): Promise<void> {
     assert(markdownComment.status === 200, `Expected 200 for markdown comment anchor, got ${markdownComment.status}`);
     assert(markdownComment.body.success === true, 'Expected success=true for markdown comment anchor');
 
+    const explicitTargetComment = executeDocumentOperation(markdownSlug, 'POST', '/marks/comment', {
+      target: { anchor: 'List item two with bold text', mode: 'normalized' },
+      text: 'Anchors on explicit visible text target',
+      by: 'ai:test',
+    });
+    assert(explicitTargetComment.status === 200, `Expected 200 for explicit visible-text target anchor, got ${explicitTargetComment.status}`);
+    const explicitTargetDoc = db.getDocumentBySlug(markdownSlug);
+    assert(explicitTargetDoc, 'Expected markdown doc to exist after explicit target comment');
+    const explicitTargetCommentMark = Object.values(JSON.parse(explicitTargetDoc.marks ?? '{}') as Record<string, { kind?: string; text?: string; target?: { anchor?: string } }>).find(
+      (mark) => mark?.kind === 'comment' && mark?.text === 'Anchors on explicit visible text target',
+    );
+    assert(
+      explicitTargetCommentMark?.target?.anchor === 'List item two with bold text',
+      `Expected explicit target to persist visible-text anchor, got ${JSON.stringify(explicitTargetCommentMark?.target)}`,
+    );
+
+    const crossParagraphSlug = `anchor-cross-paragraph-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(crossParagraphSlug, 'Context marker foo\n\nbar\n\nfoo bar', {}, 'Cross paragraph target test');
+    const crossParagraphSuggestion = executeDocumentOperation(crossParagraphSlug, 'POST', '/marks/suggest-replace', {
+      target: { anchor: 'foo bar', mode: 'normalized', occurrence: 0 },
+      content: 'Changed',
+      by: 'ai:test',
+    });
+    assert(crossParagraphSuggestion.status === 200, `Expected 200 for cross-paragraph target anchor, got ${crossParagraphSuggestion.status}`);
+    const crossParagraphMarkId = getSuggestionMarkId(crossParagraphSuggestion as { body: { marks?: Record<string, { kind?: string }> } }, 'replace');
+    assert(crossParagraphMarkId, 'Expected cross-paragraph suggestion mark id');
+    const crossParagraphMark = crossParagraphSuggestion.body.marks?.[crossParagraphMarkId];
+    assert(
+      crossParagraphMark?.target?.anchor === 'foo\nbar',
+      `Expected cross-paragraph target to persist canonical newline separators, got ${JSON.stringify(crossParagraphMark?.target)}`,
+    );
+
     const htmlSlug = `anchor-html-${Math.random().toString(36).slice(2, 10)}`;
     db.createDocument(htmlSlug, '<p>foo</p><p>bar</p>', {}, 'HTML anchor test');
 
@@ -258,6 +290,129 @@ async function run(): Promise<void> {
     for (const c of acceptCases) {
       suggestAndAccept(c);
     }
+
+    type ExplicitTargetAcceptCase = {
+      name: string;
+      markdown: string;
+      kind: 'delete' | 'replace' | 'insert';
+      target: { anchor: string; mode: 'exact' | 'normalized' | 'contextual'; contextBefore?: string; contextAfter?: string };
+      content?: string;
+      expectedTargetAnchor: string;
+      expected: string;
+    };
+
+    const explicitTargetAcceptCases: ExplicitTargetAcceptCase[] = [
+      {
+        name: 'explicit target delete preserves formatting semantics',
+        markdown: 'Some **bold** text',
+        kind: 'delete',
+        target: { anchor: '**bold**', mode: 'normalized' },
+        expectedTargetAnchor: 'bold',
+        expected: 'Some  text',
+      },
+      {
+        name: 'explicit target replace preserves wrapper formatting',
+        markdown: 'Some *italic* words',
+        kind: 'replace',
+        target: { anchor: '*italic*', mode: 'normalized' },
+        content: 'plain',
+        expectedTargetAnchor: 'italic',
+        expected: 'Some *plain* words',
+      },
+      {
+        name: 'explicit target insert lands after formatted span',
+        markdown: 'Some **text** here',
+        kind: 'insert',
+        target: { anchor: '**text**', mode: 'normalized' },
+        content: ' added',
+        expectedTargetAnchor: 'text',
+        expected: 'Some **text** added here',
+      },
+    ];
+
+    function suggestAndAcceptExplicitTarget(c: ExplicitTargetAcceptCase): void {
+      const slug = `accept-target-${c.kind}-${Math.random().toString(36).slice(2, 10)}`;
+      db.createDocument(slug, c.markdown, {}, c.name);
+
+      const suggestRoute = c.kind === 'delete' ? '/marks/suggest-delete'
+        : c.kind === 'replace' ? '/marks/suggest-replace'
+        : '/marks/suggest-insert';
+
+      const suggestBody: Record<string, unknown> = { target: c.target, by: 'ai:test' };
+      if (c.content !== undefined) suggestBody.content = c.content;
+
+      const suggestResult = executeDocumentOperation(slug, 'POST', suggestRoute, suggestBody);
+      assert(suggestResult.status === 200, `[${c.name}] suggest failed: ${suggestResult.status}`);
+
+      const markId = getSuggestionMarkId(suggestResult as { body: { marks?: Record<string, { kind?: string }> } }, c.kind);
+      assert(markId, `[${c.name}] no markId found`);
+      const storedMark = suggestResult.body.marks?.[markId];
+      assert(
+        storedMark?.target?.anchor === c.expectedTargetAnchor,
+        `[${c.name}] expected stored target anchor ${JSON.stringify(c.expectedTargetAnchor)}, got ${JSON.stringify(storedMark?.target)}`,
+      );
+
+      const acceptResult = executeDocumentOperation(slug, 'POST', '/marks/accept', { markId, by: 'ai:test' });
+      assert(acceptResult.status === 200, `[${c.name}] accept failed: ${acceptResult.status}`);
+      assert(
+        String(acceptResult.body.markdown ?? '').trimEnd() === c.expected.trimEnd(),
+        `[${c.name}] expected ${JSON.stringify(c.expected)}, got ${JSON.stringify(acceptResult.body.markdown)}`,
+      );
+    }
+
+    for (const c of explicitTargetAcceptCases) {
+      suggestAndAcceptExplicitTarget(c);
+    }
+
+    const duplicateSlug = `anchor-dupe-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(duplicateSlug, '# Title\\n\\nRepeat\\n\\nRepeat', {}, 'Duplicate anchor test');
+
+    const ambiguousSuggestion = executeDocumentOperation(duplicateSlug, 'POST', '/marks/suggest-replace', {
+      target: { anchor: 'Repeat' },
+      content: 'Changed',
+      by: 'ai:test',
+    });
+    assert(ambiguousSuggestion.status === 409, `Expected 409 for ambiguous suggestion anchor, got ${ambiguousSuggestion.status}`);
+    assert(ambiguousSuggestion.body.code === 'ANCHOR_AMBIGUOUS', `Expected ANCHOR_AMBIGUOUS, got ${String(ambiguousSuggestion.body.code)}`);
+
+    const disambiguatedSuggestion = executeDocumentOperation(duplicateSlug, 'POST', '/marks/suggest-replace', {
+      target: { anchor: 'Repeat', occurrence: 1 },
+      content: 'Changed',
+      by: 'ai:test',
+    });
+    assert(disambiguatedSuggestion.status === 200, `Expected 200 for disambiguated suggestion anchor, got ${disambiguatedSuggestion.status}`);
+    assert(disambiguatedSuggestion.body.success === true, 'Expected success=true for disambiguated suggestion anchor');
+    const disambiguatedMarkId = Object.keys(disambiguatedSuggestion.body.marks ?? {})[0];
+    const disambiguatedMark = disambiguatedSuggestion.body.marks?.[disambiguatedMarkId];
+    assert(typeof disambiguatedMark?.target?.contextBefore === 'string' || typeof disambiguatedMark?.target?.contextAfter === 'string', 'Expected stabilized target context to be persisted');
+    assert(disambiguatedMark?.target?.occurrence === undefined, 'Expected stabilized target to omit occurrence-based identity');
+
+    const driftSlug = `anchor-drift-${Math.random().toString(36).slice(2, 10)}`;
+    db.createDocument(driftSlug, '# Title\n\nRepeat\n\nContext target\nRepeat', {}, 'Target drift test');
+    const targetSuggestion = executeDocumentOperation(driftSlug, 'POST', '/marks/suggest-replace', {
+      target: { anchor: 'Repeat', occurrence: 1 },
+      content: 'Changed',
+      by: 'ai:test',
+    });
+    assert(targetSuggestion.status === 200, `Expected 200 for target drift setup, got ${targetSuggestion.status}`);
+    const targetMarkId = Object.keys(targetSuggestion.body.marks ?? {})[0];
+    const driftDocBefore = db.getDocumentBySlug(driftSlug);
+    assert(driftDocBefore, 'Expected drift doc to exist');
+    const driftMarks = JSON.parse(driftDocBefore.marks ?? '{}') as Record<string, unknown>;
+    const driftUpdatedMarkdown = '# Title\n\nRepeat\n\nRepeat\n\nContext target\nRepeat';
+    const driftUpdated = db.updateDocumentAtomic(
+      driftSlug,
+      driftDocBefore.updated_at,
+      driftUpdatedMarkdown,
+      driftMarks,
+    );
+    assert(driftUpdated === true, 'Expected drift document setup update to succeed');
+    const targetAccept = executeDocumentOperation(driftSlug, 'POST', '/marks/accept', { markId: targetMarkId, by: 'ai:test' });
+    assert(targetAccept.status === 200, `Expected target drift accept to succeed, got ${targetAccept.status}`);
+    assert(
+      targetAccept.body.markdown === '# Title\n\nRepeat\n\nRepeat\n\nContext target\nChanged',
+      `Expected accept to mutate the original targeted duplicate, got ${JSON.stringify(targetAccept.body.markdown)}`,
+    );
 
     console.log('✓ suggestion/comment anchor validation guardrails');
   } finally {

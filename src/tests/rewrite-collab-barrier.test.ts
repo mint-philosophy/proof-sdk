@@ -35,6 +35,10 @@ async function mustJson<T>(response: Response): Promise<T> {
   return JSON.parse(text) as T;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function run(): Promise<void> {
   const dbName = `proof-rewrite-collab-barrier-${Date.now()}-${randomUUID()}.db`;
   const dbPath = path.join(os.tmpdir(), dbName);
@@ -245,8 +249,16 @@ async function run(): Promise<void> {
 
     console.log('✓ rewrite routes and strict live-doc mutations enforce collab epoch barriers consistently');
   } finally {
+    await sleep(50);
     try {
-      wss.close();
+      for (const client of wss.clients) {
+        try {
+          client.terminate();
+        } catch {
+          // ignore
+        }
+      }
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
     } catch {
       // ignore
     }
@@ -262,7 +274,11 @@ async function run(): Promise<void> {
   }
 }
 
-run().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+run()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });

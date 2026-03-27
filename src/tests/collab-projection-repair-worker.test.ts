@@ -104,6 +104,8 @@ async function run(): Promise<void> {
     const oversizedMarkdown = `# Oversized\n\n${'X'.repeat(4000)}`;
     const repairedMarkdown = '# Repaired\n\nShort fragment-derived text.';
     seedDoc(repairSlug, oversizedMarkdown, repairedMarkdown);
+    const repairRowBefore = db.getDocumentBySlug(repairSlug);
+    assert(Boolean(repairRowBefore), 'Expected repair fixture row');
 
     const healthyOversizedSlug = `projection-worker-healthy-${Math.random().toString(36).slice(2, 10)}`;
     const healthyOversizedMarkdown = `# Healthy Oversized\n\n${'healthy text '.repeat(320)}`;
@@ -118,6 +120,16 @@ async function run(): Promise<void> {
       WHERE document_slug = ?
     `).run(staleHealthSlug);
 
+    const driftRepairSlug = `projection-worker-drift-${Math.random().toString(36).slice(2, 10)}`;
+    const driftRowMarkdown = "# Welcome to Proof\n\nLet's go.";
+    const driftFragmentMarkdown = '# Ideas\n\nShip an agent-native editor repair flow.\n\nProtect first-write activation on tiny docs.';
+    seedDoc(driftRepairSlug, driftRowMarkdown, driftFragmentMarkdown, { alignYStateVersion: true });
+    db.getDb().prepare(`
+      UPDATE document_projections
+      SET health = 'projection_stale'
+      WHERE document_slug = ?
+    `).run(driftRepairSlug);
+
     const guardBlockedSlug = `projection-worker-guard-${Math.random().toString(36).slice(2, 10)}`;
     const guardBase = '# Guarded\n\nshort baseline';
     const guardCandidate = `# Guarded\n\n${'pathological candidate '.repeat(140)}`;
@@ -126,18 +138,45 @@ async function run(): Promise<void> {
     await collab.startCollabRuntimeEmbedded(4000);
 
     await pollUntil(
-      'repair worker should replace oversized markdown from fragment',
+      'repair worker should refresh stale projection from fragment without mutating canonical markdown',
       async () => {
-        const row = db.getDocumentBySlug(repairSlug);
-        return (row?.markdown ?? '').includes('Short fragment-derived text.');
+        const projection = db.getDocumentProjectionBySlug(repairSlug);
+        return (projection?.markdown ?? '').includes('Short fragment-derived text.');
       },
       8_000,
     );
 
     const repairedRow = db.getDocumentBySlug(repairSlug);
+    const repairedProjection = db.getDocumentProjectionBySlug(repairSlug);
     assert(
-      (repairedRow?.markdown ?? '').includes('Short fragment-derived text.'),
-      'Expected repaired markdown content to persist',
+      (repairedProjection?.markdown ?? '').includes('Short fragment-derived text.'),
+      'Expected repaired projection markdown content to persist',
+    );
+    assert(
+      (repairedRow?.markdown ?? '') === oversizedMarkdown,
+      'Expected projection repair not to overwrite canonical markdown',
+    );
+    assert(
+      (repairedRow?.revision ?? null) === (repairRowBefore?.revision ?? null),
+      'Expected projection-only repair not to bump canonical revision',
+    );
+    assert(
+      (repairedRow?.updated_at ?? null) === (repairRowBefore?.updated_at ?? null),
+      'Expected projection-only repair not to change canonical updated_at',
+    );
+
+    await pollUntil(
+      'repair worker should allow fragment drift repairs derived from authoritative Yjs state without mutating canonical markdown',
+      async () => {
+        const projection = db.getDocumentProjectionBySlug(driftRepairSlug);
+        return (projection?.markdown ?? '').includes('agent-native editor repair flow');
+      },
+      8_000,
+    );
+    const driftRow = db.getDocumentBySlug(driftRepairSlug);
+    assert(
+      (driftRow?.markdown ?? '') === driftRowMarkdown,
+      'Expected fragment drift repair to leave canonical markdown unchanged',
     );
 
     await pollUntil(

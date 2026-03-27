@@ -70,12 +70,14 @@ async function run(): Promise<void> {
   process.env.AGENT_PRESENCE_TTL_MS = '500';
   process.env.AGENT_CURSOR_TTL_MS = '120';
   process.env.AGENT_EDIT_V2_ENABLED = '1';
+  process.env.COLLAB_PERSIST_DEBOUNCE_MS = '80';
 
-  const [{ apiRoutes }, { agentRoutes }, { setupWebSocket }, collab] = await Promise.all([
+  const [{ apiRoutes }, { agentRoutes }, { setupWebSocket }, collab, db] = await Promise.all([
     import('../../server/routes.js'),
     import('../../server/agent-routes.js'),
     import('../../server/ws.js'),
     import('../../server/collab.js'),
+    import('../../server/db.js'),
   ]);
 
   const app = express();
@@ -112,6 +114,7 @@ async function run(): Promise<void> {
     const created = await mustJson<ShareCreateResponse>(createRes);
     assert(created.slug.length > 0, 'Expected create response slug');
     assert(created.ownerSecret.length > 0, 'Expected create response ownerSecret');
+    const baselineYStateVersion = db.getDocumentBySlug(created.slug)?.y_state_version ?? 0;
 
     const sessionRes = await fetch(`${httpBase}/api/documents/${created.slug}/collab-session`, {
       headers: {
@@ -184,6 +187,13 @@ async function run(): Promise<void> {
     const statePresence = presenceMap.get('ai:state-probe') as any;
     assert(statePresence?.name === 'State Probe', 'Expected state auto-presence to derive title-cased name');
     assert(statePresence?.status === 'active', 'Expected state auto-presence status to be active');
+    const persistQuietDeadline = Date.now() + 240;
+    await waitFor(
+      () => Date.now() >= persistQuietDeadline
+        && (db.getDocumentBySlug(created.slug)?.y_state_version ?? 0) === baselineYStateVersion,
+      DEFAULT_TIMEOUT_MS,
+      'state auto-presence avoids bumping persisted Yjs version',
+    );
 
     const claudeStateRes = await fetch(`${httpBase}/api/agent/${created.slug}/state`, {
       headers: {
@@ -386,7 +396,25 @@ async function run(): Promise<void> {
     await waitFor(() => !cursorMap.get('ai:r2c2'), DEFAULT_TIMEOUT_MS, 'cursor hint expires');
     await waitFor(() => !presenceMap.get('ai:r2c2'), DEFAULT_TIMEOUT_MS, 'presence expires');
 
-    console.log('✓ agent mutations imply presence + cursor and support explicit disconnect');
+    provider.disconnect();
+    provider.destroy();
+    provider = null;
+    await sleep(50);
+    await collab.stopCollabRuntime();
+    await collab.invalidateLoadedCollabDocumentAndWait(created.slug);
+
+    const persistedHandle = collab.loadCanonicalYDocSync(created.slug);
+    assert(persistedHandle?.source === 'persisted', `Expected persisted canonical handle, got ${String(persistedHandle?.source)}`);
+    const persistedPresenceMap: any = persistedHandle?.ydoc.getMap('agentPresence');
+    const persistedCursorMap: any = persistedHandle?.ydoc.getMap('agentCursors');
+    const persistedActivityArr: any = persistedHandle?.ydoc.getArray('agentActivity');
+    const persistedMarkdown = persistedHandle?.ydoc.getText('markdown').toString() ?? '';
+    assert(persistedMarkdown.includes(appendText), 'Expected persisted canonical Yjs state to keep the content edit');
+    assert((persistedPresenceMap?.size ?? 0) === 0, 'Expected persisted Yjs state to exclude agentPresence');
+    assert((persistedCursorMap?.size ?? 0) === 0, 'Expected persisted Yjs state to exclude agentCursors');
+    assert((persistedActivityArr?.length ?? 0) === 0, 'Expected persisted Yjs state to exclude agentActivity');
+
+    console.log('✓ agent mutations imply live presence without persisting agent ephemera');
   } finally {
     try {
       provider?.disconnect();
@@ -399,8 +427,20 @@ async function run(): Promise<void> {
     } catch {
       // ignore
     }
+    await sleep(50);
     ydoc.destroy();
-    try { wss.close(); } catch { /* ignore */ }
+    try {
+      for (const client of wss.clients) {
+        try {
+          client.terminate();
+        } catch {
+          // ignore
+        }
+      }
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+    } catch {
+      /* ignore */
+    }
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await collab.stopCollabRuntime();
     for (const suffix of ['', '-wal', '-shm']) {
@@ -409,7 +449,11 @@ async function run(): Promise<void> {
   }
 }
 
-run().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+run()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });

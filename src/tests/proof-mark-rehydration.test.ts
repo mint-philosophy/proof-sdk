@@ -56,6 +56,7 @@ async function run(): Promise<void> {
 
   const db = await import('../../server/db.ts');
   const { executeDocumentOperationAsync } = await import('../../server/document-engine.ts');
+  const { MUTATION_BASE_SCHEMA_VERSION } = await import('../../server/collab.ts');
   const { rehydrateProofMarksMarkdown } = await import('../../server/proof-mark-rehydration.ts');
   const { repairProofMarksForSlug } = await import('../../server/proof-mark-repair.ts');
 
@@ -132,6 +133,43 @@ async function run(): Promise<void> {
     const rejectedVisibleText = stripAllProofSpanTags(rejectedDoc?.markdown ?? '');
     assert(rejectedVisibleText.includes(fullQuote), 'Expected reject to restore the full original quote text');
     assert(!rejectedDoc?.markdown.includes('data-proof="suggestion"'), 'Expected rejected suggestion wrapper to be removed');
+
+    const escapedQuoteSlug = `rehydrate-escaped-quote-${Math.random().toString(36).slice(2, 10)}`;
+    const escapedQuoteMarkId = 'legacy-escaped-quote-reject';
+    const escapedQuoteVisible = 'REJECT_REPRO_QUOTE_ESCAPED';
+    const escapedQuoteMarkdown = `# Launch\n\nParagraph with escaped quote: REJECT\\_REPRO\\_QUOTE\\_ESCAPED.\n`;
+    const escapedQuoteVisibleBase = `# Launch\n\nParagraph with escaped quote: ${escapedQuoteVisible}.\n`;
+    const escapedQuoteAnchors = buildRelativeAnchors(escapedQuoteVisibleBase, escapedQuoteVisible);
+    db.createDocument(
+      escapedQuoteSlug,
+      escapedQuoteMarkdown,
+      canonicalizeStoredMarks({
+        [escapedQuoteMarkId]: {
+          kind: 'replace',
+          by: 'ai:test',
+          createdAt,
+          quote: escapedQuoteVisible,
+          content: 'escaped replacement',
+          status: 'pending',
+          startRel: escapedQuoteAnchors.startRel,
+          endRel: escapedQuoteAnchors.endRel,
+          range: escapedQuoteAnchors.range,
+        } satisfies StoredMark,
+      }),
+      'Escaped quote reject repair',
+    );
+
+    const escapedRejectResult = await executeDocumentOperationAsync(escapedQuoteSlug, 'POST', '/marks/reject', {
+      markId: escapedQuoteMarkId,
+      by: 'human:test',
+    });
+    assertEqual(escapedRejectResult.status, 200, `Expected escaped-quote reject to succeed, got ${escapedRejectResult.status}`);
+    const escapedRejectedDoc = db.getDocumentBySlug(escapedQuoteSlug);
+    assert(
+      (escapedRejectedDoc?.markdown ?? '').includes('REJECT\\_REPRO\\_QUOTE\\_ESCAPED'),
+      'Expected reject to preserve escaped markdown text for quotes with underscores',
+    );
+    assert(!escapedRejectedDoc?.markdown.includes('data-proof="suggestion"'), 'Expected escaped-quote reject to remove suggestion wrappers');
 
     const longSlug = `rehydrate-add-accepted-${Math.random().toString(36).slice(2, 10)}`;
     const longQuote = `Start ${'a'.repeat(140)} end`;
@@ -315,6 +353,12 @@ async function run(): Promise<void> {
       by: 'human:test',
     });
     assertEqual(splitAcceptResult.status, 200, `Expected split suggestion accept to succeed, got ${splitAcceptResult.status}`);
+    const splitAcceptBody = splitAcceptResult.body as { marks?: Record<string, { status?: string }> };
+    assertEqual(
+      splitAcceptBody.marks?.[splitAcceptFixture.suggestionId]?.status,
+      'accepted',
+      'Expected split suggestion accept response to finalize the suggestion status',
+    );
     const splitAcceptedDoc = db.getDocumentBySlug(splitSuggestionSlug);
     assertEqual(
       stripAllProofSpanTags(splitAcceptedDoc?.markdown ?? '').trim(),
@@ -332,14 +376,76 @@ async function run(): Promise<void> {
     const splitAcceptedMarks = parseStoredMarks(splitAcceptedDoc?.marks);
     assert(splitAcceptFixture.commentId in splitAcceptedMarks, 'Expected split suggestion accept to preserve nested comment metadata');
 
+    const splitAuthoritativeFallbackFixture = buildSplitFixture('accept-authoritative');
+    const splitAuthoritativeFallbackSlug = `rehydrate-split-accept-authoritative-${Math.random().toString(36).slice(2, 10)}`;
+    const staleSplitMarks = {
+      [splitAuthoritativeFallbackFixture.suggestionId]: splitAuthoritativeFallbackFixture.marks[splitAuthoritativeFallbackFixture.suggestionId],
+    };
+    db.createDocument(
+      splitAuthoritativeFallbackSlug,
+      splitAuthoritativeFallbackFixture.markdown,
+      JSON.stringify(staleSplitMarks),
+      'Split suggestion accept authoritative fallback',
+    );
+    const splitAuthoritativeFallbackRow = db.getDocumentBySlug(splitAuthoritativeFallbackSlug);
+    assert(splitAuthoritativeFallbackRow, 'Expected authoritative fallback fixture row');
+    const authoritativeSplitContext = {
+      doc: {
+        ...splitAuthoritativeFallbackRow,
+        markdown: splitBase,
+        marks: JSON.stringify(splitAuthoritativeFallbackFixture.marks),
+        plain_text: splitBase,
+      },
+      mutationBase: {
+        token: 'split-authoritative-token',
+        source: 'persisted_yjs',
+        schemaVersion: MUTATION_BASE_SCHEMA_VERSION,
+        markdown: splitBase,
+        marks: splitAuthoritativeFallbackFixture.marks,
+        accessEpoch: splitAuthoritativeFallbackRow?.access_epoch ?? 0,
+      },
+      precondition: {
+        mode: 'revision',
+        baseRevision: splitAuthoritativeFallbackRow?.revision ?? 1,
+      },
+    } as const;
+    const splitAuthoritativeFallbackResult = await executeDocumentOperationAsync(
+      splitAuthoritativeFallbackSlug,
+      'POST',
+      '/marks/accept',
+      {
+        markId: splitAuthoritativeFallbackFixture.suggestionId,
+        by: 'human:test',
+      },
+      authoritativeSplitContext,
+    );
+    assertEqual(
+      splitAuthoritativeFallbackResult.status,
+      200,
+      `Expected authoritative fallback accept to succeed, got ${splitAuthoritativeFallbackResult.status}: ${JSON.stringify(splitAuthoritativeFallbackResult.body)}`,
+    );
+    const splitAuthoritativeFallbackDoc = db.getDocumentBySlug(splitAuthoritativeFallbackSlug);
+    const splitAuthoritativeFallbackMarks = parseStoredMarks(splitAuthoritativeFallbackDoc?.marks);
+    assert(
+      splitAuthoritativeFallbackFixture.commentId in splitAuthoritativeFallbackMarks,
+      'Expected authoritative fallback accept to preserve unrelated comment metadata even when row marks were stale',
+    );
+
     const splitRejectFixture = buildSplitFixture('reject');
     const splitRejectSlug = `rehydrate-split-reject-${Math.random().toString(36).slice(2, 10)}`;
     db.createDocument(splitRejectSlug, splitRejectFixture.markdown, splitRejectFixture.marks, 'Split suggestion reject');
+    const splitRejectBefore = db.getDocumentBySlug(splitRejectSlug);
     const splitRejectResult = await executeDocumentOperationAsync(splitRejectSlug, 'POST', '/marks/reject', {
       markId: splitRejectFixture.suggestionId,
       by: 'human:test',
     });
     assertEqual(splitRejectResult.status, 200, `Expected split suggestion reject to succeed, got ${splitRejectResult.status}`);
+    const splitRejectBody = splitRejectResult.body as { marks?: Record<string, { status?: string }> };
+    assertEqual(
+      splitRejectBody.marks?.[splitRejectFixture.suggestionId]?.status,
+      'rejected',
+      'Expected split suggestion reject response to finalize the suggestion status',
+    );
     const splitRejectedDoc = db.getDocumentBySlug(splitRejectSlug);
     assertEqual(
       stripAllProofSpanTags(splitRejectedDoc?.markdown ?? '').trim(),
@@ -353,6 +459,10 @@ async function run(): Promise<void> {
     assert(
       splitRejectedDoc?.markdown.includes(`data-id="${splitRejectFixture.commentId}"`),
       'Expected split suggestion reject to preserve nested comment markup',
+    );
+    assert(
+      (splitRejectedDoc?.access_epoch ?? 0) > (splitRejectBefore?.access_epoch ?? 0),
+      'Expected split suggestion reject to bump access_epoch so stale collab rooms must reload',
     );
     const splitRejectedMarks = parseStoredMarks(splitRejectedDoc?.marks);
     assert(splitRejectFixture.commentId in splitRejectedMarks, 'Expected split suggestion reject to preserve nested comment metadata');
@@ -610,6 +720,12 @@ async function run(): Promise<void> {
       by: 'human:test',
     });
     assertEqual(authoredAcceptResult.status, 200, `Expected authored preservation accept to succeed, got ${authoredAcceptResult.status}`);
+    const authoredAcceptBody = authoredAcceptResult.body as { marks?: Record<string, { status?: string }> };
+    assertEqual(
+      authoredAcceptBody.marks?.[authoredAcceptFixture.suggestionId]?.status,
+      'accepted',
+      'Expected authored preservation accept response to finalize the suggestion status',
+    );
     const authoredAcceptedDoc = db.getDocumentBySlug(authoredAcceptSlug);
     assertEqual(
       stripAllProofSpanTags(authoredAcceptedDoc?.markdown ?? '').trim(),
@@ -633,6 +749,12 @@ async function run(): Promise<void> {
       by: 'human:test',
     });
     assertEqual(authoredRejectResult.status, 200, `Expected authored preservation reject to succeed, got ${authoredRejectResult.status}`);
+    const authoredRejectBody = authoredRejectResult.body as { marks?: Record<string, { status?: string }> };
+    assertEqual(
+      authoredRejectBody.marks?.[authoredRejectFixture.suggestionId]?.status,
+      'rejected',
+      'Expected authored preservation reject response to finalize the suggestion status',
+    );
     const authoredRejectedDoc = db.getDocumentBySlug(authoredRejectSlug);
     assertEqual(
       stripAllProofSpanTags(authoredRejectedDoc?.markdown ?? '').trim(),

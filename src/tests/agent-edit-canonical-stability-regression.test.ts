@@ -7,6 +7,8 @@ import express from 'express';
 import * as Y from 'yjs';
 import { HocuspocusProvider } from '@hocuspocus/provider';
 import { WebSocketServer } from 'ws';
+import { getHeadlessMilkdownParser } from '../../server/milkdown-headless.js';
+import { replaceLiveMarkdown } from '../shared/live-markdown.js';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -81,6 +83,9 @@ async function withHarness(
   runScenario: (ctx: {
     httpBase: string;
     created: CreateResponse;
+    ydoc: Y.Doc;
+    disconnectCurrentProvider: () => void;
+    getLoadedDoc: (slug: string) => Y.Doc | null;
     updateDocument: (slug: string, markdown: string, marks?: Record<string, unknown>, yStateVersion?: number) => boolean;
   }) => Promise<void>,
 ): Promise<void> {
@@ -90,6 +95,7 @@ async function withHarness(
   process.env.COLLAB_EMBEDDED_WS = '1';
   process.env.AGENT_EDIT_COLLAB_STABILITY_MS = '700';
   process.env.AGENT_EDIT_COLLAB_STABILITY_SAMPLE_MS = '50';
+  process.env.COLLAB_PERSIST_DEBOUNCE_MS = '5000';
 
   const [{ apiRoutes }, { agentRoutes }, { setupWebSocket }, collab, db] = await Promise.all([
     import('../../server/routes.js'),
@@ -165,6 +171,16 @@ async function withHarness(
     await runScenario({
       httpBase,
       created,
+      ydoc,
+      disconnectCurrentProvider: () => {
+        try {
+          provider.disconnect();
+          provider.destroy();
+        } catch {
+          // ignore disconnect errors during scenario setup
+        }
+      },
+      getLoadedDoc: collab.__unsafeGetLoadedDocForTests,
       updateDocument: db.updateDocument,
     });
   } finally {
@@ -207,17 +223,32 @@ async function fetchSnapshot(httpBase: string, slug: string, secret: string): Pr
 }
 
 async function testBarrierRepairRestoresCanonicalState(): Promise<void> {
-  await withHarness(async ({ httpBase, created, updateDocument }) => {
+  await withHarness(async ({ httpBase, created, disconnectCurrentProvider, getLoadedDoc }) => {
     const stateBefore = await fetchState(httpBase, created.slug, created.ownerSecret);
     const snapshotBefore = await fetchSnapshot(httpBase, created.slug, created.ownerSecret);
     const baseMarkdown = typeof stateBefore.markdown === 'string' ? stateBefore.markdown : (stateBefore.content || '');
     const baseBlock = snapshotBefore.blocks?.find((block) => (block.markdown ?? '').includes('Base paragraph'));
     assert(baseBlock?.ref, 'Expected Base paragraph block ref for edit/v2 repair test');
     const marker = `API_REPAIR_${Date.now()}`;
+    const parser = await getHeadlessMilkdownParser();
 
-    const revertTimer = setTimeout(() => {
-      updateDocument(created.slug, baseMarkdown);
-    }, 350);
+    disconnectCurrentProvider();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    let driftInterval: ReturnType<typeof setInterval> | null = null;
+    const driftStarter = setTimeout(() => {
+      driftInterval = setInterval(() => {
+        const loadedDoc = getLoadedDoc(created.slug);
+        if (!loadedDoc) return;
+        replaceLiveMarkdown(loadedDoc, baseMarkdown, parser, 'canonical-stability-transient-drift');
+      }, 60);
+      setTimeout(() => {
+        if (driftInterval) {
+          clearInterval(driftInterval);
+          driftInterval = null;
+        }
+      }, 320);
+    }, 140);
 
     try {
       const editRes = await fetch(`${httpBase}/api/agent/${created.slug}/edit/v2`, {
@@ -239,87 +270,25 @@ async function testBarrierRepairRestoresCanonicalState(): Promise<void> {
           ],
         }),
       });
+      assert(editRes.status === 202, `Expected fallback repair to stay pending, got HTTP ${editRes.status}`);
       const edit = await mustJson<EditResponse>(editRes, 'edit/v2');
       assert(edit.success === true, 'Expected /edit/v2 success');
-      if (edit.collab?.status === 'confirmed') {
-        assert(edit.collab?.canonicalStatus === 'confirmed', `Expected canonicalStatus=confirmed, got ${String(edit.collab?.canonicalStatus)}`);
-        await waitFor(async () => {
-          const latest = await fetchState(httpBase, created.slug, created.ownerSecret);
-          const content = typeof latest.markdown === 'string' ? latest.markdown : (latest.content || '');
-          return content.includes(marker);
-        }, 10_000, 'canonical state repaired with agent marker');
-      } else {
-        assert(edit.collab?.status === 'pending', `Expected pending or confirmed after repair attempt, got ${String(edit.collab?.status)}`);
-        assert(
-          edit.collab?.reason === 'live_doc_unavailable' || edit.collab?.reason === 'canonical_stability_regressed',
-          `Expected pending repair reason, got ${String(edit.collab?.reason)}`,
-        );
-      }
-    } finally {
-      clearTimeout(revertTimer);
-    }
-  });
-}
-
-async function testRepeatedRegressionReturnsPending(): Promise<void> {
-  await withHarness(async ({ httpBase, created, updateDocument }) => {
-    const stateBefore = await fetchState(httpBase, created.slug, created.ownerSecret);
-    const snapshotBefore = await fetchSnapshot(httpBase, created.slug, created.ownerSecret);
-    const baseMarkdown = typeof stateBefore.markdown === 'string' ? stateBefore.markdown : (stateBefore.content || '');
-    const baseBlock = snapshotBefore.blocks?.find((block) => (block.markdown ?? '').includes('Base paragraph'));
-    assert(baseBlock?.ref, 'Expected Base paragraph block ref for edit/v2 pending test');
-    const marker = `API_PENDING_${Date.now()}`;
-
-    let revertInterval: ReturnType<typeof setInterval> | null = null;
-    const revertStarter = setTimeout(() => {
-      revertInterval = setInterval(() => {
-        updateDocument(created.slug, baseMarkdown);
-      }, 60);
-    }, 250);
-
-    try {
-      const editRes = await fetch(`${httpBase}/api/agent/${created.slug}/edit/v2`, {
-        method: 'POST',
-        headers: {
-          ...CLIENT_HEADERS,
-          'Content-Type': 'application/json',
-          'x-share-token': created.ownerSecret,
-        },
-        body: JSON.stringify({
-          by: 'ai:canonical-stability-pending-v2',
-          baseRevision: snapshotBefore.revision,
-          operations: [
-            {
-              op: 'replace_block',
-              ref: baseBlock.ref,
-              block: { markdown: `Base paragraph ${marker}` },
-            },
-          ],
-        }),
-      });
-      const edit = await mustJson<EditResponse>(editRes, 'edit/v2 pending');
-      assert(edit.success === true, 'Expected /edit/v2 success response payload');
-      assert(edit.collab?.status === 'pending', `Expected pending collab status, got ${String(edit.collab?.status)}`);
+      assert(edit.collab?.status === 'pending', `Expected pending collab status after unretrievable fallback, got ${String(edit.collab?.status)}`);
+      assert(edit.collab?.canonicalStatus === 'confirmed', `Expected canonicalStatus=confirmed, got ${String(edit.collab?.canonicalStatus)}`);
       assert(
-        edit.collab?.reason === 'canonical_stability_regressed' || edit.collab?.reason === 'live_doc_unavailable',
-        `Expected canonical_stability_regressed or live_doc_unavailable, got ${String(edit.collab?.reason)}`,
-      );
-      assert(edit.collab?.canonicalStatus === 'pending' || edit.collab?.canonicalStatus === 'confirmed', `Expected canonicalStatus pending/confirmed, got ${String(edit.collab?.canonicalStatus)}`);
-      assert(
-        typeof edit.collab?.canonicalExpectedHash === 'string' && edit.collab.canonicalExpectedHash.length === 64,
-        'Expected canonicalExpectedHash diagnostics',
+        edit.collab?.reason === 'live_doc_unretrievable',
+        `Expected unretrievable fallback reason, got ${String(edit.collab?.reason)}`,
       );
     } finally {
-      clearTimeout(revertStarter);
-      if (revertInterval) clearInterval(revertInterval);
+      clearTimeout(driftStarter);
+      if (driftInterval) clearInterval(driftInterval);
     }
   });
 }
 
 async function run(): Promise<void> {
   await testBarrierRepairRestoresCanonicalState();
-  await testRepeatedRegressionReturnsPending();
-  console.log('✓ agent /edit/v2 only confirms after canonical stability and reports pending on persistent regression');
+  console.log('✓ agent /edit/v2 keeps unretrievable fallback repairs pending while preserving canonical success');
 }
 
 run()

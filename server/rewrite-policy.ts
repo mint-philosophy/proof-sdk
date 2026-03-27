@@ -1,4 +1,5 @@
 import { getActiveCollabClientBreakdown } from './ws.js';
+import { traceServerIncident } from './incident-tracing.js';
 
 export type RewriteLiveClientGate = {
   connectedClients: number;
@@ -16,6 +17,11 @@ export type RewriteLiveClientGate = {
   hostedRuntime: boolean;
   runtimeEnvironment: string;
   blocked: boolean;
+};
+
+type RewriteLiveClientGateOptions = {
+  route?: string;
+  requestId?: string | null;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -71,15 +77,60 @@ export function isHostedRewriteEnvironment(runtimeEnvironment: string = getRewri
 }
 
 export function evaluateRewriteLiveClientGate(slug: string, body: unknown): RewriteLiveClientGate {
+  return evaluateRewriteLiveClientGateWithOptions(slug, body, {});
+}
+
+function hasStaleEpochBypassDiagnostics(gate: RewriteLiveClientGate): boolean {
+  if (gate.connectedClients > 0) return false;
+  return gate.anyEpochCount > gate.exactEpochCount
+    || gate.documentLeaseAnyEpochCount > gate.documentLeaseExactCount;
+}
+
+function noteRewriteStaleEpochBypass(
+  slug: string,
+  gate: RewriteLiveClientGate,
+  options: RewriteLiveClientGateOptions,
+): void {
+  if (!slug || !hasStaleEpochBypassDiagnostics(gate)) return;
+  traceServerIncident({
+    requestId: options.requestId ?? null,
+    slug,
+    subsystem: 'collab',
+    level: 'info',
+    eventType: 'collab.stale_epoch_bypass_admitted',
+    message: 'Proceeding with rewrite admission despite stale prior-epoch collab diagnostics',
+    data: {
+      surface: 'rewrite_admission',
+      source: options.route ?? 'rewrite',
+      route: options.route ?? 'rewrite',
+      authorityBranch: 'current_epoch_cold_room',
+      accessEpoch: gate.accessEpoch,
+      exactEpochCount: gate.exactEpochCount,
+      anyEpochCount: gate.anyEpochCount,
+      documentLeaseExactCount: gate.documentLeaseExactCount,
+      documentLeaseAnyEpochCount: gate.documentLeaseAnyEpochCount,
+      recentLeaseCount: gate.recentLeaseCount,
+      total: gate.connectedClients,
+    },
+  });
+}
+
+export function evaluateRewriteLiveClientGateWithOptions(
+  slug: string,
+  body: unknown,
+  options: RewriteLiveClientGateOptions,
+): RewriteLiveClientGate {
   const forceRequested = parseRewriteForceFlag(body);
   const runtimeEnvironment = getRewriteRuntimeEnvironment();
   const hostedRuntime = isHostedRewriteEnvironment(runtimeEnvironment);
   const forceHonored = forceRequested && !hostedRuntime;
   const forceIgnored = forceRequested && hostedRuntime;
-  const conservativeHostedBlock = hostedRuntime;
   const breakdown = getActiveCollabClientBreakdown(slug);
   const connectedClients = breakdown.total;
-  return {
+  const conservativeHostedBlock = hostedRuntime
+    && breakdown.exactEpochCount === 0
+    && breakdown.total > 0;
+  const gate = {
     connectedClients,
     accessEpoch: breakdown.accessEpoch,
     exactEpochCount: breakdown.exactEpochCount,
@@ -94,8 +145,12 @@ export function evaluateRewriteLiveClientGate(slug: string, body: unknown): Rewr
     conservativeHostedBlock,
     hostedRuntime,
     runtimeEnvironment,
-    blocked: (conservativeHostedBlock || connectedClients > 0) && !forceHonored,
+    blocked: connectedClients > 0 && !forceHonored,
   };
+  if (!gate.blocked) {
+    noteRewriteStaleEpochBypass(slug, gate, options);
+  }
+  return gate;
 }
 
 export function rewriteBlockedResponseBody(gate: RewriteLiveClientGate, slug?: string): Record<string, unknown> {

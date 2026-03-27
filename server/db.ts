@@ -1573,6 +1573,35 @@ export function countActiveCollabConnections(
   return typeof row?.count === 'number' ? row.count : 0;
 }
 
+export function countActiveCollabConnectionsForInstance(
+  slug: string,
+  instanceId: string,
+  accessEpoch?: number | null,
+  observedAt: string = new Date().toISOString(),
+): number {
+  ensureActiveCollabConnectionsTable();
+  const cutoffIso = new Date(Date.parse(observedAt) - getActiveCollabConnectionTtlMs()).toISOString();
+  if (typeof accessEpoch === 'number' && Number.isFinite(accessEpoch)) {
+    const row = getDb().prepare(`
+      SELECT COUNT(*) AS count
+      FROM ${ACTIVE_COLLAB_CONNECTIONS_TABLE}
+      WHERE document_slug = ?
+        AND instance_id = ?
+        AND access_epoch = ?
+        AND last_seen_at >= ?
+    `).get(slug, instanceId, accessEpoch, cutoffIso) as { count?: number } | undefined;
+    return typeof row?.count === 'number' ? row.count : 0;
+  }
+  const row = getDb().prepare(`
+    SELECT COUNT(*) AS count
+    FROM ${ACTIVE_COLLAB_CONNECTIONS_TABLE}
+    WHERE document_slug = ?
+      AND instance_id = ?
+      AND last_seen_at >= ?
+  `).get(slug, instanceId, cutoffIso) as { count?: number } | undefined;
+  return typeof row?.count === 'number' ? row.count : 0;
+}
+
 export function listActiveCollabConnectionSlugs(
   observedAt: string = new Date().toISOString(),
 ): string[] {

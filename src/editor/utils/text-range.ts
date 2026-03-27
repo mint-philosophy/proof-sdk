@@ -43,6 +43,9 @@ function buildNormalizedIndex(text: string): NormalizedIndex {
   let lastWasSpace = false;
 
   for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '\\' && i + 1 < text.length && /[\\`*_{}\[\]()#+\-.!]/.test(text[i + 1])) {
+      continue;
+    }
     const normalized = normalizeMatchChar(text[i]);
     if (!normalized) continue;
 

@@ -259,7 +259,9 @@ test('source includes selection caching + pointer/touch handlers + arrow trigger
   assert(indexSource.includes('this.pendingCollabRebindOnSync = true;'), 'Expected collab share init to defer editor binding until live collab sync is ready');
   assert(indexSource.includes('this.pendingCollabRebindResetDoc = true;'), 'Expected collab share init to request a reset editor bind after the first live sync');
   assert(/if \(this\.collabEnabled && this\.collabCanEdit\) {\n\s*this\.publishProjectionMarkdown\(view, markdown, 'marks-flush'\);\n\s*collabClient\.setMarksMetadata\(metadata\);/.test(indexSource), 'Expected share mark flushes to use collab metadata only for editable sessions');
-  assert(indexSource.includes("void shareClient.pushMarks(metadata, getCurrentActor(), { keepalive: Boolean(_options?.keepalive) });"), 'Expected commenter mark flushes to fall back to REST mark persistence');
+  assert(indexSource.includes('const shouldPersistMarks = shouldKeepalivePersistShareMarks({'), 'Expected share mark flushes to gate keepalive REST writes when live editable sessions still own authoritative content');
+  assert(indexSource.includes('if (!shouldPersistMarks) {'), 'Expected share mark flushes to skip REST keepalive writes when they would race live content persistence');
+  assert(indexSource.includes("void shareClient.pushMarks(metadata, getCurrentActor(), { keepalive: Boolean(_options?.keepalive) });"), 'Expected safe mark flushes to continue falling back to REST mark persistence');
   assert(namePrompt.includes('function shouldAutofocusInput(): boolean {'), 'Expected name prompt to centralize autofocus logic');
   assert(namePrompt.includes("window.matchMedia('(pointer: coarse)').matches"), 'Expected name prompt to avoid coarse-pointer keyboard autofocus');
   assert(namePrompt.includes('if (shouldAutofocusInput()) {'), 'Expected name prompt autofocus to be gated');

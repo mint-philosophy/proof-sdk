@@ -7,6 +7,10 @@ function assert(condition: boolean, message: string): void {
 
 function run(): void {
   const source = readFileSync(path.resolve(process.cwd(), 'src/bridge/collab-client.ts'), 'utf8');
+  const setMarksBody = source.slice(
+    source.indexOf('setMarksMetadata(marks: Record<string, unknown>): void {'),
+    source.indexOf('disconnect(): void {'),
+  );
 
   assert(
     source.includes('reconnectWithSession(session: CollabSessionInfo, options?: { preserveLocalState?: boolean }): void'),
@@ -23,6 +27,11 @@ function run(): void {
   assert(
     source.includes('setProjectionMarkdown(markdown: string): void'),
     'Expected collab runtime to expose projection markdown writes',
+  );
+  assert(
+    source.includes('if (this.activeSession) {')
+      && source.includes("this.debugLog('skip-projection-write-live-session'"),
+    'Expected collab runtime to hard-stop durable projection markdown writes for live shared sessions',
   );
   assert(
     source.includes('setMarksMetadata(marks: Record<string, unknown>): void'),
@@ -73,15 +82,39 @@ function run(): void {
     'Expected collab runtime to support soft session refresh on the existing provider/Y.Doc before falling back to hard reconnect',
   );
   assert(
+    source.includes('connect(session: CollabSessionInfo, options?: { replayDurableBuffer?: boolean }): void {')
+      && source.includes('if (options?.replayDurableBuffer === false) {')
+      && source.includes('this.clearDurableBuffer();'),
+    'Expected collab runtime to support skipping stale durable replay when a hard reconnect chooses authoritative reset',
+  );
+  assert(
     source.includes('const preserveLocalState = options?.preserveLocalState !== false;')
       && source.includes('private hasPendingLocalStateForReconnect(): boolean {')
       && source.includes('return this.unsyncedChanges > 0 || this.durablePendingUpdates.length > 0;')
-      && source.includes('const canPreserveLocalState = preserveLocalState')
+      && source.includes('private pendingReconnectReplayUpdates: string[] = [];')
+      && source.includes('private recentReconnectReplayUpdates: Array<{ encoded: string; at: number }> = [];')
+      && source.includes('private static readonly RECENT_RECONNECT_REPLAY_GRACE_MS = 5_000;')
+      && source.includes('const recentReconnectReplayUpdates = preserveLocalState')
+      && source.includes('const canPreserveBufferedLocalState = preserveLocalState')
       && source.includes('&& this.canPersistDurableUpdates(session.role)')
-      && source.includes('&& this.hasPendingLocalStateForReconnect();')
-      && source.includes('const localState = canPreserveLocalState && this.ydoc ? Y.encodeStateAsUpdate(this.ydoc) : null;')
-      && source.includes("Y.applyUpdate(this.ydoc, localState, 'local-reconnect-bootstrap');"),
-    'Expected reconnect path to preserve local Yjs state only for writable roles with real pending local state',
+      && source.includes('&& (this.hasPendingLocalStateForReconnect() || recentReconnectReplayUpdates.length > 0);')
+      && source.includes('this.pendingReconnectReplayUpdates = canPreserveBufferedLocalState')
+      && source.includes('if (!canPreserveBufferedLocalState) {')
+      && source.includes('this.pendingMarksSnapshot = null;')
+      && source.includes('this.recentReconnectReplayUpdates = [];')
+      && source.includes('this.connect(session, { replayDurableBuffer: canPreserveBufferedLocalState });')
+      && source.includes('Buffered local updates')
+      && source.includes('safe unit of preservation across that boundary.')
+      && source.includes('private rememberRecentReconnectReplayUpdate(encoded: string): void {')
+      && source.includes('private getRecentReconnectReplayUpdates(): string[] {')
+      && source.includes('this.rememberRecentReconnectReplayUpdate(encoded);')
+      && source.includes('if (this.pendingReconnectReplayUpdates.length > 0) {')
+      && source.includes('this.pendingReconnectReplayUpdates = this.replayEncodedUpdates(ydoc, this.pendingReconnectReplayUpdates);')
+      && !source.includes('const localState = canPreserveLocalState && this.ydoc ? Y.encodeStateAsUpdate(this.ydoc) : null;')
+      && !source.includes('const wantsDurableReplay = preserveLocalState && canPreserveLocalState && !localState;')
+      && !source.includes('this.skipDurableReplayOnce = !wantsDurableReplay;')
+      && !source.includes("Y.applyUpdate(this.ydoc, localState, 'local-reconnect-bootstrap');"),
+    'Expected hard reconnects to preserve bounded buffered/recent local updates and never replay the full previous Y.Doc into a new live room',
   );
   assert(
     source.includes('this.activeSession.accessEpoch === session.accessEpoch;'),
@@ -95,6 +128,22 @@ function run(): void {
   assert(
     source.includes("if (transaction.origin === 'local-marks-sync') return;"),
     'Expected marks map listener to ignore local marks transactions',
+  );
+  assert(
+    !source.includes("if (origin === 'local-marks-sync') return false;"),
+    'Expected local marks transactions to stay in the durable local Yjs replay path instead of depending on REST unload writes',
+  );
+  assert(
+    source.includes('private pendingMarksSnapshot: Record<string, unknown> | null = null;')
+      && source.includes('private applyPendingMarksSnapshot(): void {')
+      && source.includes('if (!this.pendingMarksSnapshot || !this.ydoc || !this.marksMap) return;')
+      && source.includes('this.pendingMarksSnapshot = { ...marks };')
+      && source.includes('this.applyPendingMarksSnapshot();')
+      && setMarksBody.includes('if (!this.ydoc || !this.marksMap) {\n      this.pendingMarksSnapshot = { ...marks };\n      return;\n    }')
+      && setMarksBody.includes("if (!this.sessionRole || !this.canPersistDurableUpdates(this.sessionRole)) {")
+      && setMarksBody.indexOf('if (!this.ydoc || !this.marksMap) {\n      this.pendingMarksSnapshot = { ...marks };\n      return;\n    }')
+        < setMarksBody.indexOf("if (!this.sessionRole || !this.canPersistDurableUpdates(this.sessionRole)) {"),
+    'Expected collab runtime to queue marks written before the Yjs doc exists and replay them once the live marks map is available',
   );
   assert(
     source.includes('DURABLE_UPDATE_KEY_PREFIX')
@@ -111,6 +160,12 @@ function run(): void {
     source.includes('replayDurableUpdates')
       && source.includes('durable-replay'),
     'Expected collab runtime to replay buffered updates on reconnect',
+  );
+  assert(
+    source.includes('flushPendingLocalStateForUnload(): void {')
+      && source.includes('if (this.durablePendingUpdates.length === 0) return;')
+      && source.includes('this.flushDurableBuffer();'),
+    'Expected collab runtime to expose a synchronous unload flush for buffered local Yjs state',
   );
 
   assert(

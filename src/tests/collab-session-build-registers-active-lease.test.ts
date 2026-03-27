@@ -33,11 +33,11 @@ async function run(): Promise<void> {
       'Expected collab-session creation to register an active barrier lease',
     );
     assert(
-      breakdown.documentLeaseAnyEpochCount > 0,
-      'Expected collab-session creation to refresh the document-backed live collab lease',
+      breakdown.recentLeaseCount > 0,
+      'Expected collab-session creation to register a recent bootstrap lease',
     );
 
-    console.log('✓ buildCollabSession registers document-backed active lease for hosted safety gates');
+    console.log('✓ buildCollabSession registers a bootstrap lease for hosted safety gates');
   } finally {
     for (const suffix of ['', '-wal', '-shm']) {
       try {

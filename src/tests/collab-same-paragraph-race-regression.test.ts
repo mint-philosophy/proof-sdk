@@ -51,6 +51,10 @@ async function waitForAsync(
   throw new Error(`Timed out waiting for ${label}`);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function normalizeWsBase(collabWsUrl: string): string {
   const raw = collabWsUrl.replace(/\?slug=.*$/, '');
   try {
@@ -250,11 +254,19 @@ async function run(): Promise<void> {
     } catch {
       // ignore cleanup errors
     }
+    await sleep(50);
     providerADoc.destroy();
     providerBDoc.destroy();
     await collab.stopCollabRuntime();
     try {
-      wss.close();
+      for (const client of wss.clients) {
+        try {
+          client.terminate();
+        } catch {
+          // ignore cleanup errors
+        }
+      }
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
     } catch {
       // ignore cleanup errors
     }
@@ -269,7 +281,11 @@ async function run(): Promise<void> {
   }
 }
 
-run().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+run()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });

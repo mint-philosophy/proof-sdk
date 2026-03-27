@@ -24,9 +24,9 @@ function run(): void {
 
   assert(
     source.includes('if (!this.durableUpdatesEnabled || !this.durableBufferKey) return;')
-      && source.includes('if (!this.durableUpdatesEnabled) return;\n    if (this.skipDurableReplayOnce) {')
+      && source.includes('if (!this.durableUpdatesEnabled) return;\n    if (this.durablePendingUpdates.length === 0) return;')
       && source.includes('if (!this.durableUpdatesEnabled) return;\n    if (this.connectionStatus !== \'connected\') return;'),
-    'Expected durable append/replay/clear paths to be disabled for non-edit roles',
+    'Expected durable append/replay/clear paths to stay role-gated while always replaying buffered local updates on reconnect',
   );
 
   console.log('✓ commenter durable-replay guard regression');

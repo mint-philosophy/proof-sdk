@@ -42,7 +42,26 @@ async function run(): Promise<void> {
 
     if (url.pathname === '/api/agent/test-doc/state') {
       stateReads += 1;
+      if (stateReads === 1) {
+        return jsonResponse({
+          mutationBase: {
+            token: 'mt1:test-token-1',
+            source: 'persisted_yjs',
+            schemaVersion: 'mt1',
+          },
+          revision: 41,
+          updatedAt: '2026-03-06T00:00:01.000Z',
+        });
+      }
       if (stateReads === 2) {
+        return jsonResponse({
+          mutationReady: false,
+          readSource: 'yjs_fallback',
+          updatedAt: null,
+          revision: null,
+        });
+      }
+      if (stateReads === 3) {
         return jsonResponse({ updatedAt: '2026-03-06T00:00:00.000Z' });
       }
       return jsonResponse({ revision: 40 + stateReads, updatedAt: `2026-03-06T00:00:0${stateReads}.000Z` });
@@ -216,7 +235,16 @@ async function run(): Promise<void> {
       acceptRequest?.headers.get('Idempotency-Key'),
       'acceptSuggestion should send an Idempotency-Key header when the server requires idempotent mutations',
     );
-    assert.equal(acceptRequest?.body?.baseRevision, 41, 'acceptSuggestion should include baseRevision from /state');
+    assert.equal(
+      acceptRequest?.body?.baseToken,
+      'mt1:test-token-1',
+      'acceptSuggestion should prefer baseToken from /state when it is available',
+    );
+    assert.equal(
+      acceptRequest?.body?.baseRevision,
+      undefined,
+      'acceptSuggestion should not send baseRevision when /state already provided a baseToken',
+    );
     assert.equal(
       acceptRequest?.body?.markdown,
       'Snapshot single accept markdown',
@@ -299,20 +327,20 @@ async function run(): Promise<void> {
     );
     assert.equal(
       rejectRequest?.body?.baseRevision,
-      43,
-      'rejectSuggestion should continue reading the latest base state after prior mark mutations, including batch accept',
+      44,
+      'rejectSuggestion should continue reading the latest base state after prior accept mutations',
     );
     const delayedRejectRequest = requests.find((request) =>
       request.path === '/api/agent/test-doc/marks/reject' && request.body?.markId === 'mark-reject-delayed');
     assert.equal(
       delayedRejectRequest?.body?.baseRevision,
-      44,
-      'LIVE_DOC_UNAVAILABLE rejectSuggestion should start from the refreshed baseRevision before retrying',
+      45,
+      'LIVE_DOC_UNAVAILABLE rejectSuggestion should start from the latest pre-retry baseRevision',
     );
     assert.equal(
       acceptAllRequest?.body?.baseRevision,
-      50,
-      'acceptSuggestions should include the latest refreshed baseRevision',
+      51,
+      'acceptSuggestions should include the latest refreshed baseRevision after delayed accept retries',
     );
     assert.notEqual(
       acceptRequest?.headers.get('Idempotency-Key'),
@@ -321,13 +349,13 @@ async function run(): Promise<void> {
     );
 
     const resolveRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/resolve');
-    assert.equal(resolveRequest?.body?.baseRevision, 51, 'resolveComment should include the latest refreshed baseRevision after transient accept/reject retries and batch accept');
+    assert.equal(resolveRequest?.body?.baseRevision, 52, 'resolveComment should include the latest refreshed baseRevision after transient accept/reject retries and batch accept');
 
     const unresolveRequest = requests.find((request) => request.path === '/api/agent/test-doc/marks/unresolve');
-    assert.equal(unresolveRequest?.body?.baseRevision, 52, 'unresolveComment should continue reading the latest baseRevision after prior retries');
+    assert.equal(unresolveRequest?.body?.baseRevision, 53, 'unresolveComment should continue reading the latest baseRevision after prior retries');
 
     const stateRequestCount = requests.filter((request) => request.path === '/api/agent/test-doc/state').length;
-    assert.equal(stateRequestCount, 12, 'share mark mutations should keep refreshing the mutation base across LIVE_DOC_UNAVAILABLE retries and batch accept');
+    assert.equal(stateRequestCount, 13, 'share mark mutations should keep refreshing the mutation base across LIVE_DOC_UNAVAILABLE retries and batch accept');
 
     console.log('share-client-mark-preconditions.test.ts passed');
   } finally {

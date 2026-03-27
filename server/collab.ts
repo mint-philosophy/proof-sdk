@@ -9,6 +9,7 @@ import {
   bumpDocumentAccessEpoch,
   clearPersistedGlobalCollabAdmissionGuard,
   clearYjsState,
+  countActiveCollabConnectionsForInstance,
   OversizedYjsUpdateError,
   getDocumentAuthStateBySlug,
   getDocumentBySlug,
@@ -47,6 +48,7 @@ import {
   recordCollabPathologyQuarantine,
   recordCollabSessionBuildLatency,
   recordCollabLogSuppressed,
+  recordStaleOnStoreDrop,
   recordProjectionChars,
   recordProjectionDrift,
   recordFragmentCacheMismatch,
@@ -83,11 +85,12 @@ import {
   extractAuthoredMarksFromMarkdown,
   synchronizeAuthoredMarks,
 } from './proof-authored-mark-sync.js';
+import { isShuttingDown } from './shutdown-state.js';
 import { stripProofSpanTags } from './proof-span-strip.js';
 import { restoreStandaloneBlankParagraphLines } from '../src/editor/explicit-blank-paragraphs.js';
 import { normalizeAgentScopedId } from '../src/shared/agent-identity.js';
-import { traceServerIncident, toErrorTraceData } from './incident-tracing.js';
-import { getActiveCollabClientBreakdown } from './ws.js';
+import { traceServerIncident, toErrorTraceData, type IncidentTraceLevel } from './incident-tracing.js';
+import { getActiveCollabClientBreakdown, type ActiveCollabClientBreakdown } from './ws.js';
 import { analyzeRepeatedStructureDelta, summarizeDocumentIntegrity } from './document-integrity.js';
 
 warmHeadlessMilkdownParserInBackground();
@@ -96,6 +99,8 @@ type HocuspocusInstance = {
   listen?: () => void | Promise<void>;
   destroy?: () => void | Promise<void>;
   handleConnection?: (socket: unknown, request: unknown) => void;
+  closeConnections?: (documentName?: string) => void;
+  getConnectionsCount?: () => number;
   // Available in @hocuspocus/server 2.x (Proof uses 2.15.x).
   openDirectConnection?: (documentName: string, context?: unknown) => Promise<unknown>;
 };
@@ -579,6 +584,57 @@ export function getLiveCollabBlockStatus(slug: string): LiveCollabBlockStatus {
   };
 }
 
+// Startup readiness flag — gates /health until collab is ready (or disabled).
+let collabRuntimeReady = false;
+
+export function isCollabRuntimeReady(): boolean {
+  return collabRuntimeReady;
+}
+
+export type CollabHealthState = 'starting' | 'ready' | 'disabled' | 'degraded' | 'stopped';
+type ShutdownFlushSkipReason =
+  | 'access_epoch_mismatch'
+  | 'auto_quarantined'
+  | 'invalidated'
+  | 'read_only'
+  | 'rewrite_locked'
+  | 'share_state_blocked'
+  | 'stale_generation'
+  | 'superseded_loaded_doc';
+
+export function getCollabHealthState(): CollabHealthState {
+  if (runtime.enabled) {
+    return collabRuntimeReady ? 'ready' : 'starting';
+  }
+  if (runtime.reason === 'Disabled by PROOF_COLLAB_V2 flag') {
+    return 'disabled';
+  }
+  if (runtime.reason === 'Collab runtime stopped') {
+    return 'stopped';
+  }
+  return collabRuntimeReady ? 'degraded' : 'starting';
+}
+
+function traceCollabStartupIncident(
+  level: IncidentTraceLevel,
+  eventType: string,
+  reason: string,
+  data: Record<string, unknown> = {},
+): void {
+  traceServerIncident({
+    subsystem: 'collab',
+    level,
+    eventType,
+    message: reason,
+    data: {
+      healthState: getCollabHealthState(),
+      ready: collabRuntimeReady,
+      runtimeEnabled: runtime.enabled,
+      ...data,
+    },
+  });
+}
+
 let runtime: CollabRuntime = {
   enabled: false,
   wsUrlBase: '',
@@ -592,9 +648,22 @@ let collabUpgradeServer: HttpServer | null = null;
 const loadedDocs = new Map<string, Y.Doc>();
 const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const persistInFlight = new Map<string, boolean>();
-const persistPending = new Map<string, { ydoc: Y.Doc; sourceActor: string; expectedGeneration: number | null }>();
+const persistInFlightPromises = new Map<string, Promise<void>>();
+type PersistDocOptions = {
+  allowDuringShutdown?: boolean;
+};
+const persistPending = new Map<string, {
+  ydoc: Y.Doc;
+  sourceActor: string;
+  expectedGeneration: number | null;
+  options?: PersistDocOptions;
+}>();
 const persistGeneration = new Map<string, number>();
 const docPersistGenerations = new WeakMap<Y.Doc, number>();
+const invalidatedOnStoreDocRefs = new WeakSet<Y.Doc>();
+let persistPauseHookForTests: ((context: { slug: string }) => Promise<void> | void) | null = null;
+let activeCollabConnectionCountOverrideForTests: (() => number) | null = null;
+let shutdownForceCloseHookForTests: (() => void) | null = null;
 type FragmentEditState = { dirty: boolean };
 const fragmentEditStateByDoc = new WeakMap<Y.Doc, FragmentEditState>();
 const fragmentEditListenerAttached = new WeakSet<Y.Doc>();
@@ -619,6 +688,7 @@ type PersistedDocCacheEntry = PersistedDocCacheKey & {
 const persistedDocCache = new Map<string, PersistedDocCacheEntry>();
 const persistedDocDegradationReasons = new WeakMap<Y.Doc, PersistedDocDegradationReason>();
 const durablePersistListenerAttached = new WeakSet<Y.Doc>();
+const shutdownWriteDropNotices = new Set<string>();
 const FRAGMENT_REPAIR_ORIGINS = new Set(['server-fragment-repair', 'persisted-fragment-repair']);
 const lastPersistedStateVectors = new Map<string, Uint8Array>();
 const lastPersistedAuthoritativeSnapshots = new Map<string, Uint8Array>();
@@ -719,7 +789,10 @@ type PathologyCooldownEntry = {
 };
 const projectionPathologyCooldowns = new Map<string, PathologyCooldownEntry>();
 const staleOnStoreDriftCooldowns = new Map<string, PathologyCooldownEntry>();
+const staleOnStoreDropCooldowns = new Map<string, PathologyCooldownEntry>();
 const collabWsOversizeCooldowns = new Map<string, PathologyCooldownEntry>();
+const localAuthorityAdmissionCooldowns = new Map<string, PathologyCooldownEntry>();
+const staleEpochBypassAdmissionCooldowns = new Map<string, PathologyCooldownEntry>();
 type AutoCollabQuarantineEntry = {
   reason: string;
   untilMs: number;
@@ -824,6 +897,12 @@ let warnedAboutEphemeralCollabSecret = false;
 const debugOnConnect = (process.env.COLLAB_DEBUG_ONCONNECT || '').trim() === '1';
 const DEFAULT_PENDING_DELTA_SNIPPET_CHARS = 160;
 const recentCollabSessionLeases = new Map<string, number>();
+type LoadedDocAuthorityOrigin = 'persisted' | 'live';
+type LoadedDocAuthorityRecord = {
+  ydoc: Y.Doc;
+  origin: LoadedDocAuthorityOrigin;
+};
+const loadedDocAuthorityOrigins = new Map<string, LoadedDocAuthorityRecord>();
 const ACTIVE_COLLAB_INSTANCE_ID = (
   process.env.RAILWAY_REPLICA_ID
   || process.env.RAILWAY_DEPLOYMENT_ID
@@ -1142,7 +1221,7 @@ async function authenticateCollabSession(documentName: string, token: string): P
   }
 
   let readableDoc = await getCanonicalReadableDocument(documentName, 'share', {
-    skipLiveDocWriteGate: true,
+    allowSessionBootstrapBypass: true,
   }) ?? getDocumentBySlug(documentName);
   if (!isCanonicalReadMutationReady(readableDoc)) {
     const { recoverCanonicalDocumentIfNeeded } = await import('./canonical-document.js');
@@ -1783,8 +1862,25 @@ function advancePersistGeneration(slug: string): number {
   return nextGeneration;
 }
 
-function rememberLoadedDoc(slug: string, ydoc: Y.Doc): void {
+function inferLoadedDocAuthorityOrigin(
+  slug: string,
+  ydoc: Y.Doc,
+  fallback: LoadedDocAuthorityOrigin = 'persisted',
+): LoadedDocAuthorityOrigin {
+  const liveDoc = getLiveHocuspocusDoc(slug);
+  if (liveDoc && liveDoc === ydoc) return 'live';
+  const existing = loadedDocAuthorityOrigins.get(slug);
+  if (existing && existing.ydoc === ydoc) return existing.origin;
+  return fallback;
+}
+
+function rememberLoadedDoc(
+  slug: string,
+  ydoc: Y.Doc,
+  origin: LoadedDocAuthorityOrigin = inferLoadedDocAuthorityOrigin(slug, ydoc),
+): void {
   loadedDocs.set(slug, ydoc);
+  loadedDocAuthorityOrigins.set(slug, { ydoc, origin });
   docPersistGenerations.set(ydoc, getPersistGeneration(slug));
   ensureFragmentEditTracking(ydoc);
   ensureDurablePersistTracking(slug, ydoc);
@@ -1852,12 +1948,243 @@ function ensureDurablePersistTracking(slug: string, ydoc: Y.Doc): void {
     )
       ? (transaction.origin as { context?: unknown }).context
       : null;
+    if (shouldDropWriteDuringShutdown(slug, 'durablePersistTracking')) return;
     if (originContext && shouldDropStaleContextWrite(slug, originContext, 'durablePersistTracking')) return;
     if (collabInvalidations.has(slug) || isRewriteLocked(slug)) return;
     if (loadedDocs.get(slug) !== ydoc) return;
     markDocChanged(slug);
     schedulePersistDoc(slug, ydoc);
   });
+}
+
+function shouldDropWriteDuringShutdown(
+  slug: string,
+  source: 'durablePersistTracking' | 'persistDoc' | 'schedulePersistDoc' | 'onStoreDocument' | 'onChange',
+): boolean {
+  if (!isShuttingDown()) return false;
+  const key = `${source}:${slug}`;
+  if (!shutdownWriteDropNotices.has(key)) {
+    shutdownWriteDropNotices.add(key);
+    console.warn('[shutdown] dropped collab write during drain', { slug, source });
+    traceShutdownIncident('warn', 'shutdown.write_dropped', 'Dropped collab write during shutdown drain', {
+      slug,
+      data: { source },
+    });
+  }
+  return true;
+}
+
+function traceShutdownIncident(
+  level: IncidentTraceLevel,
+  eventType: string,
+  message: string,
+  options: {
+    slug?: string | null;
+    data?: Record<string, unknown>;
+  } = {},
+): void {
+  traceServerIncident({
+    slug: options.slug ?? null,
+    subsystem: 'collab',
+    level,
+    eventType,
+    message,
+    data: {
+      phase: 'shutdown',
+      ...(options.data ?? {}),
+    },
+  });
+}
+
+function traceShutdownFlushSkipped(
+  slug: string,
+  reason: string,
+  data: Record<string, unknown> = {},
+): void {
+  traceShutdownIncident('warn', 'shutdown.flush_skipped', 'Skipped collab shutdown flush', {
+    slug,
+    data: {
+      reason,
+      ...data,
+    },
+  });
+}
+
+function hasPersistInFlightWrites(): boolean {
+  for (const inFlight of persistInFlight.values()) {
+    if (inFlight) return true;
+  }
+  return false;
+}
+
+async function waitForPersistInFlightDrain(timeoutMs: number = 500): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (!hasPersistInFlightWrites() && persistInFlightPromises.size === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const stuckSlugs = Array.from(new Set([
+    ...persistInFlightPromises.keys(),
+    ...Array.from(persistInFlight.entries())
+      .filter(([, inFlight]) => inFlight)
+      .map(([slug]) => slug),
+  ]));
+  traceShutdownIncident('error', 'shutdown.persist_drain_timeout', 'Timed out waiting for in-flight collab persistence during shutdown drain', {
+    slug: stuckSlugs.length === 1 ? stuckSlugs[0] : null,
+    data: {
+      timeoutMs,
+      slugs: stuckSlugs,
+    },
+  });
+  const error = new Error(
+    `Timed out waiting for in-flight collab persistence to drain before snapshot flush (${stuckSlugs.join(', ') || 'unknown slugs'})`,
+  ) as Error & { slugs?: string[] };
+  error.slugs = stuckSlugs;
+  throw error;
+}
+
+function getActiveCollabConnectionCount(): number {
+  if (activeCollabConnectionCountOverrideForTests) {
+    return activeCollabConnectionCountOverrideForTests();
+  }
+  const counts: number[] = [];
+  if (typeof hocuspocusInstance?.getConnectionsCount === 'function') {
+    try {
+      counts.push(hocuspocusInstance.getConnectionsCount());
+    } catch {
+      // ignore
+    }
+  }
+  if (collabWss) {
+    counts.push(collabWss.clients.size);
+  }
+  return counts.length > 0 ? Math.max(...counts) : 0;
+}
+
+function getShutdownAuthoritativeBaseline(slug: string): AuthoritativeBaseline | null {
+  const baseline = getAuthoritativeBaseline(slug);
+  if (baseline) return baseline;
+  const loadedMeta = loadedDocDbMeta.get(slug);
+  if (!(loadedMeta?.baselineSnapshot && loadedMeta?.baselineStateVector)) return null;
+  return {
+    snapshot: loadedMeta.baselineSnapshot,
+    stateVector: loadedMeta.baselineStateVector,
+  };
+}
+
+function hasDirtyShutdownSignal(slug: string, ydoc: Y.Doc): boolean {
+  if (docLastChangedAt.has(slug)) return true;
+  const currentFingerprint = buildAuthoritativeDocFingerprint(ydoc);
+  const baseline = getShutdownAuthoritativeBaseline(slug);
+  if (baseline) {
+    const baselineDoc = new Y.Doc();
+    Y.applyUpdate(baselineDoc, baseline.snapshot);
+    if (buildAuthoritativeDocFingerprint(baselineDoc) !== currentFingerprint) {
+      return true;
+    }
+  }
+  for (const key of shutdownWriteDropNotices) {
+    if (key.endsWith(`:${slug}`)) return true;
+  }
+  try {
+    const persisted = readPersistedDocState(slug, { allowFragmentRecovery: false });
+    if (buildAuthoritativeDocFingerprint(persisted.ydoc) !== currentFingerprint) {
+      return true;
+    }
+  } catch {
+    // If we cannot reconstruct persisted state, fall back to the tracked shutdown breadcrumbs.
+  }
+  return false;
+}
+
+function buildShutdownGuardError(
+  slug: string,
+  reason: ShutdownFlushSkipReason,
+  data: Record<string, unknown> = {},
+): Error & { slug: string; slugs: string[]; reason: ShutdownFlushSkipReason; data: Record<string, unknown> } {
+  const error = new Error(
+    `Refused to drop dirty collab room during shutdown (${slug}: ${reason})`,
+  ) as Error & { slug: string; slugs: string[]; reason: ShutdownFlushSkipReason; data: Record<string, unknown> };
+  error.slug = slug;
+  error.slugs = [slug];
+  error.reason = reason;
+  error.data = data;
+  return error;
+}
+
+function maybeThrowOnDirtyShutdownGuard(
+  slug: string,
+  ydoc: Y.Doc,
+  reason: ShutdownFlushSkipReason,
+  data: Record<string, unknown> = {},
+): void {
+  if (!hasDirtyShutdownSignal(slug, ydoc)) return;
+  throw buildShutdownGuardError(slug, reason, data);
+}
+
+async function waitForCollabConnectionDrain(timeoutMs: number = 500): Promise<void> {
+  const activeSlugs = listActiveCollabConnectionSlugs();
+  const traceSlug = activeSlugs.length === 1 ? activeSlugs[0] : null;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (getActiveCollabConnectionCount() === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  let forcedClients = 0;
+  if (collabWss) {
+    for (const client of collabWss.clients) {
+      try {
+        if (typeof (client as { terminate?: () => void }).terminate === 'function') {
+          (client as { terminate: () => void }).terminate();
+        } else {
+          client.close(1012, 'Service restart');
+        }
+        forcedClients += 1;
+      } catch {
+        // ignore
+      }
+    }
+  }
+  if (typeof hocuspocusInstance?.closeConnections === 'function') {
+    try {
+      hocuspocusInstance.closeConnections();
+    } catch {
+      // ignore
+    }
+  }
+  shutdownForceCloseHookForTests?.();
+  traceShutdownIncident('warn', 'shutdown.connection_force_close', 'Forced collab connection close during shutdown drain', {
+    slug: traceSlug,
+    data: {
+      activeSlugs,
+      forcedClients,
+    },
+  });
+  const forceDeadline = Date.now() + 250;
+  while (Date.now() <= forceDeadline) {
+    const remaining = getActiveCollabConnectionCount();
+    if (remaining === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const remaining = getActiveCollabConnectionCount();
+  traceShutdownIncident('error', 'shutdown.connection_drain_timeout', 'Timed out waiting for collab connections to drain during shutdown flush', {
+    slug: traceSlug,
+    data: {
+      activeSlugs,
+      forcedClients,
+      remaining,
+      timeoutMs,
+    },
+  });
+  throw new Error(`Timed out waiting for collab connections to drain before snapshot flush (${remaining} remaining after force close, forcedClients=${forcedClients})`);
+}
+
+function fencePersistWorkForShutdown(): void {
+  for (const timer of persistTimers.values()) {
+    clearTimeout(timer);
+  }
+  persistTimers.clear();
+  persistPending.clear();
 }
 
 function cancelPendingPersistWork(
@@ -3063,6 +3390,15 @@ function clearStaleOnStoreDriftCooldown(slug: string): void {
   staleOnStoreDriftCooldowns.delete(slug);
 }
 
+function clearStaleOnStoreDropCooldown(slug: string): void {
+  if (!slug) return;
+  for (const key of staleOnStoreDropCooldowns.keys()) {
+    if (key === slug || key.startsWith(`${slug}:`)) {
+      staleOnStoreDropCooldowns.delete(key);
+    }
+  }
+}
+
 function clearCollabRepairLoopBreaker(slug: string): void {
   if (!slug) return;
   collabRepairLoopBreaker.delete(slug);
@@ -3071,6 +3407,7 @@ function clearCollabRepairLoopBreaker(slug: string): void {
 function clearProjectionPathologyCooldownsForSlug(slug: string): void {
   clearProjectionPathologyCooldown(slug);
   clearStaleOnStoreDriftCooldown(slug);
+  clearStaleOnStoreDropCooldown(slug);
   clearRepairGuardEscalationState(slug);
   clearProjectionRepairCycleId(slug);
   repeatedLegacyReseedAttempts.delete(slug);
@@ -3088,6 +3425,16 @@ function clearAllSlugPathologyCooldowns(slug: string): void {
   clearProjectionPathologyCooldownsForSlug(slug);
   clearCollabRepairLoopBreaker(slug);
   integrityWarningCooldowns.delete(slug);
+  for (const key of localAuthorityAdmissionCooldowns.keys()) {
+    if (key === slug || key.startsWith(`${slug}:`)) {
+      localAuthorityAdmissionCooldowns.delete(key);
+    }
+  }
+  for (const key of staleEpochBypassAdmissionCooldowns.keys()) {
+    if (key === slug || key.startsWith(`${slug}:`)) {
+      staleEpochBypassAdmissionCooldowns.delete(key);
+    }
+  }
 }
 
 function buildProjectionPathologyFingerprint(
@@ -3103,6 +3450,16 @@ function buildProjectionPathologyFingerprint(
 }
 
 function buildStaleOnStoreSuppressionFingerprint(
+  reason: string,
+  extras: Record<string, unknown> = {},
+): string {
+  return stableStringify({
+    reason: reason || 'unknown',
+    extras,
+  });
+}
+
+function buildStaleOnStoreDropSuppressionFingerprint(
   reason: string,
   extras: Record<string, unknown> = {},
 ): string {
@@ -3229,6 +3586,34 @@ function logFragmentDriftSuppressionSummary(slug: string, suppressedCount: numbe
   if (!shouldEmitSuppressionSummary(suppressedCount)) return;
   console.warn('[collab] suppressed repeated fragment drift loop logs', {
     slug,
+    suppressedCount,
+  });
+}
+
+function logLocalAuthorityAdmissionSuppressionSummary(
+  slug: string,
+  surface: string,
+  suppressedCount: number,
+): void {
+  if (!shouldEmitSuppressionSummary(suppressedCount)) return;
+  console.info('[collab] suppressed repeated local authority admission incidents', {
+    slug,
+    surface,
+    suppressedCount,
+  });
+}
+
+function logStaleEpochBypassSuppressionSummary(
+  slug: string,
+  surface: string,
+  source: string,
+  suppressedCount: number,
+): void {
+  if (!shouldEmitSuppressionSummary(suppressedCount)) return;
+  console.info('[collab] suppressed repeated stale-epoch bypass incidents', {
+    slug,
+    surface,
+    source,
     suppressedCount,
   });
 }
@@ -6224,7 +6609,17 @@ function buildYjsFallbackReadableDocument(
   });
   const rowMarks = parseStoredMarks(row.marks);
   const sanitizedRowMarkdown = stripEphemeralCollabSpans(row.markdown ?? '');
+  const breakdown = getActiveCollabClientBreakdown(slug);
+  const localLiveAuthorityDecision = getLocalLiveAuthorityDecision(
+    slug,
+    handle,
+    breakdown,
+    { allowRecentSessionLeaseBootstrap: true },
+  );
+  const localLiveAuthority = localLiveAuthorityDecision.allowed;
+  noteLocalAuthorityGateAdmission(slug, 'yjs_fallback', localLiveAuthorityDecision, handle, breakdown);
   const computedMutationReady = handle.source === 'live'
+    || localLiveAuthority
     || (
       sanitizedRowMarkdown === markdown
       && stableStringify(rowMarks) === stableStringify(marks)
@@ -6253,7 +6648,6 @@ function buildYjsFallbackReadableDocument(
 export function getCanonicalReadableDocumentSync(
   slug: string,
   source: 'state' | 'snapshot' | 'share' | 'unknown' = 'unknown',
-  options: { skipLiveDocWriteGate?: boolean } = {},
 ): CanonicalReadableDocument | undefined {
   const result = getCanonicalReadableDocumentSyncCore(slug, source);
   if (!result || !result.mutation_ready) return result;
@@ -6265,14 +6659,22 @@ export function getCanonicalReadableDocumentSync(
   }
 
   // Align read-surface writability with the live mutation gate. If active
-  // collab leases exist, writes require a live Yjs handle; a persisted-only
-  // handle will fail later with LIVE_DOC_UNAVAILABLE.
+  // collab leases exist for the current access epoch, writes require a live Yjs
+  // handle; a persisted-only handle will fail later with LIVE_DOC_UNAVAILABLE.
   const breakdown = getActiveCollabClientBreakdown(slug);
-  if (!options.skipLiveDocWriteGate && breakdown.total > 0) {
+  const activePresenceCount = Math.max(
+    breakdown.exactEpochCount,
+    breakdown.documentLeaseExactCount,
+  );
+  if (activePresenceCount > 0) {
     const handle = loadCanonicalYDocSync(slug, { allowFragmentRecovery: false });
-    if (!handle || handle.source !== 'live') {
+    const localLiveAuthorityDecision = getLocalLiveAuthorityDecision(slug, handle, breakdown);
+    if (!localLiveAuthorityDecision.allowed) {
       return { ...result, mutation_ready: false };
     }
+    noteLocalAuthorityGateAdmission(slug, 'write_gate_sync', localLiveAuthorityDecision, handle, breakdown);
+  } else {
+    noteStaleEpochBypassAdmission(slug, 'write_gate_sync', source, breakdown, 'current_epoch_cold_room');
   }
 
   return result;
@@ -6452,6 +6854,10 @@ async function applyLiveDocWriteGateToReadableDocument(
   slug: string,
   result: CanonicalReadableDocument | undefined,
   handle?: CanonicalYDocHandle | null,
+  options: {
+    allowSessionBootstrapBypass?: boolean;
+    source?: 'state' | 'snapshot' | 'share' | 'unknown';
+  } = {},
 ): Promise<CanonicalReadableDocument | undefined> {
   if (!result || !result.mutation_ready) return result;
 
@@ -6462,10 +6868,49 @@ async function applyLiveDocWriteGateToReadableDocument(
   }
 
   const breakdown = getActiveCollabClientBreakdown(slug);
-  if (breakdown.total <= 0) return result;
-  if (handle?.source === 'live') return result;
+  const activePresenceCount = Math.max(
+    breakdown.exactEpochCount,
+    breakdown.documentLeaseExactCount,
+  );
+  if (activePresenceCount <= 0) {
+    noteStaleEpochBypassAdmission(
+      slug,
+      'write_gate_async',
+      options.source ?? 'unknown',
+      breakdown,
+      'current_epoch_cold_room',
+    );
+    return result;
+  }
+  // Session issuance/auth can note pre-auth barrier leases before a live writer exists.
+  // Do not let that bootstrap bookkeeping self-trigger a readonly downgrade.
+  if (
+    options.allowSessionBootstrapBypass === true
+    && breakdown.exactEpochCount === 0
+    && breakdown.documentLeaseExactCount === 0
+  ) {
+    return result;
+  }
+  const localLiveAuthorityDecision = getLocalLiveAuthorityDecision(slug, handle, breakdown);
+  if (localLiveAuthorityDecision.allowed) {
+    noteLocalAuthorityGateAdmission(slug, 'write_gate_async', localLiveAuthorityDecision, handle, breakdown);
+    return result;
+  }
   if (handle && handle.source !== 'live') {
-    return { ...result, mutation_ready: false };
+    const liveHandle = await loadCanonicalYDoc(slug, {
+      liveRequired: true,
+      allowFragmentRecovery: false,
+    });
+    try {
+      const liveHandleDecision = getLocalLiveAuthorityDecision(slug, liveHandle, breakdown);
+      if (liveHandleDecision.allowed) {
+        noteLocalAuthorityGateAdmission(slug, 'write_gate_async', liveHandleDecision, liveHandle, breakdown);
+        return result;
+      }
+      return { ...result, mutation_ready: false };
+    } finally {
+      await liveHandle?.cleanup?.();
+    }
   }
 
   const liveHandle = await loadCanonicalYDoc(slug, {
@@ -6473,28 +6918,262 @@ async function applyLiveDocWriteGateToReadableDocument(
     allowFragmentRecovery: false,
   });
   try {
-    if (liveHandle?.source === 'live') return result;
+    const liveHandleDecision = getLocalLiveAuthorityDecision(slug, liveHandle, breakdown);
+    if (liveHandleDecision.allowed) {
+      noteLocalAuthorityGateAdmission(slug, 'write_gate_async', liveHandleDecision, liveHandle, breakdown);
+      return result;
+    }
     return { ...result, mutation_ready: false };
   } finally {
     await liveHandle?.cleanup?.();
   }
 }
 
+type LocalLiveAuthorityBranch =
+  | 'live_source'
+  | 'persisted_live_presence'
+  | 'persisted_recent_session_bootstrap';
+
+type LocalLiveAuthorityDecision = {
+  allowed: boolean;
+  branch: LocalLiveAuthorityBranch | null;
+};
+
+function getLocalLiveAuthorityDecision(
+  slug: string,
+  handle: CanonicalYDocHandle | null | undefined,
+  breakdown: ActiveCollabClientBreakdown,
+  options: { allowRecentSessionLeaseBootstrap?: boolean } = {},
+): LocalLiveAuthorityDecision {
+  if (!handle) return { allowed: false, branch: null };
+  if (handle.source === 'live') {
+    return { allowed: true, branch: 'live_source' };
+  }
+  if (handle.source !== 'persisted') return { allowed: false, branch: null };
+  const hasLocalLivePresence = countActiveCollabConnectionsForInstance(
+    slug,
+    ACTIVE_COLLAB_INSTANCE_ID,
+    breakdown.accessEpoch,
+  ) > 0;
+  const hasBootstrapLease = options.allowRecentSessionLeaseBootstrap === true
+    && breakdown.exactEpochCount === 0
+    && breakdown.documentLeaseExactCount === 0
+    && breakdown.recentLeaseCount > 0;
+  const authorityRecord = loadedDocAuthorityOrigins.get(slug);
+  const bootstrapLeaseLocallyOwned = hasBootstrapLease
+    && authorityRecord?.origin === 'live'
+    && authorityRecord.ydoc === handle.ydoc;
+  const hasLivePresenceOrBootstrapLease = hasLocalLivePresence || hasBootstrapLease;
+  if (!hasLivePresenceOrBootstrapLease) return { allowed: false, branch: null };
+  if (!hasLocalLivePresence && !bootstrapLeaseLocallyOwned) return { allowed: false, branch: null };
+  if (handle.degradedReason) return { allowed: false, branch: null };
+  const loadedDoc = loadedDocs.get(slug);
+  const isLoadedLocalDoc = Boolean(loadedDoc && loadedDoc === handle.ydoc);
+  if (!isLoadedLocalDoc) return { allowed: false, branch: null };
+  const loadedMeta = loadedDocDbMeta.get(slug);
+  const row = getDocumentBySlug(slug);
+  const currentAccessEpoch = typeof row?.access_epoch === 'number' ? row.access_epoch : null;
+  const currentUpdatedAt = row?.updated_at ?? null;
+  const currentYStateVersion = getLatestYStateVersion(slug);
+  const isFreshResidentLocalDoc = Boolean(
+    loadedMeta
+    && loadedMeta.accessEpoch === currentAccessEpoch
+    && loadedMeta.updatedAt === currentUpdatedAt
+    && loadedMeta.yStateVersion === currentYStateVersion,
+  );
+  if (!isFreshResidentLocalDoc) return { allowed: false, branch: null };
+  return {
+    allowed: true,
+    branch: hasLocalLivePresence ? 'persisted_live_presence' : 'persisted_recent_session_bootstrap',
+  };
+}
+
+function noteLocalAuthorityGateAdmission(
+  slug: string,
+  surface: 'yjs_fallback' | 'write_gate_sync' | 'write_gate_async',
+  decision: LocalLiveAuthorityDecision,
+  handle: CanonicalYDocHandle | null | undefined,
+  breakdown: ActiveCollabClientBreakdown,
+): void {
+  if (!slug || !handle || !decision.allowed || !decision.branch || decision.branch === 'live_source') return;
+  const fingerprint = stableStringify({
+    branch: decision.branch,
+    handleSource: handle.source,
+    degradedReason: handle.degradedReason ?? null,
+    accessEpoch: breakdown.accessEpoch,
+    anyEpochCount: breakdown.anyEpochCount,
+    documentLeaseAnyEpochCount: breakdown.documentLeaseAnyEpochCount,
+    recentLeaseCount: breakdown.recentLeaseCount,
+  });
+  const cooldown = registerPathologyCooldown(
+    localAuthorityAdmissionCooldowns,
+    `${slug}:${surface}:${decision.branch}`,
+    'local_authority_gate_admit',
+    fingerprint,
+  );
+  if (cooldown.suppressed) {
+    logLocalAuthorityAdmissionSuppressionSummary(slug, surface, cooldown.suppressedCount);
+    return;
+  }
+  traceServerIncident({
+    slug,
+    subsystem: 'collab',
+    level: 'info',
+    eventType: 'collab.local_authority_gate_admit',
+    message: 'Keeping document writable through a local authority gate exception',
+    data: {
+      surface,
+      branch: decision.branch,
+      handleSource: handle.source,
+      degradedReason: handle.degradedReason ?? null,
+      accessEpoch: breakdown.accessEpoch,
+      anyEpochCount: breakdown.anyEpochCount,
+      documentLeaseAnyEpochCount: breakdown.documentLeaseAnyEpochCount,
+      recentLeaseCount: breakdown.recentLeaseCount,
+    },
+  });
+}
+
+type StaleEpochBypassSurface =
+  | 'write_gate_sync'
+  | 'write_gate_async'
+  | 'canonical_mutation'
+  | 'rewrite_admission';
+
+type StaleEpochBypassAuthorityBranch = 'current_epoch_cold_room';
+
+type NormalizedStaleEpochBypassSource = {
+  source: string;
+  sourceDetail: string | null;
+  route: string | null;
+};
+
+function truncateStaleEpochBypassSourceDetail(source: string): string | null {
+  const trimmed = source.trim();
+  if (!trimmed) return null;
+  return trimmed.length > 120 ? `${trimmed.slice(0, 120)}...` : trimmed;
+}
+
+function normalizeStaleEpochBypassSource(
+  surface: StaleEpochBypassSurface,
+  source: string,
+): NormalizedStaleEpochBypassSource {
+  if (surface === 'write_gate_sync' || surface === 'write_gate_async') {
+    const normalized = source === 'state' || source === 'snapshot' || source === 'share' || source === 'unknown'
+      ? source
+      : 'unknown';
+    return { source: normalized, sourceDetail: normalized === source ? null : truncateStaleEpochBypassSourceDetail(source), route: null };
+  }
+  if (surface === 'canonical_mutation') {
+    if (source === 'rest-put') return { source: 'rest_put', sourceDetail: null, route: null };
+    return {
+      source: 'canonical_actor',
+      sourceDetail: truncateStaleEpochBypassSourceDetail(source),
+      route: null,
+    };
+  }
+  if (source === 'POST /documents/:slug/ops') {
+    return { source: 'rewrite_documents_ops', sourceDetail: null, route: source };
+  }
+  if (source === 'POST /api/agent/:slug/ops') {
+    return { source: 'rewrite_agent_ops', sourceDetail: null, route: source };
+  }
+  if (source === 'POST /d/:slug/bridge/rewrite') {
+    return { source: 'rewrite_bridge', sourceDetail: null, route: source };
+  }
+  return {
+    source: 'rewrite_other',
+    sourceDetail: truncateStaleEpochBypassSourceDetail(source),
+    route: truncateStaleEpochBypassSourceDetail(source),
+  };
+}
+
+function shouldNoteStaleEpochBypass(breakdown: ActiveCollabClientBreakdown): boolean {
+  if (breakdown.total > 0) return false;
+  return (
+    breakdown.anyEpochCount > breakdown.exactEpochCount
+    || breakdown.documentLeaseAnyEpochCount > breakdown.documentLeaseExactCount
+  );
+}
+
+export function noteStaleEpochBypassAdmission(
+  slug: string,
+  surface: StaleEpochBypassSurface,
+  source: string,
+  breakdown: ActiveCollabClientBreakdown,
+  authorityBranch: StaleEpochBypassAuthorityBranch = 'current_epoch_cold_room',
+): void {
+  if (!slug || !shouldNoteStaleEpochBypass(breakdown)) return;
+  const normalizedSource = normalizeStaleEpochBypassSource(surface, source);
+  const fingerprint = stableStringify({
+    surface,
+    source: normalizedSource.source,
+    authorityBranch,
+    accessEpoch: breakdown.accessEpoch,
+    exactEpochCount: breakdown.exactEpochCount,
+    anyEpochCount: breakdown.anyEpochCount,
+    documentLeaseExactCount: breakdown.documentLeaseExactCount,
+    documentLeaseAnyEpochCount: breakdown.documentLeaseAnyEpochCount,
+    recentLeaseCount: breakdown.recentLeaseCount,
+    total: breakdown.total,
+  });
+  const cooldown = registerPathologyCooldown(
+    staleEpochBypassAdmissionCooldowns,
+    `${slug}:${surface}:${normalizedSource.source}:${authorityBranch}`,
+    'stale_epoch_bypass_admitted',
+    fingerprint,
+  );
+  if (cooldown.suppressed) {
+    recordCollabLogSuppressed('stale_epoch_bypass', 'stale_epoch_bypass_admitted');
+    logStaleEpochBypassSuppressionSummary(slug, surface, normalizedSource.source, cooldown.suppressedCount);
+    return;
+  }
+  traceServerIncident({
+    slug,
+    subsystem: 'collab',
+    level: 'info',
+    eventType: 'collab.stale_epoch_bypass_admitted',
+    message: 'Proceeding with a current-epoch writable path despite stale prior-epoch collab diagnostics',
+    data: {
+      surface,
+      source: normalizedSource.source,
+      ...(normalizedSource.sourceDetail ? { sourceDetail: normalizedSource.sourceDetail } : {}),
+      ...(normalizedSource.route ? { route: normalizedSource.route } : {}),
+      authorityBranch,
+      accessEpoch: breakdown.accessEpoch,
+      exactEpochCount: breakdown.exactEpochCount,
+      anyEpochCount: breakdown.anyEpochCount,
+      documentLeaseExactCount: breakdown.documentLeaseExactCount,
+      documentLeaseAnyEpochCount: breakdown.documentLeaseAnyEpochCount,
+      recentLeaseCount: breakdown.recentLeaseCount,
+      total: breakdown.total,
+    },
+  });
+}
+
 export async function getCanonicalReadableDocument(
   slug: string,
   source: 'state' | 'snapshot' | 'share' | 'unknown' = 'unknown',
-  options: { preferPersisted?: boolean; skipLiveDocWriteGate?: boolean } = {},
+  options: {
+    preferPersisted?: boolean;
+    allowSessionBootstrapBypass?: boolean;
+    avoidPersistedHydrationWhenBlocked?: boolean;
+  } = {},
 ): Promise<CanonicalReadableDocument | undefined> {
   const finalize = (
     result: CanonicalReadableDocument | undefined,
     gateHandle?: CanonicalYDocHandle | null,
-  ) => options.skipLiveDocWriteGate
-    ? Promise.resolve(result)
-    : applyLiveDocWriteGateToReadableDocument(slug, result, gateHandle);
+  ) => applyLiveDocWriteGateToReadableDocument(slug, result, gateHandle, {
+    allowSessionBootstrapBypass: options.allowSessionBootstrapBypass === true,
+    source,
+  });
   const projected = getProjectedDocumentBySlug(slug);
   const projectionFresh = isProjectionFresh(projected);
   const projectionMatchesCanonical = projectionPayloadMatchesCanonical(projected);
   const row = getDocumentBySlug(slug);
+  const skipBlockedPersistedHydration = options.avoidPersistedHydrationWhenBlocked === true
+    && source === 'share'
+    && getLiveCollabBlockStatus(slug).active;
   if (!row) {
     return finalize(projected
       ? {
@@ -6511,6 +7190,7 @@ export async function getCanonicalReadableDocument(
     liveRequired: false,
     allowFragmentRecovery: false,
     preferPersisted: options.preferPersisted === true,
+    skipPersistedHydration: skipBlockedPersistedHydration,
   });
   try {
     if (handle) {
@@ -6627,11 +7307,17 @@ export async function getCanonicalReadableDocument(
 
 export async function loadCanonicalYDoc(
   slug: string,
-  options: { liveRequired?: boolean; allowFragmentRecovery?: boolean; preferPersisted?: boolean } = {},
+  options: {
+    liveRequired?: boolean;
+    allowFragmentRecovery?: boolean;
+    preferPersisted?: boolean;
+    skipPersistedHydration?: boolean;
+  } = {},
 ): Promise<CanonicalYDocHandle | null> {
   if (!slug) return null;
   const allowFragmentRecovery = options.allowFragmentRecovery !== false;
   const preferPersisted = options.preferPersisted === true;
+  const skipPersistedHydration = options.skipPersistedHydration === true;
 
   if (runtime.enabled && !preferPersisted) {
     const existingLiveDoc = getLiveHocuspocusDoc(slug);
@@ -6662,6 +7348,12 @@ export async function loadCanonicalYDoc(
       return null;
     }
     if (options.liveRequired) return null;
+  }
+
+  // Blocked share-read paths must not reuse persisted resident docs or warmed
+  // persisted caches; they should fall back to the last safe row/projection.
+  if (skipPersistedHydration) {
+    return null;
   }
 
   const loaded = preferPersisted ? null : loadedDocs.get(slug);
@@ -6781,12 +7473,21 @@ async function persistDoc(
   ydoc: Y.Doc,
   sourceActor: string = 'collab',
   expectedGeneration: number | null = null,
+  options: PersistDocOptions = {},
 ): Promise<void> {
+  const allowDuringShutdown = options.allowDuringShutdown === true;
+  if (!allowDuringShutdown && shouldDropWriteDuringShutdown(slug, 'persistDoc')) {
+    persistPending.delete(slug);
+    return;
+  }
   if (persistInFlight.get(slug)) {
-    persistPending.set(slug, { ydoc, sourceActor, expectedGeneration });
+    persistPending.set(slug, { ydoc, sourceActor, expectedGeneration, options });
     return;
   }
   if (isCollabPersistenceReadOnly()) {
+    if (allowDuringShutdown) {
+      maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'read_only');
+    }
     if (!warnedReadOnlyPersistSlugs.has(slug)) {
       warnedReadOnlyPersistSlugs.add(slug);
       console.warn('[collab] COLLAB_PERSIST_READONLY is enabled; skipping document persistence', { slug });
@@ -6795,17 +7496,31 @@ async function persistDoc(
   }
   const docRow = getDocumentBySlug(slug);
   if (docRow?.share_state === 'REVOKED' || docRow?.share_state === 'DELETED') {
+    if (allowDuringShutdown) {
+      maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'share_state_blocked', {
+        shareState: docRow?.share_state ?? null,
+      });
+    }
     evictLocalDocState(slug);
     persistPending.delete(slug);
     persistInFlight.delete(slug);
     return;
   }
   if (collabInvalidations.has(slug)) {
+    if (allowDuringShutdown) {
+      maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'invalidated');
+    }
     persistPending.delete(slug);
     return;
   }
   const currentGeneration = getPersistGeneration(slug);
   if (expectedGeneration !== null && expectedGeneration !== currentGeneration) {
+    if (allowDuringShutdown) {
+      maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'stale_generation', {
+        expectedGeneration,
+        currentGeneration,
+      });
+    }
     persistPending.delete(slug);
     console.warn('[collab] stale collab write dropped', {
       slug,
@@ -6820,6 +7535,12 @@ async function persistDoc(
   if (sourceActor === 'collab') {
     const docGeneration = docPersistGenerations.get(ydoc);
     if (typeof docGeneration === 'number' && docGeneration !== currentGeneration) {
+      if (allowDuringShutdown) {
+        maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'stale_generation', {
+          docGeneration,
+          currentGeneration,
+        });
+      }
       persistPending.delete(slug);
       console.warn('[collab] stale collab write dropped', {
         slug,
@@ -6833,6 +7554,9 @@ async function persistDoc(
     }
     const currentLoadedDoc = loadedDocs.get(slug);
     if (currentLoadedDoc && currentLoadedDoc !== ydoc) {
+      if (allowDuringShutdown) {
+        maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'superseded_loaded_doc');
+      }
       persistPending.delete(slug);
       console.warn('[collab] stale collab write dropped', {
         slug,
@@ -6844,6 +7568,12 @@ async function persistDoc(
     }
     const loadedMeta = loadedDocDbMeta.get(slug);
     if (loadedMeta && typeof docRow?.access_epoch === 'number' && loadedMeta.accessEpoch !== docRow.access_epoch) {
+      if (allowDuringShutdown) {
+        maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'access_epoch_mismatch', {
+          loadedAccessEpoch: loadedMeta.accessEpoch,
+          currentAccessEpoch: docRow.access_epoch,
+        });
+      }
       logStaleEpochWrite(slug, 'persistDoc', {
         reason: 'access_epoch_mismatch',
         sourceActor,
@@ -6856,6 +7586,9 @@ async function persistDoc(
   }
   if (sourceActor === 'collab') {
     if (isCollabQuarantined(slug)) {
+      if (allowDuringShutdown) {
+        maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'auto_quarantined');
+      }
       persistPending.delete(slug);
       invalidateLoadedCollabDocument(slug);
       return;
@@ -6906,34 +7639,38 @@ async function persistDoc(
   let queuedRepairReason: string | null = null;
   let projectionMarkdownOverride: string | null = null;
   let skipProjectionWriteDueToDeriveFailure = false;
-  try {
-    const refreshed = await refreshMarkdownTextFromFragment(slug, ydoc, 'server-projection-refresh');
-    if (refreshed.blockedSuspiciousCollapse) {
-      persistPending.delete(slug);
-      return;
-    }
-    if (refreshed.deriveFailed) {
-      skipProjectionWriteDueToDeriveFailure = true;
-      queuedRepairReason = queuedRepairReason ?? 'derive_fragment_markdown_failed';
-    } else if (typeof refreshed.markdown === 'string') {
-      projectionMarkdownOverride = refreshed.markdown;
-    }
-  } catch (error) {
-    console.warn('[collab] failed to refresh projection markdown from fragment before persist', {
-      slug,
-      sourceActor,
-      error: summarizeParseError(error),
-    });
-    skipProjectionWriteDueToDeriveFailure = true;
-    queuedRepairReason = queuedRepairReason ?? 'derive_fragment_markdown_failed';
-  }
   const generation = currentGeneration;
   persistInFlight.set(slug, true);
-  const startedAt = Date.now();
-  try {
-    if ((persistGeneration.get(slug) ?? 0) !== generation || collabInvalidations.has(slug)) {
-      return;
+  const completion = (async () => {
+    const startedAt = Date.now();
+    try {
+      if (persistPauseHookForTests) {
+        await persistPauseHookForTests({ slug });
+      }
+      const refreshed = await refreshMarkdownTextFromFragment(slug, ydoc, 'server-projection-refresh');
+      if (refreshed.blockedSuspiciousCollapse) {
+        persistPending.delete(slug);
+        return;
+      }
+      if (refreshed.deriveFailed) {
+        skipProjectionWriteDueToDeriveFailure = true;
+        queuedRepairReason = queuedRepairReason ?? 'derive_fragment_markdown_failed';
+      } else if (typeof refreshed.markdown === 'string') {
+        projectionMarkdownOverride = refreshed.markdown;
+      }
+    } catch (error) {
+      console.warn('[collab] failed to refresh projection markdown from fragment before persist', {
+        slug,
+        sourceActor,
+        error: summarizeParseError(error),
+      });
+      skipProjectionWriteDueToDeriveFailure = true;
+      queuedRepairReason = queuedRepairReason ?? 'derive_fragment_markdown_failed';
     }
+    try {
+      if ((persistGeneration.get(slug) ?? 0) !== generation || collabInvalidations.has(slug)) {
+        return;
+      }
     const priorBaseline = getAuthoritativeBaseline(slug);
     const authoritativeDoc = buildComparableAuthoritativeDoc(priorBaseline?.snapshot ?? null, ydoc);
     if (typeof projectionMarkdownOverride === 'string') {
@@ -7240,16 +7977,21 @@ async function persistDoc(
     schedulePersistDoc(slug, ydoc);
   } finally {
     persistInFlight.delete(slug);
+    persistInFlightPromises.delete(slug);
     recordProjectionLag(Date.now() - startedAt);
     const pending = persistPending.get(slug);
     if (pending) {
       persistPending.delete(slug);
-      void persistDoc(slug, pending.ydoc, pending.sourceActor, pending.expectedGeneration);
+      void persistDoc(slug, pending.ydoc, pending.sourceActor, pending.expectedGeneration, pending.options);
     }
   }
+  })();
+  persistInFlightPromises.set(slug, completion);
+  return completion;
 }
 
 function schedulePersistDoc(slug: string, ydoc: Y.Doc): void {
+  if (shouldDropWriteDuringShutdown(slug, 'schedulePersistDoc')) return;
   const debounceMs = parsePositiveInt(process.env.COLLAB_PERSIST_DEBOUNCE_MS, DEFAULT_COLLAB_PERSIST_DEBOUNCE_MS);
   const expectedGeneration = getPersistGeneration(slug);
   if (!docPersistGenerations.has(ydoc)) {
@@ -7293,6 +8035,69 @@ function maybeLogStaleOnStoreSuppressionSummary(slug: string, reason: string, su
   });
 }
 
+function registerStaleOnStoreDropCooldown(
+  slug: string,
+  reason: string,
+  extras: Record<string, unknown> = {},
+): ProjectionPathologyCooldownResult {
+  return registerPathologyCooldown(
+    staleOnStoreDropCooldowns,
+    `${slug}:onStoreDocument:${reason || 'unknown'}`,
+    reason,
+    buildStaleOnStoreDropSuppressionFingerprint(reason, extras),
+    Date.now(),
+    parsePositiveInt(
+      process.env.COLLAB_STALE_ONSTORE_DRIFT_COOLDOWN_MS,
+      DEFAULT_STALE_ONSTORE_DRIFT_COOLDOWN_MS,
+    ),
+  );
+}
+
+function maybeLogStaleOnStoreDropSuppressionSummary(
+  slug: string,
+  reason: string,
+  suppressedCount: number,
+): void {
+  if (!shouldEmitSuppressionSummary(suppressedCount)) return;
+  console.warn('[collab] suppressed repeated stale onStore drop logs', {
+    slug,
+    reason,
+    suppressedCount,
+  });
+}
+
+function logStaleOnStoreDocumentWriteDropped(
+  slug: string,
+  reason: 'invalidated_doc_reference' | 'doc_generation_mismatch' | 'superseded_doc_reference',
+  details: Record<string, unknown> = {},
+): void {
+  recordStaleOnStoreDrop(reason, 'onStoreDocument');
+  const cooldown = registerStaleOnStoreDropCooldown(slug, reason);
+  if (cooldown.suppressed) {
+    recordCollabLogSuppressed('stale_onstore_drop', reason);
+    maybeLogStaleOnStoreDropSuppressionSummary(slug, reason, cooldown.suppressedCount);
+    return;
+  }
+  console.warn('[collab] stale collab write dropped', {
+    slug,
+    source: 'onStoreDocument',
+    reason,
+    ...details,
+  });
+  traceServerIncident({
+    slug,
+    subsystem: 'collab',
+    level: 'warn',
+    eventType: 'collab.stale_onstore_drop',
+    message: 'Stale onStoreDocument write was dropped',
+    data: {
+      source: 'onStoreDocument',
+      reason,
+      ...details,
+    },
+  });
+}
+
 function shouldSuppressProjectionDriftNoise(
   inMemoryMarkdown: string,
   persistedMarkdown: string,
@@ -7331,6 +8136,28 @@ type StoreConflictResolution =
       localUnsavedBytes: number;
       logSuppressed?: boolean;
     };
+
+function shouldDropStaleOnStoreDocumentWrite(slug: string, ydoc: Y.Doc): boolean {
+  if (invalidatedOnStoreDocRefs.has(ydoc)) {
+    logStaleOnStoreDocumentWriteDropped(slug, 'invalidated_doc_reference');
+    return true;
+  }
+  const currentGeneration = getPersistGeneration(slug);
+  const docGeneration = docPersistGenerations.get(ydoc);
+  if (typeof docGeneration === 'number' && docGeneration !== currentGeneration) {
+    logStaleOnStoreDocumentWriteDropped(slug, 'doc_generation_mismatch', {
+      docGeneration,
+      currentGeneration,
+    });
+    return true;
+  }
+  const currentDoc = getLiveHocuspocusDoc(slug) ?? loadedDocs.get(slug) ?? null;
+  if (currentDoc && currentDoc !== ydoc) {
+    logStaleOnStoreDocumentWriteDropped(slug, 'superseded_doc_reference');
+    return true;
+  }
+  return false;
+}
 
 function applyPersistedStateToLoadedDoc(slug: string, persistedState: PersistedDocState): void {
   const liveDoc = getLiveHocuspocusDoc(slug);
@@ -7919,12 +8746,19 @@ function resolveOnStoreConflict(slug: string, inMemoryDoc: Y.Doc): StoreConflict
   };
 }
 
-async function persistOnStoreDocument(slug: string, inMemoryDoc: Y.Doc): Promise<void> {
+async function persistOnStoreDocument(
+  slug: string,
+  inMemoryDoc: Y.Doc,
+  options: PersistDocOptions & { expectedGeneration?: number | null } = {},
+): Promise<void> {
   if (isCollabPersistenceReadOnly()) {
     if (!warnedReadOnlyPersistSlugs.has(slug)) {
       warnedReadOnlyPersistSlugs.add(slug);
       console.warn('[collab] COLLAB_PERSIST_READONLY is enabled; skipping onStoreDocument persistence', { slug });
     }
+    return;
+  }
+  if (shouldDropStaleOnStoreDocumentWrite(slug, inMemoryDoc)) {
     return;
   }
   try {
@@ -8018,7 +8852,7 @@ async function persistOnStoreDocument(slug: string, inMemoryDoc: Y.Doc): Promise
     scheduleStaleOnStoreReload(slug);
     return;
   }
-  await persistDoc(slug, inMemoryDoc);
+  await persistDoc(slug, inMemoryDoc, 'collab', options.expectedGeneration ?? null, options);
 }
 
 function applyYTextDiff(target: Y.Text, nextValue: string): void {
@@ -9542,6 +10376,7 @@ function parseCanonicalMarks(raw: string): Record<string, unknown> {
 }
 
 function evictLocalDocState(slug: string): void {
+  loadedDocAuthorityOrigins.delete(slug);
   loadedDocs.delete(slug);
   persistedDocCache.delete(slug);
   clearAuthoritativeBaseline(slug);
@@ -10000,7 +10835,6 @@ export function buildCollabSession(
   const ttlSeconds = parsePositiveInt(process.env.COLLAB_SESSION_TTL_SECONDS, DEFAULT_COLLAB_SESSION_TTL_SECONDS);
   const expiresAtEpoch = Math.floor(Date.now() / 1000) + ttlSeconds;
   noteRecentCollabSessionLease(slug, doc.access_epoch, ttlSeconds * 1000);
-  noteDocumentLiveCollabLease(slug, doc.access_epoch);
   console.log('[collab] buildCollabSession lease noted', {
     slug,
     role,
@@ -10103,6 +10937,7 @@ export function handleCollabWebSocketConnection(socket: unknown, request: unknow
 }
 
 export async function startCollabRuntime(mainHttpPort: number): Promise<CollabRuntime> {
+  collabRuntimeReady = false;
   const flag = (process.env.PROOF_COLLAB_V2 || '').trim().toLowerCase();
   const disabled = flag === '0' || flag === 'false' || flag === 'off' || flag === 'disabled';
   if (disabled) {
@@ -10111,6 +10946,7 @@ export async function startCollabRuntime(mainHttpPort: number): Promise<CollabRu
       wsUrlBase: '',
       reason: 'Disabled by PROOF_COLLAB_V2 flag',
     };
+    collabRuntimeReady = true; // collab disabled by config — server is ready
     return runtime;
   }
 
@@ -10120,6 +10956,10 @@ export async function startCollabRuntime(mainHttpPort: number): Promise<CollabRu
       wsUrlBase: '',
       reason: 'COLLAB_ATTACH_TO_MAIN_HTTP is enabled but startCollabRuntime was called without an HTTP server',
     };
+    collabRuntimeReady = true; // startup path is complete even though runtime is disabled
+    traceCollabStartupIncident('warn', 'startup.degraded', runtime.reason, {
+      mode: 'split-port',
+    });
     return runtime;
   }
 
@@ -10133,6 +10973,10 @@ export async function startCollabRuntime(mainHttpPort: number): Promise<CollabRu
       wsUrlBase: '',
       reason: 'PROOF_COLLAB_SIGNING_SECRET is required for non-local collab runtime',
     };
+    collabRuntimeReady = true; // startup path is complete even though runtime is disabled
+    traceCollabStartupIncident('warn', 'startup.degraded', runtime.reason, {
+      mode: 'split-port',
+    });
     return runtime;
   }
 
@@ -10208,6 +11052,7 @@ export async function startCollabRuntime(mainHttpPort: number): Promise<CollabRu
           // Server-origin transactions (e.g. projection refresh / canonical apply) persist explicitly.
           return;
         }
+        if (shouldDropWriteDuringShutdown(data.documentName, 'onStoreDocument')) return;
         if (shouldDropStaleContextWrite(data.documentName, data.context, 'onStoreDocument')) {
           return;
         }
@@ -10229,6 +11074,9 @@ export async function startCollabRuntime(mainHttpPort: number): Promise<CollabRu
           docLastAccessedAt.delete(data.documentName);
           return;
         }
+        if (shouldDropStaleOnStoreDocumentWrite(data.documentName, data.document)) {
+          return;
+        }
         if (shouldSkipOnStorePersistAfterExternalApply(data.documentName, data.document)) {
           return;
         }
@@ -10242,6 +11090,7 @@ export async function startCollabRuntime(mainHttpPort: number): Promise<CollabRu
           // Server-origin transactions (e.g. applyCanonicalDocumentToCollab) persist explicitly.
           return;
         }
+        if (shouldDropWriteDuringShutdown(data.documentName, 'onChange')) return;
         if (shouldDropStaleContextWrite(data.documentName, data.context, 'onChange')) {
           return;
         }
@@ -10272,6 +11121,7 @@ export async function startCollabRuntime(mainHttpPort: number): Promise<CollabRu
       enabled: true,
       wsUrlBase: collabPublicBase.replace(/\/$/, ''),
     };
+    collabRuntimeReady = true;
     console.log(`[collab] runtime enabled on ${collabHost}:${collabPort}`);
     scheduleStartupProjectionReconcile();
     projectionRepairWorkerGeneration += 1;
@@ -10283,12 +11133,18 @@ export async function startCollabRuntime(mainHttpPort: number): Promise<CollabRu
       wsUrlBase: '',
       reason: error instanceof Error ? error.message : String(error),
     };
+    collabRuntimeReady = true; // init failed but server should still serve traffic
+    traceCollabStartupIncident('error', 'startup.failed', runtime.reason ?? 'Failed to start collab runtime', {
+      mode: 'split-port',
+      error: toErrorTraceData(error),
+    });
     console.error('[collab] failed to start runtime:', runtime.reason);
     return runtime;
   }
 }
 
 export async function startCollabRuntimeEmbedded(mainHttpPort: number): Promise<CollabRuntime> {
+  collabRuntimeReady = false;
   const flag = (process.env.PROOF_COLLAB_V2 || '').trim().toLowerCase();
   const disabled = flag === '0' || flag === 'false' || flag === 'off' || flag === 'disabled';
   if (disabled) {
@@ -10297,6 +11153,7 @@ export async function startCollabRuntimeEmbedded(mainHttpPort: number): Promise<
       wsUrlBase: '',
       reason: 'Disabled by PROOF_COLLAB_V2 flag',
     };
+    collabRuntimeReady = true; // collab disabled by config — server is ready
     return runtime;
   }
 
@@ -10308,6 +11165,10 @@ export async function startCollabRuntimeEmbedded(mainHttpPort: number): Promise<
       wsUrlBase: '',
       reason: 'PROOF_COLLAB_SIGNING_SECRET is required for non-local collab runtime',
     };
+    collabRuntimeReady = true; // startup path is complete even though runtime is disabled
+    traceCollabStartupIncident('warn', 'startup.degraded', runtime.reason, {
+      mode: 'embedded',
+    });
     return runtime;
   }
 
@@ -10382,6 +11243,7 @@ export async function startCollabRuntimeEmbedded(mainHttpPort: number): Promise<
           // Server-origin transactions (e.g. projection refresh / canonical apply) persist explicitly.
           return;
         }
+        if (shouldDropWriteDuringShutdown(data.documentName, 'onStoreDocument')) return;
         if (shouldDropStaleContextWrite(data.documentName, data.context, 'onStoreDocument')) {
           return;
         }
@@ -10402,6 +11264,9 @@ export async function startCollabRuntimeEmbedded(mainHttpPort: number): Promise<
           docLastAccessedAt.delete(data.documentName);
           return;
         }
+        if (shouldDropStaleOnStoreDocumentWrite(data.documentName, data.document)) {
+          return;
+        }
         if (shouldSkipOnStorePersistAfterExternalApply(data.documentName, data.document)) {
           return;
         }
@@ -10415,6 +11280,7 @@ export async function startCollabRuntimeEmbedded(mainHttpPort: number): Promise<
           // Server-origin transactions (e.g. applyCanonicalDocumentToCollab) persist explicitly.
           return;
         }
+        if (shouldDropWriteDuringShutdown(data.documentName, 'onChange')) return;
         if (shouldDropStaleContextWrite(data.documentName, data.context, 'onChange')) {
           return;
         }
@@ -10438,6 +11304,7 @@ export async function startCollabRuntimeEmbedded(mainHttpPort: number): Promise<
       enabled: true,
       wsUrlBase: wsUrlBase.replace(/\/+$/, ''),
     };
+    collabRuntimeReady = true;
     console.log(`[collab] embedded runtime enabled wsUrlBase=${runtime.wsUrlBase}`);
     scheduleStartupProjectionReconcile();
     projectionRepairWorkerGeneration += 1;
@@ -10449,12 +11316,18 @@ export async function startCollabRuntimeEmbedded(mainHttpPort: number): Promise<
       wsUrlBase: '',
       reason: error instanceof Error ? error.message : String(error),
     };
+    collabRuntimeReady = true; // init failed but server should still serve traffic
+    traceCollabStartupIncident('error', 'startup.failed', runtime.reason ?? 'Failed to start embedded collab runtime', {
+      mode: 'embedded',
+      error: toErrorTraceData(error),
+    });
     console.error('[collab] failed to start embedded runtime:', runtime.reason);
     return runtime;
   }
 }
 
 export async function startCollabRuntimeAttached(mainHttpServer: HttpServer, mainHttpPort: number): Promise<CollabRuntime> {
+  collabRuntimeReady = false;
   const flag = (process.env.PROOF_COLLAB_V2 || '').trim().toLowerCase();
   const disabled = flag === '0' || flag === 'false' || flag === 'off' || flag === 'disabled';
   if (disabled) {
@@ -10463,6 +11336,7 @@ export async function startCollabRuntimeAttached(mainHttpServer: HttpServer, mai
       wsUrlBase: '',
       reason: 'Disabled by PROOF_COLLAB_V2 flag',
     };
+    collabRuntimeReady = true; // collab disabled by config — server is ready
     return runtime;
   }
 
@@ -10474,6 +11348,10 @@ export async function startCollabRuntimeAttached(mainHttpServer: HttpServer, mai
       wsUrlBase: '',
       reason: 'PROOF_COLLAB_SIGNING_SECRET is required for non-local collab runtime',
     };
+    collabRuntimeReady = true; // startup path is complete even though runtime is disabled
+    traceCollabStartupIncident('warn', 'startup.degraded', runtime.reason, {
+      mode: 'attached',
+    });
     return runtime;
   }
 
@@ -10570,6 +11448,7 @@ export async function startCollabRuntimeAttached(mainHttpServer: HttpServer, mai
           // Server-origin transactions (e.g. projection refresh / canonical apply) persist explicitly.
           return;
         }
+        if (shouldDropWriteDuringShutdown(data.documentName, 'onStoreDocument')) return;
         if (shouldDropStaleContextWrite(data.documentName, data.context, 'onStoreDocument')) {
           return;
         }
@@ -10590,6 +11469,9 @@ export async function startCollabRuntimeAttached(mainHttpServer: HttpServer, mai
           docLastAccessedAt.delete(data.documentName);
           return;
         }
+        if (shouldDropStaleOnStoreDocumentWrite(data.documentName, data.document)) {
+          return;
+        }
         if (shouldSkipOnStorePersistAfterExternalApply(data.documentName, data.document)) {
           return;
         }
@@ -10603,6 +11485,7 @@ export async function startCollabRuntimeAttached(mainHttpServer: HttpServer, mai
           // Server-origin transactions (e.g. applyCanonicalDocumentToCollab) persist explicitly.
           return;
         }
+        if (shouldDropWriteDuringShutdown(data.documentName, 'onChange')) return;
         if (shouldDropStaleContextWrite(data.documentName, data.context, 'onChange')) {
           return;
         }
@@ -10654,6 +11537,7 @@ export async function startCollabRuntimeAttached(mainHttpServer: HttpServer, mai
       enabled: true,
       wsUrlBase: wsUrlBase.replace(/\/$/, ''),
     };
+    collabRuntimeReady = true;
     console.log(`[collab] runtime attached on ${path} wsUrlBase=${runtime.wsUrlBase}`);
     void reconcileStaleProjectionsOnStartup();
     projectionRepairWorkerGeneration += 1;
@@ -10665,34 +11549,220 @@ export async function startCollabRuntimeAttached(mainHttpServer: HttpServer, mai
       wsUrlBase: '',
       reason: error instanceof Error ? error.message : String(error),
     };
+    collabRuntimeReady = true; // init failed but server should still serve traffic
+    traceCollabStartupIncident('error', 'startup.failed', runtime.reason ?? 'Failed to start attached collab runtime', {
+      mode: 'attached',
+      error: toErrorTraceData(error),
+    });
     console.error('[collab] failed to start attached runtime:', runtime.reason);
     return runtime;
   }
 }
 
-export async function stopCollabRuntime(): Promise<void> {
+// ---------------------------------------------------------------------------
+// Graceful shutdown helpers
+// ---------------------------------------------------------------------------
+
+function shouldFlushDocForShutdown(slug: string, ydoc: Y.Doc): boolean {
+  if (collabInvalidations.has(slug)) {
+    console.warn('[shutdown] Skipping collab flush for invalidated room', { slug });
+    traceShutdownFlushSkipped(slug, 'invalidated');
+    maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'invalidated');
+    return false;
+  }
+  if (isRewriteLocked(slug)) {
+    console.warn('[shutdown] Skipping collab flush for rewrite-locked room', { slug });
+    traceShutdownFlushSkipped(slug, 'rewrite_locked');
+    maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'rewrite_locked');
+    return false;
+  }
+  if (isCollabQuarantined(slug)) {
+    console.warn('[shutdown] Skipping collab flush for quarantined room', { slug });
+    traceShutdownFlushSkipped(slug, 'auto_quarantined');
+    maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'auto_quarantined');
+    return false;
+  }
+  const row = getDocumentBySlug(slug);
+  if (row?.share_state === 'REVOKED' || row?.share_state === 'DELETED') {
+    console.warn('[shutdown] Skipping collab flush for revoked or deleted room', { slug, shareState: row?.share_state ?? null });
+    traceShutdownFlushSkipped(slug, 'share_state_blocked', {
+      shareState: row?.share_state ?? null,
+    });
+    maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'share_state_blocked', {
+      shareState: row?.share_state ?? null,
+    });
+    return false;
+  }
+  const currentGeneration = getPersistGeneration(slug);
+  const docGeneration = docPersistGenerations.get(ydoc);
+  if (typeof docGeneration === 'number' && docGeneration !== currentGeneration) {
+    console.warn('[shutdown] Skipping collab flush for stale doc generation', {
+      slug,
+      docGeneration,
+      currentGeneration,
+    });
+    traceShutdownFlushSkipped(slug, 'stale_generation', {
+      docGeneration,
+      currentGeneration,
+    });
+    maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'stale_generation', {
+      docGeneration,
+      currentGeneration,
+    });
+    return false;
+  }
+  const currentLoadedDoc = loadedDocs.get(slug);
+  if (currentLoadedDoc && currentLoadedDoc !== ydoc) {
+    console.warn('[shutdown] Skipping collab flush for superseded loaded doc reference', { slug });
+    traceShutdownFlushSkipped(slug, 'superseded_loaded_doc');
+    maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'superseded_loaded_doc');
+    return false;
+  }
+  const loadedMeta = loadedDocDbMeta.get(slug);
+  if (loadedMeta && typeof row?.access_epoch === 'number' && loadedMeta.accessEpoch !== row.access_epoch) {
+    console.warn('[shutdown] Skipping collab flush for access-epoch mismatch', {
+      slug,
+      loadedAccessEpoch: loadedMeta.accessEpoch,
+      currentAccessEpoch: row.access_epoch,
+    });
+    traceShutdownFlushSkipped(slug, 'access_epoch_mismatch', {
+      loadedAccessEpoch: loadedMeta.accessEpoch,
+      currentAccessEpoch: row.access_epoch,
+    });
+    maybeThrowOnDirtyShutdownGuard(slug, ydoc, 'access_epoch_mismatch', {
+      loadedAccessEpoch: loadedMeta.accessEpoch,
+      currentAccessEpoch: row.access_epoch,
+    });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Flush all in-memory Yjs documents to SQLite for graceful shutdown.
+ * Cancels debounced persist timers first and yields to the event loop
+ * between docs so the hard timeout setTimeout can actually fire.
+ */
+export async function flushAllDocumentsForShutdown(): Promise<void> {
+  const persistTimeoutMs = 500;
+  fencePersistWorkForShutdown();
+  await waitForCollabConnectionDrain();
+  await waitForPersistInFlightDrain();
+  const entries: Array<{
+    expectedGeneration: number;
+    slug: string;
+    ydoc: Y.Doc;
+  }> = [];
+  const failures: Array<{ slug: string; error: unknown }> = [];
+  for (const [slug, ydoc] of loadedDocs.entries()) {
+    try {
+      if (!shouldFlushDocForShutdown(slug, ydoc)) continue;
+      entries.push({
+        slug,
+        ydoc,
+        expectedGeneration: getPersistGeneration(slug),
+      });
+    } catch (error) {
+      failures.push({ slug, error });
+    }
+  }
+  if (entries.length === 0 && failures.length === 0) {
+    console.warn('[shutdown] No loaded documents to flush');
+    return;
+  }
+
+  console.log(`[shutdown] Flushing ${entries.length} loaded documents...`);
+
+  for (const { slug, ydoc, expectedGeneration } of entries) {
+    try {
+      await Promise.race([
+        persistDoc(slug, ydoc, 'collab', expectedGeneration, {
+          allowDuringShutdown: true,
+        }),
+        new Promise<never>((_, reject) => setTimeout(() => {
+          reject(new Error(`Timed out waiting for in-flight collab persistence to drain before snapshot flush (${slug})`));
+        }, persistTimeoutMs)),
+      ]);
+    } catch (error) {
+      failures.push({ slug, error });
+    }
+    // Yield to event loop so hard timeout setTimeout can fire between docs
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  if (failures.length > 0) {
+    const failureSlugs = failures.map(({ slug }) => slug);
+    const failureMessages = failures.map(({ slug, error }) => {
+      if (error instanceof Error && error.message.trim().length > 0) {
+        return error.message;
+      }
+      return `${slug}: ${String(error)}`;
+    });
+    for (const { slug, error } of failures) {
+      const failure = error as {
+        data?: Record<string, unknown>;
+        reason?: ShutdownFlushSkipReason;
+      };
+      traceShutdownIncident('error', 'shutdown.flush_failed_doc', 'Failed to flush collab document during shutdown', {
+        slug,
+        data: toErrorTraceData(error),
+        ...(failure.reason ? { reason: failure.reason } : {}),
+        ...(failure.data && typeof failure.data === 'object' ? failure.data : {}),
+      });
+    }
+    const aggregateError = new Error(
+      `Failed to flush ${failures.length} collab document(s) during shutdown: ${failureMessages.join('; ')}`,
+    ) as Error & { slugs?: string[] };
+    aggregateError.slugs = failureSlugs;
+    throw aggregateError;
+  }
+}
+
+/**
+ * Close all Hocuspocus collab WebSocket connections with the given close code
+ * and reason string, without tearing down the full collab runtime. Used during
+ * shutdown to stop incoming Yjs updates before flushing documents.
+ */
+export function closeCollabWebSocketConnections(code: number, reason: string): void {
+  let count = 0;
+  if (collabWss) {
+    for (const client of collabWss.clients) {
+      try {
+        client.close(code, reason);
+        count++;
+      } catch {
+        // ignore
+      }
+    }
+    if (typeof hocuspocusInstance?.closeConnections === 'function') {
+      try {
+        hocuspocusInstance.closeConnections();
+      } catch {
+        // ignore
+      }
+    }
+    console.log(`[shutdown] Closed ${count} collab WS connections`);
+    return;
+  }
+
+  if (typeof hocuspocusInstance?.closeConnections === 'function') {
+    try {
+      hocuspocusInstance.closeConnections();
+      console.log('[shutdown] Closed collab WS connections via Hocuspocus runtime');
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export async function stopCollabRuntime(options?: { skipDocFlush?: boolean }): Promise<void> {
+  const shuttingDown = isShuttingDown();
   projectionRepairWorkerGeneration += 1;
+  collabRuntimeReady = false;
   runtime = {
     enabled: false,
     wsUrlBase: '',
     reason: 'Collab runtime stopped',
   };
-  if (collabWss) {
-    try {
-      for (const client of collabWss.clients) {
-        try {
-          client.close();
-        } catch {
-          // ignore
-        }
-      }
-      await new Promise<void>((resolve) => collabWss?.close(() => resolve()));
-    } catch {
-      // ignore
-    } finally {
-      collabWss = null;
-    }
-  }
   if (collabUpgradeHandler) {
     try {
       collabUpgradeServer?.off('upgrade', collabUpgradeHandler);
@@ -10703,20 +11773,18 @@ export async function stopCollabRuntime(): Promise<void> {
     collabUpgradeServer = null;
   }
 
-  const current = hocuspocusInstance;
-  hocuspocusInstance = null;
-
-  if (current) {
+  async function unloadCurrentDocuments(instance: typeof hocuspocusInstance): Promise<void> {
+    if (!instance) return;
     // Hocuspocus.destroy() waits for documents to unload (via afterUnloadDocument hooks).
     // If a doc is loaded but has no websocket connections, it can otherwise hang forever.
     try {
-      const docs = (current as any)?.documents;
-      const unload = (current as any)?.unloadDocument;
+      const docs = (instance as any)?.documents;
+      const unload = (instance as any)?.unloadDocument;
       if (docs && typeof docs.values === 'function' && typeof unload === 'function') {
         const toUnload = Array.from(docs.values());
         for (const doc of toUnload) {
           try {
-            await Promise.resolve(unload.call(current, doc));
+            await Promise.resolve(unload.call(instance, doc));
           } catch {
             // best-effort
           }
@@ -10727,17 +11795,97 @@ export async function stopCollabRuntime(): Promise<void> {
     }
   }
 
-  const docsToFlush = [...loadedDocs.entries()];
-  for (const timer of persistTimers.values()) {
-    clearTimeout(timer);
-  }
-  persistTimers.clear();
-  for (const [slug, doc] of docsToFlush) {
+  async function closeCurrentTransport(server: typeof collabWss): Promise<void> {
+    if (!server) return;
     try {
-      await persistOnStoreDocument(slug, doc);
-    } catch (error) {
-      console.error('[collab] Failed to flush document during shutdown:', { slug, error });
+      for (const client of server.clients) {
+        try {
+          client.close();
+        } catch {
+          // ignore
+        }
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    } catch {
+      // ignore
     }
+  }
+
+  const currentWsServer = collabWss;
+  const current = hocuspocusInstance;
+  if (!shuttingDown) {
+    collabWss = null;
+    hocuspocusInstance = null;
+    await closeCurrentTransport(currentWsServer);
+    await unloadCurrentDocuments(current);
+  }
+
+  let flushError: unknown = null;
+  if (!options?.skipDocFlush) {
+    try {
+      if (shuttingDown) {
+        await flushAllDocumentsForShutdown();
+      } else {
+        const docsToFlush = [...loadedDocs.entries()];
+        for (const timer of persistTimers.values()) {
+          clearTimeout(timer);
+        }
+        persistTimers.clear();
+        for (const [slug, doc] of docsToFlush) {
+          try {
+            await persistOnStoreDocument(slug, doc);
+          } catch (error) {
+            console.error('[collab] Failed to flush document during shutdown:', { slug, error });
+          }
+        }
+      }
+    } catch (error) {
+      flushError = error;
+      console.error('[collab] Failed to flush document during shutdown:', { error });
+      const failedSlugs = Array.isArray((error as { slugs?: unknown } | null | undefined)?.slugs)
+        ? ((error as { slugs: unknown[] }).slugs.filter((slug): slug is string => typeof slug === 'string' && slug.trim().length > 0))
+        : [];
+      traceShutdownIncident('error', 'shutdown.flush_failed', 'Failed to flush collab documents during shutdown', {
+        slug: failedSlugs.length === 1 ? failedSlugs[0] : null,
+        data: {
+          ...toErrorTraceData(error),
+          ...(failedSlugs.length > 0 ? { slugs: failedSlugs } : {}),
+        },
+      });
+    }
+  }
+  if (shuttingDown && !flushError) {
+    const stuckSlugs = Array.from(new Set([
+      ...persistInFlightPromises.keys(),
+      ...Array.from(persistInFlight.entries())
+        .filter(([, inFlight]) => inFlight)
+        .map(([slug]) => slug),
+    ]));
+    if (stuckSlugs.length > 0) {
+      flushError = new Error(
+        `Timed out waiting for in-flight collab persistence to drain before snapshot flush (${stuckSlugs.join(', ')})`,
+      ) as Error & { slugs?: string[] };
+      (flushError as Error & { slugs?: string[] }).slugs = stuckSlugs;
+      traceShutdownIncident('error', 'shutdown.persist_drain_timeout', 'Timed out waiting for in-flight collab persistence during shutdown drain', {
+        slug: stuckSlugs.length === 1 ? stuckSlugs[0] : null,
+        data: {
+          timeoutMs: 500,
+          slugs: stuckSlugs,
+        },
+      });
+    }
+  }
+  if (shuttingDown && flushError) {
+    await closeCurrentTransport(currentWsServer);
+    collabWss = currentWsServer;
+    hocuspocusInstance = current;
+    throw flushError instanceof Error ? flushError : new Error(String(flushError));
+  }
+  if (shuttingDown) {
+    collabWss = null;
+    hocuspocusInstance = null;
+    await closeCurrentTransport(currentWsServer);
+    await unloadCurrentDocuments(current);
   }
   loadedDocs.clear();
   persistedDocCache.clear();
@@ -10757,11 +11905,15 @@ export async function stopCollabRuntime(): Promise<void> {
   projectionRepairRetryIndex.clear();
   projectionRepairReasons.clear();
   projectionRepairCycleIds.clear();
+  shutdownWriteDropNotices.clear();
   projectionPathologyCooldowns.clear();
   staleOnStoreDriftCooldowns.clear();
+  staleOnStoreDropCooldowns.clear();
   collabWsOversizeCooldowns.clear();
   collabRepairGuardEscalationBreaker.clear();
   collabRepairGuardLogCooldowns.clear();
+  activeCollabConnectionCountOverrideForTests = null;
+  shutdownForceCloseHookForTests = null;
   nextProjectionRepairCycleId = 1;
   autoCollabQuarantines.clear();
   globalCollabAdmissionEvents.length = 0;
@@ -10771,12 +11923,16 @@ export async function stopCollabRuntime(): Promise<void> {
   projectionRepairWorkerOversizedSeen.clear();
   canonicalSyncPostApplyFailureForTests = null;
   canonicalSyncForcedRefusalForTests = null;
+  persistPauseHookForTests = null;
   invalidateCollabFailureForTests = null;
   canonicalSyncPreviewPauseHookForTests = null;
   projectionHealthWriteFailureForTests = false;
   if (projectionRepairWorkerTimer) {
     clearTimeout(projectionRepairWorkerTimer);
     projectionRepairWorkerTimer = null;
+  }
+  if (flushError) {
+    throw flushError instanceof Error ? flushError : new Error(String(flushError));
   }
   if (startupProjectionReconcileTimer) {
     clearTimeout(startupProjectionReconcileTimer);
@@ -10800,6 +11956,18 @@ export async function stopCollabRuntime(): Promise<void> {
 // Test-only escape hatch for validating Hocuspocus eviction behavior.
 export function __unsafeGetHocuspocusInstanceForTests(): unknown {
   return hocuspocusInstance;
+}
+
+export function __unsafeSetActiveCollabConnectionCountOverrideForTests(
+  override: (() => number) | null,
+): void {
+  activeCollabConnectionCountOverrideForTests = override;
+}
+
+export function __unsafeSetShutdownForceCloseHookForTests(
+  hook: (() => void) | null,
+): void {
+  shutdownForceCloseHookForTests = hook;
 }
 
 export function __unsafeGetLoadedDocForTests(slug: string): Y.Doc | null {
@@ -11129,9 +12297,14 @@ export function __unsafePersistDocAwaitForTests(slug: string, inMemoryDoc: Y.Doc
   return persistDoc(slug, inMemoryDoc, sourceActor);
 }
 
+export function __unsafeSetPersistPauseHookForTests(
+  hook: ((context: { slug: string }) => Promise<void> | void) | null,
+): void {
+  persistPauseHookForTests = hook;
+}
+
 export function __unsafePrimeLoadedDocForTests(slug: string, ydoc: Y.Doc): void {
-  loadedDocs.set(slug, ydoc);
-  docPersistGenerations.set(ydoc, getPersistGeneration(slug));
+  rememberLoadedDoc(slug, ydoc);
   refreshLoadedDocDbMetaFromDb(slug, ydoc);
 }
 
@@ -11262,6 +12435,10 @@ async function invalidateCollabDocumentInner(
 ): Promise<void> {
   if (!slug) return;
   const clearPersistedState = options?.clearPersistedState !== false;
+  const liveDocBeforeInvalidate = getLiveHocuspocusDoc(slug);
+  const loadedDocBeforeInvalidate = loadedDocs.get(slug);
+  if (liveDocBeforeInvalidate) invalidatedOnStoreDocRefs.add(liveDocBeforeInvalidate);
+  if (loadedDocBeforeInvalidate) invalidatedOnStoreDocRefs.add(loadedDocBeforeInvalidate);
   clearProjectionRepairState(slug);
   skipOnStoreFingerprints.delete(slug);
   const nextPersistGeneration = cancelPendingPersistWork(slug, { advanceGeneration: true });

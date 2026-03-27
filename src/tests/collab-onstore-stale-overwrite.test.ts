@@ -26,6 +26,20 @@ function setMarkdown(doc: Y.Doc, value: string): void {
   if (value.length > 0) text.insert(0, value);
 }
 
+async function waitFor(
+  condition: () => boolean,
+  timeoutMs: number,
+  label: string,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  if (condition()) return;
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
 async function run(): Promise<void> {
   const dbName = `proof-collab-onstore-stale-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
   const dbPath = path.join(os.tmpdir(), dbName);
@@ -33,6 +47,7 @@ async function run(): Promise<void> {
 
   const db = await import('../../server/db.ts');
   const collab = await import('../../server/collab.ts');
+  const { summarizeDocumentIntegrity } = await import('../../server/document-integrity.ts');
   const metrics = await import('../../server/metrics.ts');
 
   const warnings: string[] = [];
@@ -68,6 +83,124 @@ async function run(): Promise<void> {
     '',
     '* External Thursday',
   ].join('\n');
+
+  const legitimateRepeatedMarkdown = [
+    '# Weekly Plan',
+    '',
+    ...Array.from({ length: 4 }, (_, releaseIndex) => {
+      const release = releaseIndex + 1;
+      return [
+        `## Release ${release}`,
+        '',
+        '### Status',
+        '',
+        `Status body ${release}`,
+        '',
+        `Status detail ${release}`,
+        '',
+        '### Validation',
+        '',
+        `Validation body ${release}`,
+        '',
+        `Validation detail ${release}`,
+      ].join('\n');
+    }),
+  ].join('\n\n');
+  const legitimateIntegrity = summarizeDocumentIntegrity(legitimateRepeatedMarkdown);
+  assert(
+    legitimateIntegrity.repeatedHeadings.includes('3:status'),
+    'Expected legitimate repeated-heading local doc to reuse Status headings',
+  );
+  assert(
+    legitimateIntegrity.repeatedSectionSignatures.length === 0,
+    'Expected legitimate repeated-heading local doc not to look like replayed identical sections',
+  );
+  assert(
+    collab.__unsafeShouldSuppressProjectionDriftNoiseForTests(legitimateRepeatedMarkdown, markdownB) === false,
+    'Expected legitimate repeated-heading projection drift not to suppress repair noise as duplication',
+  );
+
+  const duplicatedLocalMarkdown = [
+    '# Weekly Plan',
+    '',
+    ...Array.from({ length: 64 }, () => [
+      '## Runbook 001',
+      '',
+      'Repeated section body for projection drift suppression.',
+      '',
+      '- [ ] Replayed checklist item',
+    ].join('\n')),
+  ].join('\n\n');
+  const duplicatedIntegrity = summarizeDocumentIntegrity(duplicatedLocalMarkdown);
+  assert(
+    duplicatedIntegrity.repeatedSectionSignatures.length > 0,
+    'Expected replay-like local duplication to produce repeated section signatures',
+  );
+  assert(
+    collab.__unsafeShouldSuppressProjectionDriftNoiseForTests(duplicatedLocalMarkdown, markdownB),
+    'Expected replay-like local duplication to suppress projection-drift noise',
+  );
+
+  async function runProjectionRepairSuppressedNoiseScenario(): Promise<void> {
+    const slug = `onstore-projection-repair-${Math.random().toString(36).slice(2, 10)}`;
+    await collab.startCollabRuntimeEmbedded(4000);
+    db.createDocument(slug, markdownA, {}, 'onStore projection repair test');
+
+    const ydocA = new Y.Doc();
+    setMarkdown(ydocA, markdownA);
+    const updateA = Y.encodeStateAsUpdate(ydocA);
+    const seqA = db.appendYUpdate(slug, updateA, 'test-seed');
+    db.saveYSnapshot(slug, seqA, updateA);
+
+    const instance = collab.__unsafeGetHocuspocusInstanceForTests() as any;
+    assert(instance && typeof instance.createDocument === 'function', 'Expected collab runtime to expose hocuspocus test instance');
+
+    const loadedDoc = await instance.createDocument(
+      slug,
+      {},
+      'projection-repair-test-socket',
+      { isAuthenticated: true, readOnly: false, requiresAuthentication: true },
+      {},
+    );
+
+    const ydocExternal = new Y.Doc();
+    Y.applyUpdate(ydocExternal, updateA);
+    setMarkdown(ydocExternal, markdownB);
+    const externalDelta = Y.encodeStateAsUpdate(ydocExternal, Y.encodeStateVector(ydocA));
+    assert(externalDelta.byteLength > 0, 'Expected non-empty external Yjs delta');
+    db.appendYUpdate(slug, externalDelta, 'external-yjs-only');
+
+    setMarkdown(loadedDoc, duplicatedLocalMarkdown);
+    await collab.__unsafePersistOnStoreDocumentForTests(slug, loadedDoc);
+
+    const beforeRepair = db.getProjectedDocumentBySlug(slug);
+    assert(
+      (beforeRepair?.markdown ?? '').includes('Original Tuesday'),
+      'Expected projected read surface to still be stale before async repair runs',
+    );
+
+    await waitFor(() => {
+      const repaired = db.getProjectedDocumentBySlug(slug);
+      return Boolean(repaired?.markdown.includes('Updated Tuesday'));
+    }, 10_000, 'queued projection repair to refresh stale canonical projection');
+
+    const repaired = db.getProjectedDocumentBySlug(slug);
+    assert(Boolean(repaired), 'Expected repaired projected row after queued projection repair');
+    assert(
+      (repaired?.markdown ?? '').includes('Updated Tuesday'),
+      `Expected queued projection repair to refresh derived projection from persisted Yjs. markdown=${(repaired?.markdown ?? '').slice(0, 160)}`,
+    );
+    assert(
+      !(repaired?.markdown ?? '').includes('Original Tuesday'),
+      `Expected queued projection repair to remove stale projected content. markdown=${(repaired?.markdown ?? '').slice(0, 160)}`,
+    );
+    assert(
+      countOccurrences(repaired?.markdown ?? '', '## Tuesday') === 1,
+      `Expected queued projection repair not to preserve duplicated local headings. markdown=${(repaired?.markdown ?? '').slice(0, 220)}`,
+    );
+
+    await collab.stopCollabRuntime();
+  }
 
   async function runScenario(
     projectionOnlyExternalWrite: boolean,
@@ -217,6 +350,7 @@ async function run(): Promise<void> {
     await runScenario(true);
     await runScenario(true, 'token');
     await runScenario(true, 'duplicate');
+    await runProjectionRepairSuppressedNoiseScenario();
     const metricsText = metrics.renderMetricsText();
     assert(
       metricsText.includes('projection_drift_total{reason="projection_drift_onstore_skip"'),

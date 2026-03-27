@@ -30,6 +30,7 @@ import {
   evaluateProjectionSafety,
   getCanonicalReadableDocument,
   getCollabQuarantineGateStatus,
+  getLiveCollabBlockStatus,
   getRecentCollabSessionLeaseCount,
   getLoadedCollabFragmentTextHash,
   getCollabRuntime,
@@ -39,6 +40,7 @@ import {
   isCanonicalReadMutationReady,
   loadCanonicalYDoc,
   noteDocumentIntegrityWarning,
+  noteStaleEpochBypassAdmission,
   queueProjectionRepair,
   quarantineCorruptPersistedYjsState,
   quarantineOversizedYjsUpdate,
@@ -292,13 +294,13 @@ async function waitForHostedLiveLeaseMaterialization(
   slug: string,
 ): Promise<ReturnType<typeof getActiveCollabClientBreakdown>> {
   let breakdown = getActiveCollabClientBreakdown(slug);
-  if (breakdown.total === 0 || breakdown.anyEpochCount > 0) return breakdown;
+  if (breakdown.total === 0 || breakdown.exactEpochCount > 0) return breakdown;
 
   const deadline = Date.now() + HOSTED_LIVE_DOC_GRACE_MS;
   while (Date.now() < deadline) {
     await delay(HOSTED_LIVE_DOC_GRACE_POLL_MS);
     breakdown = getActiveCollabClientBreakdown(slug);
-    if (breakdown.total === 0 || breakdown.anyEpochCount > 0) {
+    if (breakdown.total === 0 || breakdown.exactEpochCount > 0) {
       return breakdown;
     }
   }
@@ -804,13 +806,11 @@ export async function mutateCanonicalDocument(args: CanonicalMutationArgs): Prom
     && collabRuntimeEnabled
     && hostedRuntime
     && collabClientBreakdown.total > 0
-    && collabClientBreakdown.anyEpochCount === 0
+    && collabClientBreakdown.exactEpochCount === 0
   ) {
     collabClientBreakdown = await waitForHostedLiveLeaseMaterialization(args.slug);
   }
-  let activeCollabClients = strictLiveDocRequested
-    ? collabClientBreakdown.total
-    : collabClientBreakdown.anyEpochCount;
+  let activeCollabClients = collabClientBreakdown.total;
   if (strictLiveDocRequested && activeCollabClients > 0 && !collabRuntimeEnabled) {
     return {
       ok: false,
@@ -823,7 +823,7 @@ export async function mutateCanonicalDocument(args: CanonicalMutationArgs): Prom
   const hostedRemoteLiveLease = collabRuntimeEnabled
     && hostedRuntime
     && collabClientBreakdown.total > 0
-    && collabClientBreakdown.anyEpochCount === 0;
+    && collabClientBreakdown.exactEpochCount === 0;
   if (strictLiveDocRequested && hostedRemoteLiveLease) {
     return {
       ok: false,
@@ -832,6 +832,15 @@ export async function mutateCanonicalDocument(args: CanonicalMutationArgs): Prom
       error: 'Live canonical document is unavailable on this hosted replica; retry after refreshing state',
       retryWithState: `/api/agent/${args.slug}/state`,
     };
+  }
+  if (strictLiveDocRequested && activeCollabClients === 0) {
+    noteStaleEpochBypassAdmission(
+      args.slug,
+      'canonical_mutation',
+      args.source,
+      collabClientBreakdown,
+      'current_epoch_cold_room',
+    );
   }
   let liveRequired = strictLiveDocRequested && activeCollabClients > 0;
   const shouldBumpAccessEpoch = collabRuntimeEnabled
@@ -842,9 +851,7 @@ export async function mutateCanonicalDocument(args: CanonicalMutationArgs): Prom
   });
   if (!initialBaseResolution.ok && liveRequired && hostedRuntime) {
     collabClientBreakdown = await waitForHostedLiveLeaseMaterialization(args.slug);
-    activeCollabClients = strictLiveDocRequested
-      ? collabClientBreakdown.total
-      : collabClientBreakdown.anyEpochCount;
+    activeCollabClients = collabClientBreakdown.total;
     liveRequired = strictLiveDocRequested && activeCollabClients > 0;
     initialBaseResolution = await resolveAuthoritativeMutationBase(args.slug, {
       liveRequired,
@@ -882,7 +889,7 @@ export async function mutateCanonicalDocument(args: CanonicalMutationArgs): Prom
   let handle = await loadCanonicalYDoc(args.slug, { liveRequired });
   if (!handle && liveRequired && hostedRuntime) {
     collabClientBreakdown = await waitForHostedLiveLeaseMaterialization(args.slug);
-    activeCollabClients = collabClientBreakdown.anyEpochCount;
+    activeCollabClients = collabClientBreakdown.total;
     liveRequired = strictLiveDocRequested && activeCollabClients > 0;
     handle = await loadCanonicalYDoc(args.slug, { liveRequired });
   }
@@ -1286,8 +1293,13 @@ export async function recoverCanonicalDocumentIfNeeded(
   source: ProjectionRecoverySource = 'unknown',
 ): Promise<CanonicalReadableDocument | DocumentRow | undefined> {
   const readSource = toCanonicalReadSource(source);
-  const current = await getCanonicalReadableDocument(slug, readSource) ?? getDocumentBySlug(slug);
+  const current = await getCanonicalReadableDocument(slug, readSource, {
+    avoidPersistedHydrationWhenBlocked: source === 'share',
+  }) ?? getDocumentBySlug(slug);
   if (!current || !shouldRepairPendingProjection(current as unknown as Record<string, unknown>)) {
+    return current;
+  }
+  if (getLiveCollabBlockStatus(slug).active) {
     return current;
   }
   if (getCollabQuarantineGateStatus(slug).active) {

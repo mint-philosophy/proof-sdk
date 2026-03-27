@@ -531,6 +531,82 @@ test('applyRemoteMarks does not resurrect locally rejected mark ids', () => {
   assert(!(markId in (pluginState?.metadata ?? {})), 'Rejected mark metadata should remain removed after remote sync');
 });
 
+test('reject tombstones stale server suggestions before dispatch-time marks merges', () => {
+  const markId = 'm-reject-dispatch-race';
+  const suggestionMark = marksSchema.marks.proofSuggestion.create({
+    id: markId,
+    kind: 'replace',
+    by: 'ai:test',
+    content: 'planet',
+    status: 'pending',
+    createdAt: new Date('2026-03-11T00:00:00.000Z').toISOString(),
+  });
+
+  const initialDoc = marksSchema.node('doc', null, [
+    marksSchema.node('paragraph', null, [
+      marksSchema.text('Hello '),
+      marksSchema.text('world', [suggestionMark]),
+    ]),
+  ]);
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema: marksSchema,
+    doc: initialDoc,
+    plugins: [marksStatePlugin],
+  });
+
+  const remoteMetadata = {
+    [markId]: {
+      kind: 'replace' as const,
+      by: 'ai:test',
+      createdAt: new Date('2026-03-11T00:00:00.000Z').toISOString(),
+      content: 'planet',
+      status: 'pending' as const,
+      quote: 'world',
+    },
+  };
+
+  state = state.apply(state.tr.setMeta(marksPluginKey, { type: 'SET_METADATA', metadata: remoteMetadata }));
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+      const merged = mergePendingServerMarks(getMarkMetadataWithQuotes(state), remoteMetadata);
+      state = state.apply(state.tr.setMeta(marksPluginKey, { type: 'SET_METADATA', metadata: merged }));
+    },
+  } as any;
+
+  const rejected = rejectMark(view, markId);
+  assert(rejected, 'Reject should succeed');
+
+  const marksAfter = getMarks(state);
+  assert(!marksAfter.some((mark) => mark.id === markId), 'Reject should stay removed even if stale server marks merge during dispatch');
+
+  const pluginState = marksPluginKey.getState(state) as { metadata: Record<string, unknown> } | undefined;
+  assert(pluginState !== undefined, 'Plugin state should exist');
+  assert(!(markId in (pluginState?.metadata ?? {})), 'Dispatch-time marks merge should not resurrect rejected metadata');
+});
+
 test('applyRemoteMarks ignores mismatched relative anchors and falls back to quote', () => {
   const markId = 'm-remote-relative-mismatch';
   const doc = marksSchema.node('doc', null, [
@@ -1678,6 +1754,223 @@ test('applyRemoteMarks rejects quote-less stored ranges', () => {
 
   const marksAfter = getMarks(state);
   assert(!marksAfter.some(mark => mark.id === markId), 'Quote-less absolute ranges should not create remote marks');
+});
+
+test('applyRemoteMarks prefers contextual target metadata over stale relative anchors', () => {
+  const markId = 'm-remote-target-context';
+  const doc = marksSchema.node('doc', null, [
+    marksSchema.node('paragraph', null, marksSchema.text('Repeat early')),
+    marksSchema.node('paragraph', null, marksSchema.text('Context target Repeat later')),
+  ]);
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema: marksSchema,
+    doc,
+    plugins: [marksStatePlugin],
+  });
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  applyRemoteMarks(view, {
+    [markId]: {
+      kind: 'replace' as const,
+      by: 'ai:test',
+      createdAt: new Date('2026-03-03T00:00:00.000Z').toISOString(),
+      content: 'Changed',
+      status: 'pending' as const,
+      quote: 'Repeat',
+      startRel: 'char:0',
+      endRel: 'char:6',
+      target: {
+        anchor: 'Repeat',
+        mode: 'exact' as const,
+        contextBefore: 'Context target',
+      },
+    },
+  });
+
+  const marksAfter = getMarks(state);
+  const anchored = marksAfter.find(mark => mark.id === markId);
+  assert(anchored !== undefined, 'Remote target-backed mark should be anchored');
+  assert(anchored?.range !== undefined, 'Target-backed mark should include a range');
+  const anchoredText = getTextForRange(state.doc, anchored!.range!);
+  assertEqual(anchoredText, 'Repeat', 'Contextual target should resolve the quoted text');
+  const surroundingText = getTextForRange(state.doc, {
+    from: Math.max(0, anchored!.range!.from - 15),
+    to: Math.min(state.doc.content.size, anchored!.range!.to + 6),
+  });
+  assert(surroundingText.includes('Context target Repeat'), 'Contextual target should anchor the duplicate after its stored context');
+});
+
+test('applyRemoteMarks normalizes markdown-flavored target metadata onto visible text', () => {
+  const markId = 'm-remote-target-markdown-visible';
+  const doc = marksSchema.node('doc', null, [
+    marksSchema.node('paragraph', null, marksSchema.text('one bold thing')),
+    marksSchema.node('paragraph', null, marksSchema.text('Context marker one bold thing')),
+  ]);
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema: marksSchema,
+    doc,
+    plugins: [marksStatePlugin],
+  });
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  applyRemoteMarks(view, {
+    [markId]: {
+      kind: 'replace' as const,
+      by: 'ai:test',
+      createdAt: new Date('2026-03-11T00:00:00.000Z').toISOString(),
+      content: 'Changed',
+      status: 'pending' as const,
+      quote: 'one bold thing',
+      startRel: 'char:0',
+      endRel: 'char:14',
+      target: {
+        anchor: 'one **bold** thing',
+        mode: 'normalized' as const,
+        contextBefore: 'Context marker',
+      },
+    },
+  });
+
+  const marksAfter = getMarks(state);
+  const anchored = marksAfter.find(mark => mark.id === markId);
+  assert(anchored !== undefined, 'Markdown-flavored target should still rehydrate onto visible text');
+  assert(anchored?.range !== undefined, 'Markdown-flavored target should include a range');
+  const anchoredText = getTextForRange(state.doc, anchored!.range!);
+  assertEqual(anchoredText, 'one bold thing', 'Markdown-flavored target should normalize to visible quote text');
+  const surroundingText = getTextForRange(state.doc, {
+    from: Math.max(0, anchored!.range!.from - 20),
+    to: Math.min(state.doc.content.size, anchored!.range!.to + 6),
+  });
+  assert(
+    surroundingText.includes('Context marker one bold thing'),
+    'Markdown-flavored target should anchor the duplicate selected by visible context',
+  );
+});
+
+test('applyRemoteMarks honors canonical block separators for target-backed cross-paragraph anchors', () => {
+  const markId = 'm-remote-target-cross-paragraph';
+  const doc = marksSchema.node('doc', null, [
+    marksSchema.node('paragraph', null, marksSchema.text('Context marker foo')),
+    marksSchema.node('paragraph', null, marksSchema.text('bar')),
+    marksSchema.node('paragraph', null, marksSchema.text('foo bar')),
+  ]);
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema: marksSchema,
+    doc,
+    plugins: [marksStatePlugin],
+  });
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  applyRemoteMarks(view, {
+    [markId]: {
+      kind: 'replace' as const,
+      by: 'ai:test',
+      createdAt: new Date('2026-03-12T00:00:00.000Z').toISOString(),
+      content: 'Changed',
+      status: 'pending' as const,
+      quote: 'foo bar',
+      startRel: 'char:0',
+      endRel: 'char:7',
+      target: {
+        anchor: 'foo\nbar',
+        mode: 'exact' as const,
+        contextBefore: 'Context marker',
+      },
+    },
+  });
+
+  const marksAfter = getMarks(state);
+  const anchored = marksAfter.find(mark => mark.id === markId);
+  assert(anchored !== undefined, 'Cross-paragraph target-backed mark should be anchored');
+  assert(anchored?.range !== undefined, 'Cross-paragraph target-backed mark should include a range');
+  const anchoredText = getTextForRange(state.doc, anchored!.range!);
+  assertEqual(anchoredText, 'foo\nbar', 'Cross-paragraph target should rehydrate onto the block-spanning visible text');
+  const surroundingText = getTextForRange(state.doc, {
+    from: Math.max(0, anchored!.range!.from - 16),
+    to: Math.min(state.doc.content.size, anchored!.range!.to + 6),
+  });
+  assert(
+    surroundingText.includes('Context marker foo\nbar'),
+    'Cross-paragraph target should stay attached to the block-spanning occurrence selected by context',
+  );
 });
 
 test('applyRemoteMarks preserves existing comment payload when incoming metadata is partial', () => {
@@ -4657,10 +4950,10 @@ function makeProposal(change: SubAgentProposal['change'], suffix: string): SubAg
 const proposalDocument = [
   'Hello world',
   'Here is a medium-length sentence that should not be rewritten into a large block.',
-  'Any way I sliced it',
+  'Every way I sliced it',
   'point blank',
   '*Italic caption.*',
-  'Step one of my analysis: Manually exporting data from the CMS into Google Sheets',
+  'Step one of my revolutionary AI analysis: Manually exporting data from Every\'s CMS into Google Sheets',
   '## The receipts I\'d never had',
   '## I Asked AI the Question I Could Never Ask My Boss',
   'The exchange where ChatGPT gave me the answer I was craving: yes, you are good at your job.',
@@ -4712,8 +5005,8 @@ test('dedupeProposals rejects over-scoped replacements that change the opening w
       {
         kind: 'suggestion',
         suggestionType: 'replace',
-        quote: 'of my analysis: Manually exporting data from the CMS into Google Sheets',
-        content: 'Step one of my analysis: manually exporting data from the CMS into Google Sheets',
+        quote: "of my revolutionary AI analysis: Manually exporting data from Every's CMS into Google Sheets",
+        content: "Step one of my revolutionary AI analysis: manually exporting data from Every's CMS into Google Sheets",
       },
       'prefix-mismatch'
     ),
@@ -4769,8 +5062,8 @@ test('dedupeProposals rejects case-lowering at sentence start', () => {
       {
         kind: 'suggestion',
         suggestionType: 'replace',
-        quote: 'Any way I sliced it',
-        content: 'any way I sliced it',
+        quote: 'Every way I sliced it',
+        content: 'every way I sliced it',
       },
       'case-lower'
     ),
@@ -4875,9 +5168,9 @@ test('setEventCallback registers a callback', () => {
   assert(events.length === 0, 'No events should fire just from registering');
 });
 
-// Note: Self-event filtering is handled server-side in handleEventsPending.
-// Events always fire in JS; the server endpoint filters out events where
-// data.by matches the requesting agent's X-Agent-Id.
+// Note: Self-event filtering is handled server-side in handleEventsPending
+// (AgentBridgeServer.swift). Events always fire in JS — the Swift endpoint
+// filters out events where data.by matches the requesting agent's X-Agent-Id.
 // This allows multi-agent scenarios where Agent A's events are visible to Agent B.
 
 // Clean up the event callback

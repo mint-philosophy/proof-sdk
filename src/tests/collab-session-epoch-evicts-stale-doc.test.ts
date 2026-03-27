@@ -60,10 +60,22 @@ async function run(): Promise<void> {
     db.clearYjsState(slug);
     collab.__unsafeSchedulePersistDocFromOnChangeForTests(slug, loaded);
 
+    const readableAfterEpochBump = collab.getCanonicalReadableDocumentSync(slug, 'state');
+    assert(Boolean(readableAfterEpochBump), 'Expected canonical state read after epoch bump');
+    assert(
+      (readableAfterEpochBump?.markdown ?? '').includes('Content B'),
+      `Expected canonical state read to evict stale in-memory doc and return content B. markdown=${(readableAfterEpochBump?.markdown ?? '').slice(0, 120)}`,
+    );
+    assert(
+      !(readableAfterEpochBump?.markdown ?? '').includes('Content A'),
+      `Expected canonical state read not to reuse stale room content A. markdown=${(readableAfterEpochBump?.markdown ?? '').slice(0, 120)}`,
+    );
+    assert(instance.documents?.has?.(slug) === false, 'Expected canonical state read to evict stale in-memory doc after epoch bump');
+
     const session = collab.buildCollabSession(slug, 'editor');
     assert(Boolean(session?.token), 'Expected collab session after access epoch bump');
     assert(closeConnectionsSawRegisteredDoc !== false, 'Expected epoch eviction to close stale sockets before dropping the Hocuspocus room');
-    assert(instance.documents?.has?.(slug) === false, 'Expected collab session creation to evict stale in-memory doc after epoch bump');
+    assert(instance.documents?.has?.(slug) === false, 'Expected collab session creation to keep stale in-memory doc evicted after epoch bump');
 
     const reloaded = await instance.createDocument(
       slug,

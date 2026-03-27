@@ -14,8 +14,29 @@ assert(
 );
 
 assert(
-  editorSource.includes('this.startShareEventPoll();'),
-  'Expected share-mode editor startup to begin the pending-events poll fallback',
+  editorSource.includes('private updateShareEventPollForSocketState(state: ShareSocketState = shareClient.getConnectionState()): void')
+    && editorSource.includes("if (state === 'connected') {")
+    && editorSource.includes('this.pauseShareEventPoll();')
+    && editorSource.includes('void this.catchUpShareEventPollAfterSocketRecovery();')
+    && editorSource.includes('this.startShareEventPoll();'),
+  'Expected share-mode editor startup to adapt the pending-events fallback to WebSocket health',
+);
+
+assert(
+  editorSource.includes('private async runShareEventPollPass(): Promise<void>')
+    && editorSource.includes('private async catchUpShareEventPollAfterSocketRecovery(): Promise<void>')
+    && editorSource.includes('await this.runShareEventPollPass();'),
+  'Expected share-mode event fallback to perform a one-shot catch-up fetch when the socket recovers',
+);
+
+assert(
+  editorSource.includes("event.type === 'agent.edit.v2'")
+    && editorSource.includes('private shouldSkipForcedCollabRefreshFromPendingEvent(): boolean')
+    && editorSource.includes("this.collabConnectionStatus === 'connected'")
+    && editorSource.includes('this.collabIsSynced')
+    && editorSource.includes('if (this.shouldSkipForcedCollabRefreshFromPendingEvent()) return;')
+    && editorSource.includes('this.scheduleShareDocumentUpdatedRefresh(true);'),
+  'Expected pending event handler to skip forced collab refresh when the live room is already healthy',
 );
 
 assert(
@@ -25,24 +46,27 @@ assert(
     && editorSource.includes('this.pendingShareMarksRefresh = true;')
     && editorSource.includes('clearTimeout(this.shareMarksRefreshTimer);')
     && editorSource.includes('void shareClient.fetchOpenContext()')
-    && editorSource.includes('this.applyAuthoritativeShareMarks(serverMarks);')
-    && editorSource.includes("event.type === 'agent.edit.v2'")
-    && editorSource.includes('private shouldSkipForcedCollabRefreshFromPendingEvent(): boolean')
-    && editorSource.includes("this.collabConnectionStatus === 'connected'")
-    && editorSource.includes('this.collabIsSynced')
-    && editorSource.includes('if (this.shouldSkipForcedCollabRefreshFromPendingEvent()) return;')
-    && editorSource.includes('this.scheduleShareDocumentUpdatedRefresh(true);'),
-  'Expected pending comment/suggestion events to refresh authoritative marks and to skip forced collab refresh when the live room is already healthy',
+    && editorSource.includes('this.applyAuthoritativeShareMarks(serverMarks);'),
+  'Expected pending comment/suggestion events to refresh authoritative marks for healthy share sessions',
 );
 
 assert(
   editorSource.includes('private stopShareEventPoll(): void')
+    && editorSource.includes('private pauseShareEventPoll(): void')
     && editorSource.includes('private scheduleShareMarksRefresh(): void')
     && editorSource.includes('private shareMarksRefreshTimer: ReturnType<typeof setTimeout> | null = null;')
     && editorSource.includes('private pendingShareMarksRefresh: boolean = false;')
     && editorSource.includes('if (this.shareMarksRefreshTimer) {')
     && editorSource.includes('this.stopShareEventPoll();'),
   'Expected share event poller and marks refresh timer to be cleaned up during share/editor teardown',
+);
+
+assert(
+  shareClientSource.includes('socket.onclose = () => {')
+    && shareClientSource.includes('if (this.ws !== socket) return;')
+    && shareClientSource.includes("this.setConnectionState('disconnected');")
+    && shareClientSource.includes('this.scheduleReconnect();'),
+  'Expected ShareClient to ignore stale socket closes so a superseded socket cannot downgrade connection state or schedule reconnects',
 );
 
 console.log('✓ share event poll fallback wiring checks');

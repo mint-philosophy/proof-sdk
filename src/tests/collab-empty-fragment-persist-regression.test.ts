@@ -23,6 +23,8 @@ async function run(): Promise<void> {
   const dbName = `proof-collab-empty-fragment-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
   const dbPath = path.join(os.tmpdir(), dbName);
   const previousDbPath = process.env.DATABASE_PATH;
+  const previousIdleTimeout = process.env.COLLAB_DOC_IDLE_TIMEOUT_MS;
+  const previousMaxLoadedDocs = process.env.COLLAB_MAX_LOADED_DOCS;
   process.env.DATABASE_PATH = dbPath;
 
   const db = await import('../../server/db.ts');
@@ -148,12 +150,43 @@ async function run(): Promise<void> {
       `Expected reconnect after full delete to stay empty instead of restoring content. markdown=${String(reloadedMarkdown)}`,
     );
 
-    console.log('✓ empty persisted fragments repair on load, but browser-style full deletes persist as empty without restoration');
+    await collab.stopCollabRuntime();
+    const cachedReadable = collab.getCanonicalReadableDocumentSync(slug, 'state');
+    assert(Boolean(cachedReadable), 'Expected sync canonical read to populate persisted-doc cache');
+    assert(
+      collab.__unsafeHasPersistedDocCacheForTests(slug),
+      'Expected sync canonical read to cache persisted Yjs state for reuse',
+    );
+    assert(
+      collab.__unsafeGetLoadedDocForTests(slug) === null,
+      'Expected stopped runtime to leave only the persisted-doc cache populated',
+    );
+
+    process.env.COLLAB_DOC_IDLE_TIMEOUT_MS = '1';
+    process.env.COLLAB_MAX_LOADED_DOCS = '1';
+    await sleep(10);
+    collab.__unsafeRunDocEvictionForTests();
+    assert(
+      collab.__unsafeHasPersistedDocCacheForTests(slug) === false,
+      'Expected idle eviction to clear cache-only persisted Y.Doc entries',
+    );
+
+    console.log('✓ empty persisted fragments repair on load, browser-style full deletes stay empty, and cache-only persisted docs evict when idle');
   } finally {
     if (previousDbPath === undefined) {
       delete process.env.DATABASE_PATH;
     } else {
       process.env.DATABASE_PATH = previousDbPath;
+    }
+    if (previousIdleTimeout === undefined) {
+      delete process.env.COLLAB_DOC_IDLE_TIMEOUT_MS;
+    } else {
+      process.env.COLLAB_DOC_IDLE_TIMEOUT_MS = previousIdleTimeout;
+    }
+    if (previousMaxLoadedDocs === undefined) {
+      delete process.env.COLLAB_MAX_LOADED_DOCS;
+    } else {
+      process.env.COLLAB_MAX_LOADED_DOCS = previousMaxLoadedDocs;
     }
     await collab.stopCollabRuntime();
     for (const suffix of ['', '-wal', '-shm']) {

@@ -52,12 +52,15 @@ async function run(): Promise<void> {
     const nextEpoch = db.bumpDocumentAccessEpoch(slug);
     assert(typeof nextEpoch === 'number' && nextEpoch === 1, `Expected access epoch bump to 1, got ${String(nextEpoch)}`);
 
+    const breakdown = ws.getActiveCollabClientBreakdown(slug);
+    assert(breakdown.exactEpochCount === 0, `Expected exactEpochCount=0 after epoch bump, got ${breakdown.exactEpochCount}`);
+    assert(breakdown.anyEpochCount === 1, `Expected stale anyEpochCount diagnostics after epoch bump, got ${JSON.stringify(breakdown)}`);
     assert(
-      ws.getActiveCollabClientCount(slug) === 1,
-      `Expected hosted collab safety count to keep blocking on stale live leases for ${slug}`,
+      ws.getActiveCollabClientCount(slug) === 0,
+      `Expected stale prior-epoch live leases not to block fresh writes for ${slug}`,
     );
 
-    console.log('✓ active collab client count uses shared registry and conservatively blocks across epochs');
+    console.log('✓ active collab client count ignores stale prior-epoch leases while preserving diagnostics');
   } finally {
     for (const suffix of ['', '-wal', '-shm']) {
       try {

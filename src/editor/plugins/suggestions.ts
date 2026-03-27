@@ -2022,18 +2022,23 @@ export function wrapTransactionForSuggestions(
             ? `${existingContent}${insertedText}`
             : `${insertedText}${existingContent}`;
 
-          newTr.insertText(insertedText, candidate.insertPos);
-          // Re-apply mark to the FULL insert range (not just the new character).
-          // With inclusive:false, y-prosemirror may create a new Y.Text run for
-          // each addMark on just the boundary character, fragmenting the insert
-          // span in the Y.XmlFragment. Covering the full range forces a single
-          // contiguous formatting attribute in the CRDT, preventing interleaved
-          // canonical markdown serialization.
-          newTr.addMark(
-            candidate.range.from,
-            candidate.insertPos + insertedText.length,
-            suggestionType.create({ id: candidate.id, kind: 'insert', by: actor })
-          );
+          // FIX16: Replace entire insert range with a single text node.
+          // insertText+addMark creates a new Y.Text CRDT item at the mark
+          // boundary (inclusive:false) that never merges with adjacent items,
+          // even after format(). replaceWith deletes old fragmented items and
+          // inserts one contiguous item, preventing canonical interleaving.
+          {
+            const rangeText = newTr.doc.textBetween(candidate.range.from, candidate.range.to);
+            const fullText = candidate.direction === 'append'
+              ? rangeText + insertedText
+              : insertedText + rangeText;
+            const mark = suggestionType.create({ id: candidate.id, kind: 'insert', by: actor });
+            newTr.replaceWith(
+              candidate.range.from,
+              candidate.range.to,
+              newTr.doc.type.schema.text(fullText, [mark])
+            );
+          }
           writeOffset += insertedText.length;
 
           metadata = {
@@ -2069,13 +2074,19 @@ export function wrapTransactionForSuggestions(
             ? `${existingContent}${insertedText}`
             : `${insertedText}${existingContent}`;
 
-          newTr.insertText(insertedText, candidate.insertPos);
-          // Re-apply mark to full insert range — see coalesce-whitespace comment above.
-          newTr.addMark(
-            candidate.range.from,
-            candidate.insertPos + insertedText.length,
-            suggestionType.create({ id: candidate.id, kind: 'insert', by: actor })
-          );
+          // FIX16: Same replaceWith approach — see coalesce-whitespace comment.
+          {
+            const rangeText = newTr.doc.textBetween(candidate.range.from, candidate.range.to);
+            const fullText = candidate.direction === 'append'
+              ? rangeText + insertedText
+              : insertedText + rangeText;
+            const mark = suggestionType.create({ id: candidate.id, kind: 'insert', by: actor });
+            newTr.replaceWith(
+              candidate.range.from,
+              candidate.range.to,
+              newTr.doc.type.schema.text(fullText, [mark])
+            );
+          }
           writeOffset += insertedText.length;
 
           metadata = {

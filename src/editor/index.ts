@@ -9729,6 +9729,10 @@ class ProofEditorImpl implements ProofEditor {
           this.pendingCollabReconnectTemplateOverride = null;
           this.skipNextCollabTemplateSeed = false;
           this.loadCanonicalShareDocument(markdown, marks);
+          // loadDocument above resets the suggestions plugin and module state to
+          // disabled (stale-state guard). Re-enable TC so remaining marks render
+          // as rails and the TC toggle stays on.
+          this.setSuggestionsEnabled(true);
           this.suppressTrackChangesDuringCollabReconnect = false;
           this.updateShareEditGate();
           success = true;

@@ -303,6 +303,39 @@ function findTrailingDeleteRangeForInsert(
         matchingDeleteRange = deleteRange;
         return false;
       }
+      // Tolerate a small gap of non-suggestion text between the delete mark
+      // end and the cursor. Yjs collaborative sync can move the DOM cursor
+      // past authored characters adjacent to the delete boundary. If the gap
+      // is short and contains no suggestion marks, treat it as if the cursor
+      // were at the delete mark end.
+      const MAX_GAP = 4;
+      if (
+        deleteRange.from === insertRange.to
+        && deleteRange.to < pos
+        && pos - deleteRange.to <= MAX_GAP
+      ) {
+        const gapText = doc.textBetween(deleteRange.to, pos, '');
+        let gapHasSuggestion = false;
+        doc.nodesBetween(deleteRange.to, pos, (gapNode) => {
+          if (!gapNode.isText) return true;
+          for (const gapMark of gapNode.marks) {
+            if (gapMark.type.name === 'proofSuggestion') {
+              gapHasSuggestion = true;
+            }
+          }
+          return true;
+        });
+        if (!gapHasSuggestion && gapText.length > 0) {
+          console.log('[suggestions.trailingDeleteGapBridge]', {
+            deleteRange,
+            insertRange,
+            pos,
+            gapText,
+          });
+          matchingDeleteRange = deleteRange;
+          return false;
+        }
+      }
     }
     return true;
   });

@@ -9715,7 +9715,10 @@ class ProofEditorImpl implements ProofEditor {
 
       tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });
       const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)
-        || await this.applyShareMutationDocumentResult(result);
+        || await this.applyShareMutationDocumentResult(result, {
+          skipReconnectTemplateSeed: true,
+          preserveEditorStateDuringReconnect: true,
+        });
       if (success && this.editor) {
         if (this.hasActiveRemoteCollabPeer()) {
           await this.waitForStableShareReviewMutationState();

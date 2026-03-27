@@ -233,14 +233,15 @@ function run(): void {
       && localResolveBlock.includes('const liveMarkdown = this.normalizeMarkdownForCollab(serializer(view.state.doc));')
       && localResolveBlock.includes("matchedServerResult = liveMarkdown === expectedMarkdown && !Object.prototype.hasOwnProperty.call(liveMetadata, markId);")
       && localResolveBlock.includes('this.pendingCollabReconnectTemplateOverride = expectedMarkdown;')
-      && localResolveBlock.includes("const shouldPreserveRejectResultAcrossReconnect = action === 'reject' && this.hasActiveRemoteCollabPeer();")
-      && localResolveBlock.includes('if (shouldPreserveRejectResultAcrossReconnect) {')
+      && localResolveBlock.includes("const shouldPreserveMatchedResultAcrossReconnect = action === 'accept'")
+      && localResolveBlock.includes("|| (action === 'reject' && this.hasActiveRemoteCollabPeer());")
+      && localResolveBlock.includes('if (shouldPreserveMatchedResultAcrossReconnect) {')
       && localResolveBlock.includes('this.skipNextCollabTemplateSeed = true;')
       && localResolveBlock.includes('this.preserveEditorStateOnNextCollabReconnect = true;')
       && localResolveBlock.includes('this.disconnectCollabService();')
       && localResolveBlock.includes('collabClient.disconnect();')
       && localResolveBlock.includes('void this.refreshCollabSessionAndReconnect(false);'),
-    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response, and to preserve authoritative reject results through the subsequent collab reconnect only when a remote peer is actually connected',
+    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response, and to preserve matched local accept results through the subsequent collab reconnect while keeping reject preservation gated on active remote peers',
   );
 
   console.log('share-review-persisted-canonical-sync-regression.test.ts passed');

@@ -9386,9 +9386,10 @@ class ProofEditorImpl implements ProofEditor {
       this.initialMarksSynced = true;
     });
 
-    const shouldPreserveRejectResultAcrossReconnect = action === 'reject' && this.hasActiveRemoteCollabPeer();
+    const shouldPreserveMatchedResultAcrossReconnect = action === 'accept'
+      || (action === 'reject' && this.hasActiveRemoteCollabPeer());
     if (matchedServerResult) {
-      if (shouldPreserveRejectResultAcrossReconnect) {
+      if (shouldPreserveMatchedResultAcrossReconnect) {
         this.pendingCollabReconnectTemplateOverride = null;
         this.skipNextCollabTemplateSeed = true;
         this.preserveEditorStateOnNextCollabReconnect = true;

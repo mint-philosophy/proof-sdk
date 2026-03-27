@@ -1613,12 +1613,14 @@ class ProofEditorImpl implements ProofEditor {
           this.lastReceivedServerMarks = initialMarks;
           this.initialMarksSynced = true;
         }
+        console.log('[fix24-trace] initFromShare: initialMarks count=', Object.keys(initialMarks).length, 'lastReceivedServerMarks count=', Object.keys(this.lastReceivedServerMarks).length);
         this.updateShareEditGate();
 
         collabClient.onMarks((marks) => {
           const incomingMarks = (marks && typeof marks === 'object' && !Array.isArray(marks))
             ? (marks as Record<string, StoredMark>)
             : {};
+          console.log('[fix24-trace] onMarks: incoming=', Object.keys(incomingMarks).length, 'existing=', Object.keys(this.lastReceivedServerMarks).length, 'collabIsSynced=', this.collabIsSynced);
           const traceMarkId = this.getActiveShareReviewTraceContext()?.markId ?? null;
           this.traceShareReview('collab.onMarks.received', {
             incomingCount: Object.keys(incomingMarks).length,
@@ -1665,6 +1667,7 @@ class ProofEditorImpl implements ProofEditor {
           }, traceMarkId && Object.prototype.hasOwnProperty.call(mergedIncomingMarks, traceMarkId) ? 'warn' : 'info');
 
           this.lastReceivedServerMarks = { ...mergedIncomingMarks };
+          console.log('[fix24-trace] onMarks: merged result=', Object.keys(mergedIncomingMarks).length, 'lastReceivedServerMarks now=', Object.keys(this.lastReceivedServerMarks).length);
           this.initialMarksSynced = true;
           if (!this.isEditorDocStructurallyEmpty()) {
             this.applyLatestCollabMarksToEditor();
@@ -2001,6 +2004,8 @@ class ProofEditorImpl implements ProofEditor {
   }
 
   private resetShareMarksSyncState(): void {
+    const hadMarks = Object.keys(this.lastReceivedServerMarks).length;
+    console.log('[fix24-trace] resetShareMarksSyncState: clearing', hadMarks, 'marks', new Error().stack?.split('\n').slice(1, 4).join(' <- '));
     this.initialMarksSynced = false;
     this.lastReceivedServerMarks = {};
   }
@@ -5227,6 +5232,7 @@ class ProofEditorImpl implements ProofEditor {
    * load; without re-enabling, marks won't render as rails after refresh.
    */
   private rehydrateServerMarksAfterCollabHydration(): void {
+    console.log('[fix24-trace] rehydrateServerMarksAfterCollabHydration: isShareMode=', this.isShareMode, 'collabEnabled=', this.collabEnabled, 'hasEditor=', !!this.editor, 'structEmpty=', this.isEditorDocStructurallyEmpty(), 'serverMarks=', Object.keys(this.lastReceivedServerMarks).length);
     if (!this.isShareMode || !this.collabEnabled || !this.editor) return;
     if (this.isEditorDocStructurallyEmpty()) return;
 

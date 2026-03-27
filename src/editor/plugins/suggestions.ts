@@ -1777,20 +1777,27 @@ export function wrapTransactionForSuggestions(
         const insertSuggestionId = generateMarkId();
         const createdAt = new Date().toISOString();
 
-        newTr.insertText(insertedText, safeFrom);
+        // FIX17: Place delete mark FIRST, then insert AFTER the deleted range.
+        // With [insert][delete] order, y-prosemirror's simpleDiff inserts
+        // coalesced characters at the item boundary between insert and delete
+        // items in Y.Text. With inclusive:false, boundary items don't inherit
+        // the insert mark, causing canonical markdown interleaving.
+        // With [delete][insert] order, coalesced characters always append at
+        // the END of the Y.Text, away from any mark boundary.
         newTr.addMark(
           safeFrom,
-          safeFrom + insertedText.length,
-          suggestionType.create({ id: insertSuggestionId, kind: 'insert', by: actor })
-        );
-        newTr.addMark(
-          safeFrom + insertedText.length,
-          safeTo + insertedText.length,
+          safeTo,
           suggestionType.create({
             id: deleteSuggestionId,
             kind: 'delete',
             by: actor,
           })
+        );
+        newTr.insertText(insertedText, safeTo);
+        newTr.addMark(
+          safeTo,
+          safeTo + insertedText.length,
+          suggestionType.create({ id: insertSuggestionId, kind: 'insert', by: actor })
         );
 
         metadata = {
@@ -1801,20 +1808,20 @@ export function wrapTransactionForSuggestions(
           },
           [insertSuggestionId]: {
             ...buildSuggestionMetadata('insert', actor, insertedText, createdAt),
-            ...buildCollapsedInsertAnchorMetadata(safeFrom),
+            ...buildCollapsedInsertAnchorMetadata(safeTo),
           },
         };
         metadataChanged = true;
 
         lastInsertByActor.set(actor, {
           id: insertSuggestionId,
-          from: safeFrom,
-          to: safeFrom + insertedText.length,
+          from: safeTo,
+          to: safeTo + insertedText.length,
           by: actor,
           updatedAt: Date.now(),
         });
 
-        newTr.setSelection(TextSelection.create(newTr.doc, safeFrom + insertedText.length));
+        newTr.setSelection(TextSelection.create(newTr.doc, safeTo + insertedText.length));
       }
     }
 

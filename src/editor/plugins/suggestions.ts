@@ -1901,12 +1901,26 @@ export function wrapTransactionForSuggestions(
       }
       // CASE 2: Pure insertion (no deletion)
       else if (insertedText && !deletedText) {
+        const now = Date.now();
+        const whitespaceOnly = isWhitespaceOnly(insertedText);
+
+        // Check for coalesce candidate BEFORE the delete mark cursor skip.
+        // When the cursor is at a delete mark boundary during an active
+        // replacement coalesce (e.g. typing "Changed alpha." over selected
+        // text), the coalesce path must take priority. The delete mark cursor
+        // skip would create a NEW insert mark past the delete, breaking
+        // mark continuity in the Y.XmlFragment and causing interleaved
+        // markdown serialization (Bug 2: "Changed Alpha normal.alpha."
+        // instead of "Changed alpha.Alpha normal.").
+        let candidate = getCoalescableInsertCandidate(newTr.doc, metadata, safeFrom, actor, now);
+
         // Delete mark cursor skip: if the insertion position is at the left
-        // boundary of a delete suggestion, move it past the delete so new text
-        // appears after the deletion rather than before it.
+        // boundary of a delete suggestion AND there's no active coalesce,
+        // move it past the delete so new text appears after the deletion
+        // rather than being trapped before it.
         // This runs in wrapTransactionForSuggestions (not just handleTextInput)
         // so it also catches DOM-observer-driven input from CGEvent keystrokes.
-        if (safeFrom === safeTo) {
+        if (!candidate && safeFrom === safeTo) {
           try {
             const $insPos = newTr.doc.resolve(safeFrom);
             const afterNode = $insPos.nodeAfter;
@@ -1958,10 +1972,6 @@ export function wrapTransactionForSuggestions(
             }
           } catch { /* fall through to normal insertion logic */ }
         }
-
-        const now = Date.now();
-        const whitespaceOnly = isWhitespaceOnly(insertedText);
-        let candidate = getCoalescableInsertCandidate(newTr.doc, metadata, safeFrom, actor, now);
 
         // Whitespace gap repair: if the candidate lookup failed but the cache
         // says the mark should extend to the cursor, and the gap between the
@@ -2654,6 +2664,21 @@ export const suggestionsPlugin = $prose(() => {
         // as ordinary typing. If we opt out here, ProseMirror's DOM observer
         // emits intermediate composition transactions that get tracked as
         // separate char-level edits in shared docs.
+
+        // When there's an active coalesce candidate at the cursor, bypass
+        // resolveTrackedTextInputRange. That function skips past adjacent
+        // delete marks, moving the insertion to a distant document position.
+        // While wrapTransactionForSuggestions correctly redirects back to
+        // the coalesce position, the intermediate position confuses the
+        // y-prosemirror binding — the Y.XmlFragment loses mark continuity
+        // at word boundaries, producing interleaved markdown serialization.
+        // Inserting at the actual cursor keeps the character adjacent to
+        // the existing marked text in the Y.XmlFragment.
+        if (from === to && hasActiveInsertCoalescingCandidate(view.state, from)) {
+          view.dispatch(view.state.tr.insertText(text, from, to));
+          return true;
+        }
+
         const range = resolveTrackedTextInputRange(view.state, from, to);
         view.dispatch(view.state.tr.insertText(text, range.from, range.to));
         return true;

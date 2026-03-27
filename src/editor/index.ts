@@ -2208,6 +2208,11 @@ class ProofEditorImpl implements ProofEditor {
         this.markInitialCollabHydrationComplete();
         this.updateShareEditGate();
         this.scheduleContentSync();
+        // Re-apply server marks now that Y.js content has loaded into ProseMirror.
+        // The earlier applyLatestCollabMarksToEditor call in the sync handler often
+        // fires before Y.js has pushed content, hitting the isEditorDocStructurallyEmpty
+        // guard. This is the reliable point where the doc has content.
+        this.applyLatestCollabMarksToEditor();
         return;
       }
 
@@ -2228,6 +2233,7 @@ class ProofEditorImpl implements ProofEditor {
         finish();
         this.markInitialCollabHydrationComplete();
         this.updateShareEditGate();
+        this.applyLatestCollabMarksToEditor();
         return;
       }
       requestAnimationFrame(() => attempt(count + 1));

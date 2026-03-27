@@ -303,12 +303,14 @@ function findTrailingDeleteRangeForInsert(
         matchingDeleteRange = deleteRange;
         return false;
       }
-      // Tolerate a small gap of non-suggestion text between the delete mark
-      // end and the cursor. Yjs collaborative sync can move the DOM cursor
-      // past authored characters adjacent to the delete boundary. If the gap
-      // is short and contains no suggestion marks, treat it as if the cursor
-      // were at the delete mark end.
-      const MAX_GAP = 4;
+      // Tolerate a gap of non-suggestion text between the delete mark end
+      // and the cursor. Yjs collaborative sync can move the DOM cursor past
+      // authored characters adjacent to the delete boundary. In multi-mark
+      // documents the cursor can jump much further (past entire paragraphs
+      // of authored text), so the limit must be generous. The no-suggestion
+      // check below is the real safety condition — it prevents bridging
+      // across other tracked edits.
+      const MAX_GAP = 200;
       if (
         deleteRange.from === insertRange.to
         && deleteRange.to < pos

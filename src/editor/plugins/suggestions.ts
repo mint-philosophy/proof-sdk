@@ -2023,8 +2023,14 @@ export function wrapTransactionForSuggestions(
             : `${insertedText}${existingContent}`;
 
           newTr.insertText(insertedText, candidate.insertPos);
+          // Re-apply mark to the FULL insert range (not just the new character).
+          // With inclusive:false, y-prosemirror may create a new Y.Text run for
+          // each addMark on just the boundary character, fragmenting the insert
+          // span in the Y.XmlFragment. Covering the full range forces a single
+          // contiguous formatting attribute in the CRDT, preventing interleaved
+          // canonical markdown serialization.
           newTr.addMark(
-            candidate.insertPos,
+            candidate.range.from,
             candidate.insertPos + insertedText.length,
             suggestionType.create({ id: candidate.id, kind: 'insert', by: actor })
           );
@@ -2064,8 +2070,9 @@ export function wrapTransactionForSuggestions(
             : `${insertedText}${existingContent}`;
 
           newTr.insertText(insertedText, candidate.insertPos);
+          // Re-apply mark to full insert range — see coalesce-whitespace comment above.
           newTr.addMark(
-            candidate.insertPos,
+            candidate.range.from,
             candidate.insertPos + insertedText.length,
             suggestionType.create({ id: candidate.id, kind: 'insert', by: actor })
           );

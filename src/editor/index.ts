@@ -1615,14 +1615,12 @@ class ProofEditorImpl implements ProofEditor {
           this.initialMarksSynced = true;
           this.pendingHydrationMarks = { ...initialMarks };
         }
-        console.log('[fix24-trace] initFromShare: initialMarks count=', Object.keys(initialMarks).length, 'pendingHydrationMarks=', Object.keys(this.pendingHydrationMarks || {}).length);
         this.updateShareEditGate();
 
         collabClient.onMarks((marks) => {
           const incomingMarks = (marks && typeof marks === 'object' && !Array.isArray(marks))
             ? (marks as Record<string, StoredMark>)
             : {};
-          console.log('[fix24-trace] onMarks: incoming=', Object.keys(incomingMarks).length, 'existing=', Object.keys(this.lastReceivedServerMarks).length, 'collabIsSynced=', this.collabIsSynced);
           const traceMarkId = this.getActiveShareReviewTraceContext()?.markId ?? null;
           this.traceShareReview('collab.onMarks.received', {
             incomingCount: Object.keys(incomingMarks).length,
@@ -1669,7 +1667,6 @@ class ProofEditorImpl implements ProofEditor {
           }, traceMarkId && Object.prototype.hasOwnProperty.call(mergedIncomingMarks, traceMarkId) ? 'warn' : 'info');
 
           this.lastReceivedServerMarks = { ...mergedIncomingMarks };
-          console.log('[fix24-trace] onMarks: merged result=', Object.keys(mergedIncomingMarks).length, 'lastReceivedServerMarks now=', Object.keys(this.lastReceivedServerMarks).length);
           this.initialMarksSynced = true;
           if (!this.isEditorDocStructurallyEmpty()) {
             this.applyLatestCollabMarksToEditor();
@@ -2006,7 +2003,6 @@ class ProofEditorImpl implements ProofEditor {
   }
 
   private resetShareMarksSyncState(): void {
-    console.log('[fix24-trace] resetShareMarksSyncState: clearing', Object.keys(this.lastReceivedServerMarks).length, 'marks');
     this.initialMarksSynced = false;
     this.lastReceivedServerMarks = {};
     this.pendingHydrationMarks = null;
@@ -5242,8 +5238,6 @@ class ProofEditorImpl implements ProofEditor {
     // before hydration completes.
     const serverMarks = this.pendingHydrationMarks ?? this.lastReceivedServerMarks;
     this.pendingHydrationMarks = null;
-    console.log('[fix24-trace] rehydrateServerMarksAfterCollabHydration: serverMarks=', Object.keys(serverMarks).length, 'ids=', Object.keys(serverMarks));
-
     const hasPendingSuggestions = Object.values(serverMarks).some(
       (m) => (m.kind === 'insert' || m.kind === 'delete' || m.kind === 'replace')
         && m.status !== 'accepted' && m.status !== 'rejected'

@@ -1182,6 +1182,7 @@ class ProofEditorImpl implements ProofEditor {
   private pendingProjectionPublish: boolean = false;
   private initialMarksSynced: boolean = false;
   private lastReceivedServerMarks: Record<string, StoredMark> = {};
+  private pendingHydrationMarks: Record<string, StoredMark> | null = null;
   private shareReviewMutationQueue: Promise<void> = Promise.resolve();
   private shareReviewTraceContext: {
     traceId: string;
@@ -1612,8 +1613,9 @@ class ProofEditorImpl implements ProofEditor {
         if (Object.keys(initialMarks).length > 0) {
           this.lastReceivedServerMarks = initialMarks;
           this.initialMarksSynced = true;
+          this.pendingHydrationMarks = { ...initialMarks };
         }
-        console.log('[fix24-trace] initFromShare: initialMarks count=', Object.keys(initialMarks).length, 'lastReceivedServerMarks count=', Object.keys(this.lastReceivedServerMarks).length);
+        console.log('[fix24-trace] initFromShare: initialMarks count=', Object.keys(initialMarks).length, 'pendingHydrationMarks=', Object.keys(this.pendingHydrationMarks || {}).length);
         this.updateShareEditGate();
 
         collabClient.onMarks((marks) => {
@@ -2004,10 +2006,10 @@ class ProofEditorImpl implements ProofEditor {
   }
 
   private resetShareMarksSyncState(): void {
-    const hadMarks = Object.keys(this.lastReceivedServerMarks).length;
-    console.log('[fix24-trace] resetShareMarksSyncState: clearing', hadMarks, 'marks', new Error().stack?.split('\n').slice(1, 4).join(' <- '));
+    console.log('[fix24-trace] resetShareMarksSyncState: clearing', Object.keys(this.lastReceivedServerMarks).length, 'marks');
     this.initialMarksSynced = false;
     this.lastReceivedServerMarks = {};
+    this.pendingHydrationMarks = null;
   }
 
   private getActiveShareReviewTraceContext(): typeof this.shareReviewTraceContext {
@@ -5232,11 +5234,16 @@ class ProofEditorImpl implements ProofEditor {
    * load; without re-enabling, marks won't render as rails after refresh.
    */
   private rehydrateServerMarksAfterCollabHydration(): void {
-    console.log('[fix24-trace] rehydrateServerMarksAfterCollabHydration: isShareMode=', this.isShareMode, 'collabEnabled=', this.collabEnabled, 'hasEditor=', !!this.editor, 'structEmpty=', this.isEditorDocStructurallyEmpty(), 'serverMarks=', Object.keys(this.lastReceivedServerMarks).length);
     if (!this.isShareMode || !this.collabEnabled || !this.editor) return;
     if (this.isEditorDocStructurallyEmpty()) return;
 
-    const serverMarks = this.lastReceivedServerMarks;
+    // Use pendingHydrationMarks (immutable copy from open-context) if available,
+    // because lastReceivedServerMarks can be mutated by resyncPendingInsertMetadata
+    // before hydration completes.
+    const serverMarks = this.pendingHydrationMarks ?? this.lastReceivedServerMarks;
+    this.pendingHydrationMarks = null;
+    console.log('[fix24-trace] rehydrateServerMarksAfterCollabHydration: serverMarks=', Object.keys(serverMarks).length, 'ids=', Object.keys(serverMarks));
+
     const hasPendingSuggestions = Object.values(serverMarks).some(
       (m) => (m.kind === 'insert' || m.kind === 'delete' || m.kind === 'replace')
         && m.status !== 'accepted' && m.status !== 'rejected'
@@ -5254,6 +5261,9 @@ class ProofEditorImpl implements ProofEditor {
       this.suppressMarksSync = false;
       this.applyingCollabRemote = false;
     }
+
+    // Update lastReceivedServerMarks with the rehydrated marks
+    this.lastReceivedServerMarks = { ...this.lastReceivedServerMarks, ...serverMarks };
 
     // Re-enable track changes so suggestion marks render as rails.
     // loadDocument disables suggestions as a stale-state guard; nothing

@@ -1,11 +1,50 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `2b17cf22ffc807b09e1f0dd1a1a4487ab554f3f8d7a7956c0a7a0a928130ef90`
+- Live client bundle on `proof-test.mintresearch.org`: `7c93f9cbb94d13c9f7146650eacbf0938c5f5bfff190ec0d31eff1dec1b7d7b8`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix31 plugin-side TC intent follow-up
+
+Shared reports:
+- browser QA: fix29 client bundle was live, but typed insertions still produced zero suggestion marks after hard refresh in TC mode
+
+Requested:
+- finish the Root Cause A fix by making the plugin-side TC guards respect the latched desired Track Changes state, not just the editor dispatch interceptor
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - added a plugin-level `suggestionsDesiredEnabled` latch plus `setSuggestionsDesiredEnabled()`
+  - `isSuggestionsEnabled()` now returns true when any of: plugin state, module flag, or desired TC state is on
+  - enable/disable/toggle paths now keep the desired latch in sync with the live plugin/module state
+- `src/editor/index.ts`
+  - now mirrors the editor’s `desiredSuggestionsEnabled` into the shared suggestions helper during `setSuggestionsEnabled()` and after `loadDocument()` resets module state
+- `src/editor/plugins/authored-tracker.ts`
+  - `shouldTrackHumanAuthorship()` now uses the shared `isSuggestionsEnabled()` helper instead of reading only `suggestionsPluginKey`
+  - this prevents human-authored fallback marks from treating TC as off while the editor still intends TC to be on
+- `src/tests/authored-tracker-suggestions-mode.test.ts`
+  - added a regression proving desired TC state disables authored tracking even before plugin state catches up
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - extended source guards for the desired-state mirror and authored-tracker integration
+
+Why this likely addresses the failed fix29 retest:
+- fix29 only taught the editor dispatch interceptor about desired TC state
+- the plugin props still used the older plugin/module-only checks, so typed input and authored-tracker could continue behaving as if TC were off
+- this change removes that split-brain by making the shared suggestions helper and authored-tracker honor the same desired TC latch
+
+Verified locally:
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/authored-tracker-suggestions-mode.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npx tsx src/tests/track-changes-structural-delete-regression.test.ts`
+- `npm run build`
+
+Scope note:
+- this is still part of Root Cause A for typed/pasted insertions
+- cold-reload persistence and formatting-as-suggestions remain separate lanes
 
 ## Fix30 mixed-delete paragraph selection follow-up
 

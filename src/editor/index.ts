@@ -65,6 +65,7 @@ import {
   transactionCarriesInsertedSuggestionMarks,
   wrapTransactionForSuggestions,
   isSuggestionsModuleEnabled,
+  setSuggestionsDesiredEnabled,
   resetSuggestionsModuleState,
 } from './plugins/suggestions';
 import {
@@ -6375,6 +6376,7 @@ class ProofEditorImpl implements ProofEditor {
     // suggestionsModuleEnabled from a previous doc leaking across
     // SPA navigation (the plugin state may also be stale).
     resetSuggestionsModuleState();
+    setSuggestionsDesiredEnabled(this.desiredSuggestionsEnabled);
 
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
@@ -7327,6 +7329,7 @@ class ProofEditorImpl implements ProofEditor {
     if (options?.updateDesiredState !== false) {
       this.desiredSuggestionsEnabled = enabled;
     }
+    setSuggestionsDesiredEnabled(this.desiredSuggestionsEnabled);
     if (!this.editor) {
       console.warn('[setSuggestionsEnabled] Editor not initialized');
       return false;
@@ -7396,6 +7399,7 @@ class ProofEditorImpl implements ProofEditor {
       }
     });
     this.desiredSuggestionsEnabled = enabled;
+    setSuggestionsDesiredEnabled(enabled);
     this.updateShareBannerTrackChangesDisplay();
     return enabled;
   }

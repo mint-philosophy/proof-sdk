@@ -19,6 +19,7 @@ function run(): void {
   const agentRoutesSource = readFileSync(path.resolve(process.cwd(), 'server/agent-routes.ts'), 'utf8');
   const documentEngineSource = readFileSync(path.resolve(process.cwd(), 'server/document-engine.ts'), 'utf8');
   const suggestionsSource = readFileSync(path.resolve(process.cwd(), 'src/editor/plugins/suggestions.ts'), 'utf8');
+  const authoredTrackerSource = readFileSync(path.resolve(process.cwd(), 'src/editor/plugins/authored-tracker.ts'), 'utf8');
 
   assert(
     agentRoutesSource.includes('preserveMutationBaseDocument: true,')
@@ -188,11 +189,13 @@ function run(): void {
   );
   assert(
     editorSource.includes('private desiredSuggestionsEnabled: boolean = false;')
+      && editorSource.includes('setSuggestionsDesiredEnabled,')
       && scheduleDesiredSuggestionsReapplyBlock.includes('if (!this.desiredSuggestionsEnabled || !this.editor) return;')
       && scheduleDesiredSuggestionsReapplyBlock.includes('if (this.isShareMode && !this.shareAllowLocalEdits) return;')
       && scheduleDesiredSuggestionsReapplyBlock.includes("const restored = this.setSuggestionsEnabled(true, { updateDesiredState: false });")
       && setSuggestionsEnabledBlock.includes('if (options?.updateDesiredState !== false) {')
       && setSuggestionsEnabledBlock.includes('this.desiredSuggestionsEnabled = enabled;')
+      && setSuggestionsEnabledBlock.includes('setSuggestionsDesiredEnabled(this.desiredSuggestionsEnabled);')
       && setSuggestionsEnabledBlock.includes('const pluginEnabled = pluginState?.enabled ?? false;')
       && setSuggestionsEnabledBlock.includes('if (pluginEnabled !== enabled) {')
       && setSuggestionsEnabledBlock.includes('enableSuggestionsPlugin(view);')
@@ -213,12 +216,20 @@ function run(): void {
   );
   assert(
     editorSource.includes('resetSuggestionsModuleState();')
+      && editorSource.includes('setSuggestionsDesiredEnabled(this.desiredSuggestionsEnabled);')
       && suggestionsSource.includes('export function resetSuggestionsModuleState(): void {')
       && suggestionsSource.includes('suggestionsModuleEnabled = false;')
+      && suggestionsSource.includes('let suggestionsDesiredEnabled = false;')
+      && suggestionsSource.includes('export function setSuggestionsDesiredEnabled(enabled: boolean): void {')
+      && suggestionsSource.includes('return pluginEnabled || suggestionsModuleEnabled || suggestionsDesiredEnabled;')
+      && suggestionsSource.includes('suggestionsDesiredEnabled = true;')
+      && suggestionsSource.includes('suggestionsDesiredEnabled = false;')
+      && authoredTrackerSource.includes("import { isSuggestionsEnabled } from './suggestions';")
+      && authoredTrackerSource.includes('return !isSuggestionsEnabled(state as never);')
       && editorSource.includes("this.scheduleDesiredSuggestionsReapply('load-document');")
       && updateShareEditGateBlock.includes('if (allowLocalEdits && this.desiredSuggestionsEnabled) {')
       && updateShareEditGateBlock.includes("this.scheduleDesiredSuggestionsReapply('share-edit-gate');"),
-    'Expected loadDocument to reset the module-level TC flag so stale suggestionsModuleEnabled from a previous doc does not leak across SPA navigation, while reapplying the desired Track Changes mode once share editing is live again',
+    'Expected loadDocument to reset the module-level TC flag while preserving the latched desired Track Changes state across plugin-side guards, including authored tracking, until share editing is live again',
   );
 
   assert(

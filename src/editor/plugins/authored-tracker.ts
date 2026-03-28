@@ -3,7 +3,7 @@ import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
 import type { MarkType, Slice, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 
 import { marksPluginKey } from './marks';
-import { suggestionsPluginKey } from './suggestions';
+import { isSuggestionsEnabled } from './suggestions';
 import { getCurrentActor } from '../actor';
 
 type PendingRange = { from: number; to: number; by: string };
@@ -52,8 +52,7 @@ function mergeRanges(ranges: PendingRange[]): PendingRange[] {
 }
 
 export function shouldTrackHumanAuthorship(state: { schema?: unknown }): boolean {
-  const suggestionsState = suggestionsPluginKey.getState(state as never);
-  return !(suggestionsState?.enabled ?? false);
+  return !isSuggestionsEnabled(state as never);
 }
 
 export const authoredTrackerPlugin = $prose(() => {

@@ -63,10 +63,21 @@ const PENDING_DELETE_INTENT_TTL_MS = 1500;
  * Updated synchronously by enableSuggestions/disableSuggestions.
  */
 let suggestionsModuleEnabled = false;
+let suggestionsDesiredEnabled = false;
 
 /** Check the module-level enabled flag (independent of plugin state). */
 export function isSuggestionsModuleEnabled(): boolean {
   return suggestionsModuleEnabled;
+}
+
+/** Check the desired TC state latched by the editor runtime. */
+export function isSuggestionsDesiredEnabled(): boolean {
+  return suggestionsDesiredEnabled;
+}
+
+/** Mirror the editor's intended TC mode into plugin-level guards. */
+export function setSuggestionsDesiredEnabled(enabled: boolean): void {
+  suggestionsDesiredEnabled = enabled;
 }
 
 export function resetSuggestionsInsertCoalescing(): void {
@@ -2414,14 +2425,14 @@ export function wrapTransactionForSuggestions(
 export function isSuggestionsEnabled(state: EditorState): boolean {
   const pluginState = suggestionsPluginKey.getState(state);
   const pluginEnabled = pluginState?.enabled ?? false;
-  // Module flag is the authoritative source — plugin state can lag behind
-  return pluginEnabled || suggestionsModuleEnabled;
+  return pluginEnabled || suggestionsModuleEnabled || suggestionsDesiredEnabled;
 }
 
 /**
  * Enable suggestions
  */
 export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {
+  suggestionsDesiredEnabled = true;
   suggestionsModuleEnabled = true;
   resetSuggestionsInsertCoalescing();
   const tr = view.state.tr.setMeta(suggestionsPluginKey, { enabled: true });
@@ -2432,6 +2443,7 @@ export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Tra
  * Disable suggestions
  */
 export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {
+  suggestionsDesiredEnabled = false;
   suggestionsModuleEnabled = false;
   resetSuggestionsInsertCoalescing();
   const tr = view.state.tr.setMeta(suggestionsPluginKey, { enabled: false });
@@ -2452,8 +2464,13 @@ export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Tr
  */
 export function toggleSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): boolean {
   const pluginEnabled = isSuggestionsEnabled(view.state);
-  const enabled = pluginEnabled || suggestionsModuleEnabled;
-  console.log('[suggestions.toggleSuggestions]', { pluginEnabled, suggestionsModuleEnabled, willDisable: enabled });
+  const enabled = pluginEnabled || suggestionsModuleEnabled || suggestionsDesiredEnabled;
+  console.log('[suggestions.toggleSuggestions]', {
+    pluginEnabled,
+    suggestionsModuleEnabled,
+    suggestionsDesiredEnabled,
+    willDisable: enabled,
+  });
   if (enabled) {
     disableSuggestions(view);
   } else {

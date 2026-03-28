@@ -192,6 +192,7 @@ function run(): void {
       && editorSource.includes('setSuggestionsDesiredEnabled,')
       && scheduleDesiredSuggestionsReapplyBlock.includes('if (!this.desiredSuggestionsEnabled || !this.editor) return;')
       && scheduleDesiredSuggestionsReapplyBlock.includes('if (this.isShareMode && !this.shareAllowLocalEdits) return;')
+      && scheduleDesiredSuggestionsReapplyBlock.includes('if (this.isSuggestionsPluginEnabled()) return;')
       && scheduleDesiredSuggestionsReapplyBlock.includes("const restored = this.setSuggestionsEnabled(true, { updateDesiredState: false });")
       && setSuggestionsEnabledBlock.includes('if (options?.updateDesiredState !== false) {')
       && setSuggestionsEnabledBlock.includes('this.desiredSuggestionsEnabled = enabled;')
@@ -200,8 +201,11 @@ function run(): void {
       && setSuggestionsEnabledBlock.includes('if (pluginEnabled !== enabled) {')
       && setSuggestionsEnabledBlock.includes('enableSuggestionsPlugin(view);')
       && setSuggestionsEnabledBlock.includes('disableSuggestionsPlugin(view);')
+      && setSuggestionsEnabledBlock.includes('currentEnabled = isSuggestionsPluginEnabledState(view.state);')
+      && editorSource.includes('private isSuggestionsPluginEnabled(): boolean {')
+      && editorSource.includes('enabled = isSuggestionsPluginEnabledState(view.state);')
       && setSuggestionsEnabledBlock.includes("console.log('[setSuggestionsEnabled.result]', currentEnabled ? 'enabled' : 'disabled');"),
-    'Expected Track Changes intent to be latched across reload/reconnect resets, with the shared suggestions setter still reading plugin state directly, dispatching the enable/disable transaction, and verifying the resulting state',
+    'Expected Track Changes reapply and verification to distinguish the real plugin-enabled state from the desired fallback state across reload/reconnect resets',
   );
 
   assert(
@@ -222,6 +226,7 @@ function run(): void {
       && suggestionsSource.includes('let suggestionsDesiredEnabled = false;')
       && suggestionsSource.includes('export function setSuggestionsDesiredEnabled(enabled: boolean): void {')
       && suggestionsSource.includes('return pluginEnabled || suggestionsModuleEnabled || suggestionsDesiredEnabled;')
+      && suggestionsSource.includes('export function isSuggestionsPluginEnabled(state: EditorState): boolean {')
       && suggestionsSource.includes('suggestionsDesiredEnabled = true;')
       && suggestionsSource.includes('suggestionsDesiredEnabled = false;')
       && authoredTrackerSource.includes("import { isSuggestionsEnabled } from './suggestions';")
@@ -284,6 +289,7 @@ function run(): void {
       && suggestionsAppendTransactionBlock.includes("const hasWrappedSuggestionTransaction = trs.some((tr) => tr.getMeta('suggestions-wrapped'));")
       && suggestionsAppendTransactionBlock.includes("if (metaType === 'INTERNAL') return false;")
       && suggestionsAppendTransactionBlock.includes("if (metaType === 'SET_METADATA' && tr.getMeta('suggestions-wrapped')) return false;")
+      && suggestionsAppendTransactionBlock.includes('const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled && !suggestionsDesiredEnabled;')
       && suggestionsAppendTransactionBlock.includes("const hasHistoryChange = trs.some((tr) => tr.getMeta('history$') !== undefined);")
       && suggestionsAppendTransactionBlock.includes("console.log('[suggestions.appendTransaction.historyRestoreEnable]', {")
       && suggestionsAppendTransactionBlock.includes('suggestionsModuleEnabled = true;')

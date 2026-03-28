@@ -2,7 +2,12 @@ import { Schema } from '@milkdown/kit/prose/model';
 import { EditorState, Plugin } from '@milkdown/kit/prose/state';
 
 import { shouldTrackHumanAuthorship } from '../editor/plugins/authored-tracker.js';
-import { setSuggestionsDesiredEnabled, suggestionsPluginKey } from '../editor/plugins/suggestions.js';
+import {
+  isSuggestionsEnabled,
+  isSuggestionsPluginEnabled,
+  setSuggestionsDesiredEnabled,
+  suggestionsPluginKey,
+} from '../editor/plugins/suggestions.js';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -43,8 +48,18 @@ function run(): void {
   setSuggestionsDesiredEnabled(false);
   assert(shouldTrackHumanAuthorship(createState(false)) === true, 'Expected authored tracking when suggestions are off');
   assert(shouldTrackHumanAuthorship(createState(true)) === false, 'Expected authored tracking to be disabled when suggestions are on');
+  assert(isSuggestionsPluginEnabled(createState(false)) === false, 'Expected raw plugin-state helper to report disabled suggestions');
+  assert(isSuggestionsPluginEnabled(createState(true)) === true, 'Expected raw plugin-state helper to report enabled suggestions');
 
   setSuggestionsDesiredEnabled(true);
+  assert(
+    isSuggestionsEnabled(createState(false)) === true,
+    'Expected effective suggestions state to stay enabled while desired track changes is latched on',
+  );
+  assert(
+    isSuggestionsPluginEnabled(createState(false)) === false,
+    'Expected raw plugin-state helper to stay false until the plugin itself is re-enabled',
+  );
   assert(
     shouldTrackHumanAuthorship(createState(false)) === false,
     'Expected desired track changes state to disable authored tracking even before the plugin state catches up',

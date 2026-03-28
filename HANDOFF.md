@@ -1,11 +1,51 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `7c93f9cbb94d13c9f7146650eacbf0938c5f5bfff190ec0d31eff1dec1b7d7b8`
+- Live client bundle on `proof-test.mintresearch.org`: `6aaddac910309d14c8dabf457753e32930165743646c4689935f8b76459e06dc`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix32 actual-plugin-state reapply follow-up
+
+Shared reports:
+- browser QA confirmed Bug 16 was fixed by fix30
+- Root Cause A was still live after hard refresh: Track Changes looked active, but typed insertions still landed as plain black text with zero suggestion spans
+
+Requested:
+- finish the insert-tracking reload race by distinguishing the real ProseMirror suggestions-plugin state from the fallback desired/module state
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - added `isSuggestionsPluginEnabled(state)` to read only the real plugin state
+  - `toggleSuggestions()` now uses the real plugin state instead of the OR-combined fallback helper
+  - `appendTransaction()` now treats `desiredSuggestionsEnabled` as enough to block the TC-off cleanup path, so freshly wrapped suggestions are not stripped during a reload/reconnect gap
+- `src/editor/index.ts`
+  - `scheduleDesiredSuggestionsReapply()` now skips only when the real plugin state is already enabled
+  - `setSuggestionsEnabled()` now verifies success against the real plugin state after dispatch, not the OR-combined helper
+  - public `isSuggestionsEnabled()` now returns the real plugin state, which matches the QA/debug expectation for `window.__PROOF_EDITOR__.isSuggestionsEnabled()`
+- `src/tests/authored-tracker-suggestions-mode.test.ts`
+  - added assertions covering the split between effective TC intent and raw plugin-enabled state
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - extended source guards for the new plugin-state helper and the desired-state cleanup/reapply behavior
+
+Why this likely addresses the remaining typed-insert failure:
+- before this patch, reload/reconnect code could latch desired TC state, reset the underlying plugin to disabled, and then falsely conclude that TC was already restored because the fallback helper returned true
+- in the same gap, wrapped suggestion transactions could still be scrubbed by the TC-off appendTransaction cleanup because that cleanup only checked plugin/module state
+- the result was the exact QA symptom: the UI looked like TC was on, but typing still produced plain text with no insertion suggestion
+
+Verified locally:
+- `npx tsx src/tests/authored-tracker-suggestions-mode.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npx tsx src/tests/track-changes-structural-delete-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npm run build`
+
+Scope note:
+- this is still Root Cause A work for typed insertion tracking after hard refresh / share reconnect
+- cold-reload persistence and structural paragraph edits remain separate lanes
 
 ## Fix31 plugin-side TC intent follow-up
 

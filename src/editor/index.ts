@@ -59,6 +59,7 @@ import {
   disableSuggestions as disableSuggestionsPlugin,
   toggleSuggestions as toggleSuggestionsPlugin,
   isSuggestionsEnabled as isSuggestionsEnabledPlugin,
+  isSuggestionsPluginEnabled as isSuggestionsPluginEnabledState,
   resetSuggestionsInsertCoalescing,
   hasActiveInsertCoalescingCandidate,
   hasRecentSuggestionsInsertCoalescingState,
@@ -7312,7 +7313,7 @@ class ProofEditorImpl implements ProofEditor {
       if (!this.desiredSuggestionsEnabled || !this.editor) return;
       if (this.isReadOnly) return;
       if (this.isShareMode && !this.shareAllowLocalEdits) return;
-      if (this.isSuggestionsEnabled()) return;
+      if (this.isSuggestionsPluginEnabled()) return;
 
       const restored = this.setSuggestionsEnabled(true, { updateDesiredState: false });
       console.log('[restoreDesiredSuggestionsEnabled]', {
@@ -7356,7 +7357,7 @@ class ProofEditorImpl implements ProofEditor {
           disableSuggestionsPlugin(view);
         }
       }
-      currentEnabled = isSuggestionsEnabledPlugin(view.state);
+      currentEnabled = isSuggestionsPluginEnabledState(view.state);
       if (currentEnabled && getSuggestionDisplayMode(view.state) === 'all') {
         setSuggestionDisplayMode(view, 'simple');
         view.dom.dataset.trackChangesView = 'simple';
@@ -7408,12 +7409,16 @@ class ProofEditorImpl implements ProofEditor {
    * Check if suggestions are enabled
    */
   isSuggestionsEnabled(): boolean {
+    return this.isSuggestionsPluginEnabled();
+  }
+
+  private isSuggestionsPluginEnabled(): boolean {
     if (!this.editor) return false;
 
     let enabled = false;
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      enabled = isSuggestionsEnabledPlugin(view.state);
+      enabled = isSuggestionsPluginEnabledState(view.state);
     });
     return enabled;
   }

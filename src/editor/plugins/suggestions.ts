@@ -2428,6 +2428,12 @@ export function isSuggestionsEnabled(state: EditorState): boolean {
   return pluginEnabled || suggestionsModuleEnabled || suggestionsDesiredEnabled;
 }
 
+/** Check the underlying ProseMirror suggestions plugin state only. */
+export function isSuggestionsPluginEnabled(state: EditorState): boolean {
+  const pluginState = suggestionsPluginKey.getState(state);
+  return pluginState?.enabled ?? false;
+}
+
 /**
  * Enable suggestions
  */
@@ -2463,7 +2469,7 @@ export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Tr
  * Toggle suggestions
  */
 export function toggleSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): boolean {
-  const pluginEnabled = isSuggestionsEnabled(view.state);
+  const pluginEnabled = isSuggestionsPluginEnabled(view.state);
   const enabled = pluginEnabled || suggestionsModuleEnabled || suggestionsDesiredEnabled;
   console.log('[suggestions.toggleSuggestions]', {
     pluginEnabled,
@@ -2520,7 +2526,7 @@ export const suggestionsPlugin = $prose(() => {
 
       // Use module flag as fallback — catches cases where plugin state
       // reads return stale data in the dispatch interceptor
-      const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled;
+      const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled && !suggestionsDesiredEnabled;
       if (effectivelyDisabled) {
         const hasHistoryChange = trs.some((tr) => tr.getMeta('history$') !== undefined);
         // When TC is off, strip any suggestion marks that leaked onto new content.

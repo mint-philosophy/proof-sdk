@@ -176,18 +176,29 @@ function run(): void {
     'Expected the Track Changes pill to activate on pointerdown and route through the canonical suggestions state setter',
   );
 
+  const scheduleDesiredSuggestionsReapplyBlock = sliceBetween(
+    editorSource,
+    '  private scheduleDesiredSuggestionsReapply(reason: string): void {',
+    '\n  private setSuggestionsEnabled(',
+  );
   const setSuggestionsEnabledBlock = sliceBetween(
     editorSource,
-    '  private setSuggestionsEnabled(enabled: boolean): boolean {',
+    '  private setSuggestionsEnabled(',
     '\n  /**\n   * Toggle suggestion mode\n   */',
   );
   assert(
-    setSuggestionsEnabledBlock.includes('const pluginEnabled = pluginState?.enabled ?? false;')
+    editorSource.includes('private desiredSuggestionsEnabled: boolean = false;')
+      && scheduleDesiredSuggestionsReapplyBlock.includes('if (!this.desiredSuggestionsEnabled || !this.editor) return;')
+      && scheduleDesiredSuggestionsReapplyBlock.includes('if (this.isShareMode && !this.shareAllowLocalEdits) return;')
+      && scheduleDesiredSuggestionsReapplyBlock.includes("const restored = this.setSuggestionsEnabled(true, { updateDesiredState: false });")
+      && setSuggestionsEnabledBlock.includes('if (options?.updateDesiredState !== false) {')
+      && setSuggestionsEnabledBlock.includes('this.desiredSuggestionsEnabled = enabled;')
+      && setSuggestionsEnabledBlock.includes('const pluginEnabled = pluginState?.enabled ?? false;')
       && setSuggestionsEnabledBlock.includes('if (pluginEnabled !== enabled) {')
       && setSuggestionsEnabledBlock.includes('enableSuggestionsPlugin(view);')
       && setSuggestionsEnabledBlock.includes('disableSuggestionsPlugin(view);')
       && setSuggestionsEnabledBlock.includes("console.log('[setSuggestionsEnabled.result]', currentEnabled ? 'enabled' : 'disabled');"),
-    'Expected the shared suggestions setter to read plugin state directly (not OR-combined isSuggestionsEnabled), dispatch the plugin enable/disable transaction, and verify the resulting state',
+    'Expected Track Changes intent to be latched across reload/reconnect resets, with the shared suggestions setter still reading plugin state directly, dispatching the enable/disable transaction, and verifying the resulting state',
   );
 
   assert(
@@ -195,11 +206,19 @@ function run(): void {
     'Expected __PROOF_EDITOR__ to expose isSuggestionsEnabled so QA can verify the actual suggestions plugin state',
   );
 
+  const updateShareEditGateBlock = sliceBetween(
+    editorSource,
+    '  private updateShareEditGate(): void {',
+    '\n  private ensureShareWebSocketConnection(): void {',
+  );
   assert(
     editorSource.includes('resetSuggestionsModuleState();')
       && suggestionsSource.includes('export function resetSuggestionsModuleState(): void {')
-      && suggestionsSource.includes('suggestionsModuleEnabled = false;'),
-    'Expected loadDocument to reset the module-level TC flag so stale suggestionsModuleEnabled from a previous doc does not leak across SPA navigation',
+      && suggestionsSource.includes('suggestionsModuleEnabled = false;')
+      && editorSource.includes("this.scheduleDesiredSuggestionsReapply('load-document');")
+      && updateShareEditGateBlock.includes('if (allowLocalEdits && this.desiredSuggestionsEnabled) {')
+      && updateShareEditGateBlock.includes("this.scheduleDesiredSuggestionsReapply('share-edit-gate');"),
+    'Expected loadDocument to reset the module-level TC flag so stale suggestionsModuleEnabled from a previous doc does not leak across SPA navigation, while reapplying the desired Track Changes mode once share editing is live again',
   );
 
   assert(
@@ -284,7 +303,8 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('const carriesIncomingSuggestionMarks = Boolean(tr?.docChanged) && transactionCarriesInsertedSuggestionMarks(tr);')
       && setupSuggestionsInterceptorBlock.includes("const isRemoteContentChange = Boolean(tr?.docChanged) && (")
       && setupSuggestionsInterceptorBlock.includes('|| (yjsOrigin.isYjsOrigin && carriesIncomingSuggestionMarks)')
-      && setupSuggestionsInterceptorBlock.includes('const suggestionsEnabled = isSuggestionsEnabledPlugin(view.state);')
+      && setupSuggestionsInterceptorBlock.includes('const suggestionsEnabled = this.desiredSuggestionsEnabled')
+      && setupSuggestionsInterceptorBlock.includes('|| isSuggestionsEnabledPlugin(view.state);')
       && !setupSuggestionsInterceptorBlock.includes('const suggestionsEnabled = pluginEnabled && isSuggestionsModuleEnabled();')
       && setupSuggestionsInterceptorBlock.includes('const isMarksOnlyChange = marksMeta !== undefined && !hasReplaceStep;')
       && setupSuggestionsInterceptorBlock.includes('if (isRemoteContentChange) {')
@@ -298,7 +318,7 @@ function run(): void {
       && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
-    'Expected the suggestions interceptor to pass through collab/template system transactions, while deriving TC enabled state from the canonical plugin/module helper so tracked typing cannot diverge from tracked deletes',
+    'Expected the suggestions interceptor to pass through collab/template system transactions, while honoring the latched desired Track Changes state so tracked typing survives transient share/collab state resets',
   );
   assert(
     suggestionsSource.includes('function sliceRepresentsWrappedPlainText(nodes?: SliceNode[]): boolean {')

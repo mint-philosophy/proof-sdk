@@ -1147,6 +1147,7 @@ class ProofEditorImpl implements ProofEditor {
   private isReadOnly: boolean = false;
   private shareAllowLocalEdits: boolean = true;
   private shareContentFilterEnabled: boolean = false;
+  private desiredSuggestionsEnabled: boolean = false;
   private readOnlyBanner: HTMLElement | null = null;
   private reviewLockCount: number = 0;
   private reviewLockReason: string | null = null;
@@ -2875,6 +2876,9 @@ class ProofEditorImpl implements ProofEditor {
     this.updateEditableState();
     this.updateShareBannerTitleDisplay();
     this.updateShareBannerTrackChangesDisplay();
+    if (allowLocalEdits && this.desiredSuggestionsEnabled) {
+      this.scheduleDesiredSuggestionsReapply('share-edit-gate');
+    }
   }
 
   private ensureShareWebSocketConnection(): void {
@@ -5908,7 +5912,8 @@ class ProofEditorImpl implements ProofEditor {
         );
         const isSuggestionMetaChange = tr?.getMeta?.(suggestionsPluginKey) !== undefined;
         const isHistoryChange = tr?.getMeta?.('history$') !== undefined;
-        const suggestionsEnabled = isSuggestionsEnabledPlugin(view.state);
+        const suggestionsEnabled = this.desiredSuggestionsEnabled
+          || isSuggestionsEnabledPlugin(view.state);
         const incomingYjsChangeSummary = yjsOrigin.isYjsOrigin && tr?.docChanged
           ? summarizeIncomingYjsDocChange(tr)
           : [];
@@ -6549,6 +6554,9 @@ class ProofEditorImpl implements ProofEditor {
 
     });
     this.suppressMarksSync = false;
+    if (this.desiredSuggestionsEnabled) {
+      this.scheduleDesiredSuggestionsReapply('load-document');
+    }
   }
 
   getContent(): string {
@@ -7293,7 +7301,32 @@ class ProofEditorImpl implements ProofEditor {
     this.setSuggestionsEnabled(false);
   }
 
-  private setSuggestionsEnabled(enabled: boolean): boolean {
+  private scheduleDesiredSuggestionsReapply(reason: string): void {
+    if (!this.desiredSuggestionsEnabled || !this.editor) return;
+    if (this.isReadOnly) return;
+    if (this.isShareMode && !this.shareAllowLocalEdits) return;
+
+    queueMicrotask(() => {
+      if (!this.desiredSuggestionsEnabled || !this.editor) return;
+      if (this.isReadOnly) return;
+      if (this.isShareMode && !this.shareAllowLocalEdits) return;
+      if (this.isSuggestionsEnabled()) return;
+
+      const restored = this.setSuggestionsEnabled(true, { updateDesiredState: false });
+      console.log('[restoreDesiredSuggestionsEnabled]', {
+        reason,
+        restored,
+      });
+    });
+  }
+
+  private setSuggestionsEnabled(
+    enabled: boolean,
+    options?: { updateDesiredState?: boolean },
+  ): boolean {
+    if (options?.updateDesiredState !== false) {
+      this.desiredSuggestionsEnabled = enabled;
+    }
     if (!this.editor) {
       console.warn('[setSuggestionsEnabled] Editor not initialized');
       return false;
@@ -7362,6 +7395,7 @@ class ProofEditorImpl implements ProofEditor {
         view.focus();
       }
     });
+    this.desiredSuggestionsEnabled = enabled;
     this.updateShareBannerTrackChangesDisplay();
     return enabled;
   }

@@ -1,11 +1,46 @@
 ## Current state
 
-- Live browser-verified client bundle on `proof-test.mintresearch.org`: `b7e29754845c6c9dc477c96281a55d146c30f2295b95581e8b1677e94f4ceace`
+- Live client bundle on `proof-test.mintresearch.org`: `08543bb5b2a284040e7aefd414da86869328d2c29b0427ce20330b1c051bef16`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix29 intended-TC-state follow-up
+
+Shared reports:
+- `/tmp/codex-qa-stress-test-v4.md`
+
+Requested:
+- address the still-open Root Cause A lane where share-doc Track Changes could appear enabled, but typed and pasted insertions still fell through as direct edits because the live suggestions state had been cleared by a disruptive share/collab path
+
+What changed:
+- `src/editor/index.ts`
+  - added a `desiredSuggestionsEnabled` latch so Track Changes behaves like a persistent intended mode, not a fragile one-shot plugin flag
+  - the suggestions interceptor now honors that desired state for local doc-changing transactions, so tracked inserts still wrap even if the live plugin/module flags were transiently reset
+  - `loadDocument()` now schedules a Track Changes restore when the desired mode is on, which should cover canonical reloads and share mutation result loads
+  - `updateShareEditGate()` now re-applies the desired Track Changes mode once share editing is live again after collab reconnect or hydration
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - added source guards for the desired-state latch, the share-edit-gate restore, the load-document restore, and the interceptor’s new desired-state fallback
+
+Why this likely addresses the current browser report:
+- the QA pattern points to a reset-after-toggle failure more than a pure paste bug:
+  - `Accept All` was already observed switching the editor back to Edit mode
+  - share mutation apply paths call `loadDocument()`, which explicitly resets the module-level suggestions flag
+  - nothing previously restored the user’s intended TC mode after that reset unless pending suggestions happened to force it back on
+- with this patch, local insert wrapping no longer depends on the live plugin/module flags being continuously intact across share/collab resets
+
+Verified locally:
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npx tsx src/tests/authored-tracker-suggestions-mode.test.ts`
+- `npm run build`
+
+Scope note:
+- this is targeted at Root Cause A for typed/pasted insertions plus the observed TC-mode drop after disruptive share loads
+- cold-reload mark persistence and cross-paragraph structural edit tracking remain separate lanes
 
 ## Fix27 hydration follow-up
 

@@ -304,6 +304,7 @@ function run(): void {
   assert(
     suggestionsAppendTransactionBlock.includes('const hasBlockingMarksMeta = trs.some((tr) => {')
       && suggestionsAppendTransactionBlock.includes("const hasWrappedSuggestionTransaction = trs.some((tr) => tr.getMeta('suggestions-wrapped'));")
+      && suggestionsAppendTransactionBlock.includes("const hasNativeTypedInputPassthrough = trs.some((tr) => tr.getMeta('proof-native-typed-input') === true);")
       && suggestionsAppendTransactionBlock.includes("if (metaType === 'INTERNAL') return false;")
       && suggestionsAppendTransactionBlock.includes("if (metaType === 'SET_METADATA' && tr.getMeta('suggestions-wrapped')) return false;")
       && suggestionsAppendTransactionBlock.includes('const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled && !suggestionsDesiredEnabled;')
@@ -316,20 +317,24 @@ function run(): void {
       && suggestionsAppendTransactionBlock.includes('transactionCarriesInsertedSuggestionMarks(tr)')
       && suggestionsAppendTransactionBlock.includes('const splitMergeTr = buildAdjacentSplitInsertMergeTransaction(oldState, newState);')
       && suggestionsAppendTransactionBlock.includes('if (hasWrappedSuggestionTransaction || hasRemoteSuggestionInsert) {')
+      && suggestionsAppendTransactionBlock.includes('if (hasNativeTypedInputPassthrough) {')
       && suggestionsAppendTransactionBlock.includes('|| isExplicitYjsChangeOriginTransaction(tr)')
       && !suggestionsAppendTransactionBlock.includes("|| tr.getMeta(marksPluginKey) !== undefined"),
-    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions, still allow split-insert healing after wrapped local typing, and skip explicit Yjs change-origin echoes plus raw y-sync transactions that already carry incoming suggestion marks',
+    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions, stand down for the first native typed-input transaction, still allow split-insert healing after wrapped local typing, and skip explicit Yjs change-origin echoes plus raw y-sync transactions that already carry incoming suggestion marks',
   );
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
   assert(
     editorSource.includes('shouldPassthroughPendingNativeTextInputTransaction,')
-      && editorSource.includes('wrapPendingNativeTextInputTransaction,')
+      && editorSource.includes('buildNativeTextInputFollowupWrapTransaction,')
       && setupSuggestionsInterceptorBlock.includes('if (shouldPassthroughPendingNativeTextInputTransaction(beforeState, tr)) {')
-      && setupSuggestionsInterceptorBlock.includes('const wrappedNativeTextInputTr = wrapPendingNativeTextInputTransaction(beforeState, tr);')
-      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.wrapNativeTextInput]', {")
-      && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(wrappedNativeTextInputTr ?? tr);'),
-    'Expected the suggestions interceptor to detect the one native typed-insert transaction and wrap that existing insertion in place, rather than passing it through to appendTransaction and synthesizing a second visible character later',
+      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.scheduleNativeTextInputWrap]', {")
+      && setupSuggestionsInterceptorBlock.includes("tr.setMeta('proof-native-typed-input', true);")
+      && setupSuggestionsInterceptorBlock.includes('queueMicrotask(() => {')
+      && setupSuggestionsInterceptorBlock.includes('const followupTr = buildNativeTextInputFollowupWrapTransaction(beforeState, view.state);')
+      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.followupNativeTextInputWrap]', {")
+      && setupSuggestionsInterceptorBlock.includes("followupTr.setMeta('addToHistory', false);"),
+    'Expected the suggestions interceptor to let the native typed-insert transaction commit untouched first, then schedule a mark-only follow-up wrap after the DOM/state have settled, avoiding same-dispatch duplication',
   );
   const preserveInsertCoalescingBlock = sliceBetween(
     editorSource,

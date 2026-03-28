@@ -67,7 +67,7 @@ import {
   wrapTransactionForSuggestions,
   shouldSuppressHandledTextInputEcho,
   shouldPassthroughPendingNativeTextInputTransaction,
-  wrapPendingNativeTextInputTransaction,
+  buildNativeTextInputFollowupWrapTransaction,
   isSuggestionsModuleEnabled,
   setSuggestionsDesiredEnabled,
   resetSuggestionsModuleState,
@@ -6027,14 +6027,23 @@ class ProofEditorImpl implements ProofEditor {
 
           if (shouldPassthroughPendingNativeTextInputTransaction(beforeState, tr)) {
             clearPendingDomSuggestionSelection();
-            const wrappedNativeTextInputTr = wrapPendingNativeTextInputTransaction(beforeState, tr);
-            console.log('[tc.dispatch.wrapNativeTextInput]', {
+            console.log('[tc.dispatch.scheduleNativeTextInputWrap]', {
               suggestionsEnabled,
               docChanged: true,
               selFrom: tr.selection?.from,
-              wrapped: Boolean(wrappedNativeTextInputTr),
             });
-            dispatchWithRevision(wrappedNativeTextInputTr ?? tr);
+            tr.setMeta('proof-native-typed-input', true);
+            dispatchWithRevision(tr);
+            queueMicrotask(() => {
+              const followupTr = buildNativeTextInputFollowupWrapTransaction(beforeState, view.state);
+              if (!followupTr) return;
+              followupTr.setMeta('addToHistory', false);
+              console.log('[tc.dispatch.followupNativeTextInputWrap]', {
+                suggestionsEnabled: this.desiredSuggestionsEnabled || isSuggestionsEnabledPlugin(view.state),
+                selFrom: followupTr.selection?.from,
+              });
+              dispatchWithRevision(followupTr);
+            });
             return;
           }
 

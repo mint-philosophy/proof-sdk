@@ -1758,6 +1758,13 @@ export function __debugWrapPendingNativeTextInputTransaction(
   return wrapPendingNativeTextInputTransaction(oldState, tr);
 }
 
+export function buildNativeTextInputFollowupWrapTransaction(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  return buildPlainInsertionSuggestionFallbackTransaction(oldState, newState);
+}
+
 function buildPlainInsertionSuggestionFallbackTransaction(
   oldState: EditorState,
   newState: EditorState,
@@ -3101,6 +3108,7 @@ export const suggestionsPlugin = $prose(() => {
       }
       if (!trs.some((tr) => tr.docChanged)) return null;
       const hasWrappedSuggestionTransaction = trs.some((tr) => tr.getMeta('suggestions-wrapped'));
+      const hasNativeTypedInputPassthrough = trs.some((tr) => tr.getMeta('proof-native-typed-input') === true);
       const hasBlockingMarksMeta = trs.some((tr) => {
         const meta = tr.getMeta(marksPluginKey);
         if (meta === undefined) return false;
@@ -3114,6 +3122,9 @@ export const suggestionsPlugin = $prose(() => {
         !isExplicitYjsChangeOriginTransaction(tr)
         && transactionCarriesInsertedSuggestionMarks(tr)
       );
+      if (hasNativeTypedInputPassthrough) {
+        return null;
+      }
       if (trs.some((tr) =>
         tr.getMeta('document-load') !== undefined
         || tr.getMeta('history$') !== undefined

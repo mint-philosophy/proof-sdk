@@ -1,9 +1,10 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `1a5db1ff7e8f2db989bd10702489ea3e1ad13b1fa14de3874512597bbff2fee2`
+- Live client bundle on `proof-test.mintresearch.org`: `01ff72a55211291ce16efce1642748aee6fc143dbb34e87a75d2cc1606644cf9`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
+  - `fix48` pending commit: defer native typed-input wrapping to a mark-only follow-up transaction
   - `bdea5d4` `fix47: wrap native typed inserts in place`
   - `ca60b7c` `fix46: passthrough native typed insert before wrapping`
   - `b32f272` `fix45: defer tracked typing to native prosemirror flow`
@@ -43,6 +44,45 @@ Why this is the right next step:
 - fix45 removed direct dispatch from `handleTextInput`, but the interceptor still treated the first native typing transaction like an arbitrary edit and wrapped it immediately
 - the existing plain-insert fallback already knows how to mark already-inserted text
 - the missing piece was letting that one native transaction reach appendTransaction first instead of synthesizing a second marked insertion on top of it
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-disabled-direct-edit.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npm run build`
+
+## Fix48 defer native typed-insert wrapping to a follow-up mark-only transaction
+
+Shared reports:
+- browser QA on fix47 still showed `YY` for a single typed character
+- the key new evidence was:
+  - `appendTransactionFallback` was gone
+  - the only remaining TC branch was `tc.dispatch.wrapNativeTextInput`
+  - the duplication still appeared as one native character plus one tracked character
+- that meant the remaining problem was timing, not a literal `insertText(...)` in the fallback helpers
+
+Requested:
+- let the matched native typed-insert transaction commit untouched first
+- skip same-cycle append fallback for that transaction
+- then run a mark-only follow-up wrap after the DOM/state settle
+
+What changed:
+- `src/editor/index.ts`
+  - the matched native text-input branch now logs `[tc.dispatch.scheduleNativeTextInputWrap]`
+  - it tags the native transaction with `proof-native-typed-input` and dispatches it unchanged
+  - it then schedules a `queueMicrotask(...)` follow-up that builds a mark-only wrap against `view.state`, sets `addToHistory: false`, and logs `[tc.dispatch.followupNativeTextInputWrap]`
+- `src/editor/plugins/suggestions.ts`
+  - added `buildNativeTextInputFollowupWrapTransaction(oldState, newState)` as a thin wrapper around the existing plain-insert mark-only fallback
+  - `appendTransaction` now detects `proof-native-typed-input` and returns `null` for that cycle so the same-cycle persistence fallback does not race the microtask wrap
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the source guard to require the new scheduled follow-up branch and the appendTransaction stand-down
+
+Why this is the right next step:
+- fix47 proved the native text-input matcher was correct and that the old fallback branch was no longer the only duplication source
+- the remaining plausible failure mode was trying to mutate the native typing transaction too early, while the browser/ProseMirror input reconciliation was still in flight
+- deferring the mark application preserves one real text insertion and converts it into a tracked insert only after that insertion is already stable in editor state
 
 Verified locally:
 - `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`

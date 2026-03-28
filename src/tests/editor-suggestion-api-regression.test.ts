@@ -266,11 +266,15 @@ function run(): void {
       && resyncPendingInsertMetadataBlock.includes("filter(([, mark]) => mark?.kind === 'insert' && mark?.status === 'pending')")
       && resyncPendingInsertMetadataBlock.includes('const localMetadata = getMarkMetadataWithQuotes(view.state);')
       && resyncPendingInsertMetadataBlock.includes('const syncedMetadata = syncInsertSuggestionMetadataFromDoc(view.state.doc, localMetadata, insertIds);')
-      && resyncPendingInsertMetadataBlock.includes('setMarkMetadata(view, syncedMetadata);')
+      && editorSource.includes('preservePendingRemoteInsertMetadata,')
+      && editorSource.includes('mergeResyncedPendingInsertServerMarks,')
+      && resyncPendingInsertMetadataBlock.includes('const preservedMetadata = preservePendingRemoteInsertMetadata(sourceMarks, syncedMetadata, insertIds);')
+      && resyncPendingInsertMetadataBlock.includes('setMarkMetadata(view, preservedMetadata);')
+      && resyncPendingInsertMetadataBlock.includes('this.lastReceivedServerMarks = mergeResyncedPendingInsertServerMarks(')
       && applyLatestCollabMarksBlock.includes('this.applyExternalMarks(this.lastReceivedServerMarks);')
       && !applyLatestCollabMarksBlock.includes('this.applyExternalMarks(this.lastReceivedServerMarks, { pruneMissingSuggestions: true });')
       && applyLatestCollabMarksBlock.includes('this.resyncPendingInsertMetadataAfterRemoteApply(this.lastReceivedServerMarks);'),
-    'Expected live collab mark application to avoid pruning missing pending suggestions while still resyncing pending insert metadata from the live doc',
+    'Expected live collab mark application to avoid pruning missing pending insert ids when the live doc lags behind remote metadata, while still resyncing the insert ids that are visible in the document',
   );
 
   assert(

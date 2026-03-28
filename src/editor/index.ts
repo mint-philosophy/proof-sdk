@@ -105,6 +105,10 @@ import {
   normalizeShareCollabHydrationText,
   shouldTreatShareCollabAsHydrated,
 } from './share-collab-hydration';
+import {
+  mergeResyncedPendingInsertServerMarks,
+  preservePendingRemoteInsertMetadata,
+} from './share-collab-insert-metadata';
 import type { Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { TextSelection } from '@milkdown/kit/prose/state';
@@ -5200,20 +5204,17 @@ class ProofEditorImpl implements ProofEditor {
       const view = ctx.get(editorViewCtx);
       const localMetadata = getMarkMetadataWithQuotes(view.state);
       const syncedMetadata = syncInsertSuggestionMetadataFromDoc(view.state.doc, localMetadata, insertIds);
-      if (syncedMetadata === localMetadata) return;
-
-      setMarkMetadata(view, syncedMetadata);
-
-      const nextServerMarks = { ...this.lastReceivedServerMarks };
-      for (const id of insertIds) {
-        const synced = syncedMetadata[id];
-        if (synced?.kind === 'insert') {
-          nextServerMarks[id] = { ...nextServerMarks[id], ...synced };
-        } else {
-          delete nextServerMarks[id];
-        }
+      const preservedMetadata = preservePendingRemoteInsertMetadata(sourceMarks, syncedMetadata, insertIds);
+      if (preservedMetadata !== localMetadata) {
+        setMarkMetadata(view, preservedMetadata);
       }
-      this.lastReceivedServerMarks = nextServerMarks;
+
+      this.lastReceivedServerMarks = mergeResyncedPendingInsertServerMarks(
+        this.lastReceivedServerMarks,
+        sourceMarks,
+        preservedMetadata,
+        insertIds,
+      );
     });
   }
 

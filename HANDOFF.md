@@ -1,11 +1,51 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `8d49822a3183fa90b29b26582b9e33ef5e4f468a21acd8f33818995688b229e4`
+- Live client bundle on `proof-test.mintresearch.org`: `406b33d9d9c5f7c51c82d99a2c508c42d228745a734fda63895d6dceddd9ebc6`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix35 preserve missing remote insert metadata follow-up
+
+Shared reports:
+- browser QA on fix34: typed insert suggestions now appear locally, but warm collab sync to a fresh tab still drops most of them
+- paste suggestions survive, but fragmented typed insert suggestions often disappear across Yjs/collab propagation
+- the fresh-tab failure indicates a remote metadata/apply problem, not only the local TC-off strip path
+
+Requested:
+- stop remote mark resync from deleting pending insert ids just because the live doc has not surfaced them yet during collab/apply lag
+
+What changed:
+- `src/editor/share-collab-insert-metadata.ts`
+  - added `preservePendingRemoteInsertMetadata()` to keep authoritative remote pending insert marks when `syncInsertSuggestionMetadataFromDoc()` cannot currently resolve them from the live doc
+  - added `mergeResyncedPendingInsertServerMarks()` to merge updated live insert metadata back into the authoritative server mark cache without deleting still-pending remote inserts
+- `src/editor/index.ts`
+  - `resyncPendingInsertMetadataAfterRemoteApply()` now preserves missing remote insert ids instead of deleting them from local/server metadata during collab reapply
+- `src/tests/share-collab-insert-metadata.test.ts`
+  - added a focused regression proving:
+    - missing remote insert ids are preserved
+    - visible insert ids still merge their updated live ranges/content back into the server mark cache
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the source guard for the new remote-preservation path
+
+Why this likely addresses the new collab loss:
+- `syncInsertSuggestionMetadataFromDoc()` deletes insert metadata when the current live doc does not expose the insert id
+- on a fresh collab tab, the Yjs/content side can lag behind the authoritative remote marks snapshot
+- the old resync path treated that temporary absence as authoritative removal and deleted the insert from `lastReceivedServerMarks`
+- this patch keeps those pending insert ids alive until the doc catches up
+
+Verified locally:
+- `npx tsx src/tests/share-collab-insert-metadata.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/share-collab-hydration.test.ts`
+- `npx tsx src/tests/suggestions-disabled-strip-regression.test.ts`
+- `npm run build`
+
+Scope note:
+- this patch is aimed at warm collab/new-tab insert loss during remote metadata resync
+- local insert fragmentation is still a separate lane if the marks survive but remain split
 
 ## Fix34 TC-off strip diff guard follow-up
 

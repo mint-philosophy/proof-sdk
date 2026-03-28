@@ -4,6 +4,7 @@
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
+  - `fix52` pending commit: preserve exact metadata anchors for materialized pending inserts
   - `fix51` pending commit: move native typed-insert wrapping into appendTransaction on the matched passthrough cycle
   - `fix50` pending commit: restore dropped local insert marks after a remote plain-text self-echo replaces them
   - `fix49` `14e7edc`: carry the exact native typed-insert range into the delayed wrap
@@ -14,6 +15,29 @@
   - `273b3b6` `fix44: use prosemirror default text input transactions`
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix52 preserve exact metadata anchors for materialized pending inserts
+
+Shared reports:
+- browser QA on fix51 still showed the same widget-plus-bare-text duplicate
+- the strongest clue was that the appendTransaction wrap path was clearly firing, but the rendered insert still fell back to a widget on top of the plain native text
+
+What changed:
+- `src/editor/plugins/marks.ts`
+  - `normalizeMetadata(...)` now preserves `quote`, `startRel`, and `endRel` for pending insert suggestions when the live insert text exactly matches the stored insert content
+  - `buildCanonicalShareMarkMetadata(...)` now preserves the same exact anchors for materialized inline pending inserts even though the serialized `range` remains collapsed to the insertion anchor
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - added a regression asserting that the native typed-insert follow-up leaves metadata with `quote: 'Y'` and precise `startRel/endRel` anchors
+
+Why this is the right next step:
+- the local wrap transaction itself looked correct
+- the remaining duplicate pattern matched the marks plugin's metadata-only widget fallback
+- preserving exact relative anchors gives the renderer a way to re-resolve the actual inserted text span even if the live insert mark is lost momentarily
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npm run build`
 
 ## Fix51 move native typed-input wrapping onto appendTransaction
 

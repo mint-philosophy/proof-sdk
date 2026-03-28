@@ -289,6 +289,20 @@ function run(): void {
     0,
     'Expected no extra plain-text duplicate character after the delayed native typed-insert follow-up wrap',
   );
+  const explicitNativeMetadata = marksPluginKey.getState(explicitNativeWrappedState)?.metadata ?? {};
+  const explicitNativeInsertMetadata = Object.values(explicitNativeMetadata).find((value) => value?.kind === 'insert') as {
+    quote?: string;
+    startRel?: string;
+    endRel?: string;
+  } | undefined;
+  assert(
+    explicitNativeInsertMetadata?.quote === 'Y',
+    'Expected the delayed native typed-insert follow-up wrap to preserve the materialized insert quote in metadata',
+  );
+  assert(
+    explicitNativeInsertMetadata?.startRel === 'char:17' && explicitNativeInsertMetadata?.endRel === 'char:18',
+    'Expected the delayed native typed-insert follow-up wrap to preserve exact relative anchors for the inserted character',
+  );
 
   console.log('suggestions-text-input-echo-regression.test.ts passed');
 }

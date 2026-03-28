@@ -1491,6 +1491,45 @@ function normalizeMetadata(
       changed = true;
     }
 
+    if (
+      next[id].kind === 'insert'
+      && next[id].status !== 'accepted'
+      && next[id].status !== 'rejected'
+    ) {
+      const liveInsertSegments = collectSuggestionSegments(doc, id, 'insert');
+      const liveInsertRange = getSuggestionClusterRangeFromSegments(liveInsertSegments);
+      const liveInsertText = getSuggestionTextFromSegments(liveInsertSegments);
+      const normalizedStoredContent = typeof next[id].content === 'string'
+        ? normalizeQuote(next[id].content)
+        : '';
+      const normalizedLiveInsertText = typeof liveInsertText === 'string'
+        ? normalizeQuote(liveInsertText)
+        : '';
+      if (
+        liveInsertRange
+        && normalizedStoredContent.length > 0
+        && normalizedLiveInsertText === normalizedStoredContent
+      ) {
+        const relativeAnchors = buildRelativeAnchorMetadataForRange(doc, liveInsertRange);
+        const currentQuote = typeof next[id].quote === 'string' ? next[id].quote : '';
+        if (currentQuote !== normalizedLiveInsertText) {
+          next[id] = { ...next[id], quote: normalizedLiveInsertText };
+          changed = true;
+        }
+        if (
+          next[id].startRel !== relativeAnchors.startRel
+          || next[id].endRel !== relativeAnchors.endRel
+        ) {
+          next[id] = {
+            ...next[id],
+            ...(relativeAnchors.startRel ? { startRel: relativeAnchors.startRel } : {}),
+            ...(relativeAnchors.endRel ? { endRel: relativeAnchors.endRel } : {}),
+          };
+          changed = true;
+        }
+      }
+    }
+
     if (next[id].kind === 'comment') {
       if (typeof next[id].thread === 'string') {
         next[id] = {
@@ -2050,6 +2089,26 @@ export function buildCanonicalShareMarkMetadata(
       } else {
         delete nextEntry.range;
       }
+      const mappedFrom = liveRange ? mapPos(liveRange.from, 1) : null;
+      const mappedTo = liveRange ? mapPos(liveRange.to, -1) : null;
+      const mappedRange = (
+        typeof mappedFrom === 'number'
+        && typeof mappedTo === 'number'
+        && mappedTo > mappedFrom
+      )
+        ? { from: mappedFrom, to: mappedTo }
+        : null;
+      const normalizedStoredContent = typeof nextEntry.content === 'string'
+        ? normalizeQuote(nextEntry.content)
+        : '';
+      const normalizedMappedQuote = mappedRange
+        ? normalizeQuote(getTextForRange(canonicalDoc, mappedRange))
+        : '';
+      const preserveMaterializedInlineAnchors = Boolean(
+        mappedRange
+        && normalizedStoredContent.length > 0
+        && normalizedMappedQuote === normalizedStoredContent
+      );
       const preserveBlockStartAnchors = Boolean(
         liveRange
         && (() => {
@@ -2060,7 +2119,17 @@ export function buildCanonicalShareMarkMetadata(
           }
         })()
       );
-      if (!preserveBlockStartAnchors) {
+      if (preserveMaterializedInlineAnchors && mappedRange) {
+        nextEntry.quote = normalizedMappedQuote;
+        const relativeAnchors = buildRelativeAnchorMetadataForRange(canonicalDoc, mappedRange);
+        if (relativeAnchors.startRel && relativeAnchors.endRel) {
+          nextEntry.startRel = relativeAnchors.startRel;
+          nextEntry.endRel = relativeAnchors.endRel;
+        } else {
+          delete nextEntry.startRel;
+          delete nextEntry.endRel;
+        }
+      } else if (!preserveBlockStartAnchors) {
         delete nextEntry.quote;
         delete nextEntry.startRel;
         delete nextEntry.endRel;

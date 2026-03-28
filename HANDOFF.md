@@ -4,6 +4,7 @@
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
+  - `fix53` pending commit: route recent raw Yjs plain-text self-echoes through remote repair
   - `fix52` pending commit: preserve exact metadata anchors for materialized pending inserts
   - `fix51` pending commit: move native typed-insert wrapping into appendTransaction on the matched passthrough cycle
   - `fix50` pending commit: restore dropped local insert marks after a remote plain-text self-echo replaces them
@@ -15,6 +16,33 @@
   - `273b3b6` `fix44: use prosemirror default text input transactions`
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix53 route recent raw Yjs plain-text self-echoes through remote repair
+
+Shared reports:
+- browser QA on fix52 still showed the same widget-plus-bare-text duplicate
+- the remaining strong clue was the event order:
+  - local native passthrough + appendTransaction wrap fired first
+  - then `tc.yjsIncoming` fired once after the visible duplicate
+- that points to a raw Yjs self-echo arriving after local typing and bypassing the remote-repair path because it does not carry suggestion marks
+
+What changed:
+- `src/editor/index.ts`
+  - the interceptor now computes `shouldTreatYjsPlainTextEchoAsRemote` for recent raw Yjs doc changes that arrive inside the local typing/coalescing window, do not carry incoming suggestion marks, and are not explicit `isChangeOrigin` transactions
+  - those transactions now enter the remote-content branch and trigger `repairRemoteSuggestionBoundaryInheritance(...)` instead of falling through the local wrapping lane
+  - `tc.yjsIncoming` payload now records `treatedAsRemotePlainEcho`
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - source guard updated to require the new raw-Yjs-plain-echo remote classification
+
+Why this is the right next step:
+- the appendTransaction native wrap path was already active
+- the visible duplicate still survived until a subsequent raw Yjs event
+- the remote boundary-repair logic already knows how to restore dropped local insert marks, but it was never reached for raw `y-sync$` plain-text self-echoes
+
+Verified locally:
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/suggestion-boundaries-collab-regression.test.ts`
+- `npm run build`
 
 ## Fix52 preserve exact metadata anchors for materialized pending inserts
 

@@ -352,14 +352,21 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('const marksMetaType = (marksMeta && typeof marksMeta === \'object\' && !Array.isArray(marksMeta))')
       && setupSuggestionsInterceptorBlock.includes('const hasReplaceStep = Boolean(tr?.steps?.some((step: any) => {')
       && setupSuggestionsInterceptorBlock.includes('const carriesIncomingSuggestionMarks = Boolean(tr?.docChanged) && transactionCarriesInsertedSuggestionMarks(tr);')
+      && setupSuggestionsInterceptorBlock.includes('const shouldTreatYjsPlainTextEchoAsRemote = Boolean(tr?.docChanged)')
+      && setupSuggestionsInterceptorBlock.includes('&& yjsOrigin.isYjsOrigin')
+      && setupSuggestionsInterceptorBlock.includes('&& !isExplicitYjsChangeOriginTransaction(tr)')
+      && setupSuggestionsInterceptorBlock.includes('&& !carriesIncomingSuggestionMarks')
+      && setupSuggestionsInterceptorBlock.includes('&& this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(')
       && setupSuggestionsInterceptorBlock.includes("const isRemoteContentChange = Boolean(tr?.docChanged) && (")
       && setupSuggestionsInterceptorBlock.includes('|| (yjsOrigin.isYjsOrigin && carriesIncomingSuggestionMarks)')
+      && setupSuggestionsInterceptorBlock.includes('|| shouldTreatYjsPlainTextEchoAsRemote')
       && setupSuggestionsInterceptorBlock.includes('const suggestionsEnabled = this.desiredSuggestionsEnabled')
       && setupSuggestionsInterceptorBlock.includes('|| isSuggestionsEnabledPlugin(view.state);')
       && !setupSuggestionsInterceptorBlock.includes('const suggestionsEnabled = pluginEnabled && isSuggestionsModuleEnabled();')
       && setupSuggestionsInterceptorBlock.includes('const isMarksOnlyChange = marksMeta !== undefined && !hasReplaceStep;')
       && setupSuggestionsInterceptorBlock.includes('if (isRemoteContentChange) {')
-      && setupSuggestionsInterceptorBlock.includes('const preserveInsertCoalescing = this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(')
+      && setupSuggestionsInterceptorBlock.includes('const preserveInsertCoalescing = shouldTreatYjsPlainTextEchoAsRemote')
+      && setupSuggestionsInterceptorBlock.includes('|| this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(')
       && setupSuggestionsInterceptorBlock.includes('if (!preserveInsertCoalescing) {')
       && setupSuggestionsInterceptorBlock.includes('resetSuggestionsInsertCoalescing();')
       && setupSuggestionsInterceptorBlock.includes("if (marksMeta !== undefined && (marksMetaType !== 'INTERNAL' || !hasReplaceStep)) {")
@@ -371,7 +378,7 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);')
       && setupSuggestionsInterceptorBlock.includes('if (Boolean(tr?.docChanged) && shouldSuppressHandledTextInputEcho(beforeState, tr)) {')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.suppressHandledTextInputEcho]', {"),
-    'Expected the suggestions interceptor to pass through collab/template system transactions, honor the latched desired Track Changes state through share/collab resets, and suppress immediate handled-input duplicate echoes before either the local or remote transaction lanes apply them',
+    'Expected the suggestions interceptor to pass through collab/template system transactions, treat recent raw Yjs plain-text self-echoes as remote for repair, honor the latched desired Track Changes state through share/collab resets, and suppress immediate handled-input duplicate echoes before either the local or remote transaction lanes apply them',
   );
   assert(
     suggestionsSource.includes('function sliceRepresentsWrappedPlainText(nodes?: SliceNode[]): boolean {')

@@ -5906,9 +5906,20 @@ class ProofEditorImpl implements ProofEditor {
           return stepType === 'replace' || stepType === 'replaceAround';
         }));
         const carriesIncomingSuggestionMarks = Boolean(tr?.docChanged) && transactionCarriesInsertedSuggestionMarks(tr);
+        const shouldTreatYjsPlainTextEchoAsRemote = Boolean(tr?.docChanged)
+          && yjsOrigin.isYjsOrigin
+          && !isExplicitYjsChangeOriginTransaction(tr)
+          && !carriesIncomingSuggestionMarks
+          && this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(
+            view,
+            beforeState,
+            tr,
+            carriesIncomingSuggestionMarks,
+          );
         const isRemoteContentChange = Boolean(tr?.docChanged) && (
           isExplicitYjsChangeOriginTransaction(tr)
           || (yjsOrigin.isYjsOrigin && carriesIncomingSuggestionMarks)
+          || shouldTreatYjsPlainTextEchoAsRemote
         );
         const isMarksOnlyChange = marksMeta !== undefined && !hasReplaceStep;
         const isDocumentLoad = tr?.getMeta?.('document-load') !== undefined;
@@ -5943,6 +5954,7 @@ class ProofEditorImpl implements ProofEditor {
             source: yjsOrigin.source,
             explicitChangeOrigin: isExplicitYjsChangeOriginTransaction(tr),
             carriesIncomingSuggestionMarks,
+            treatedAsRemotePlainEcho: shouldTreatYjsPlainTextEchoAsRemote,
             isRemoteContentChange,
             suggestionsEnabled,
             changes: incomingYjsChangeSummary,
@@ -6001,12 +6013,13 @@ class ProofEditorImpl implements ProofEditor {
           // Don't intercept Yjs-origin collaborative transactions.
           if (isRemoteContentChange) {
             clearPendingDomSuggestionSelection();
-            const preserveInsertCoalescing = this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(
-              view,
-              beforeState,
-              tr,
-              carriesIncomingSuggestionMarks,
-            );
+            const preserveInsertCoalescing = shouldTreatYjsPlainTextEchoAsRemote
+              || this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(
+                view,
+                beforeState,
+                tr,
+                carriesIncomingSuggestionMarks,
+              );
             if (!preserveInsertCoalescing) {
               resetSuggestionsInsertCoalescing();
             }

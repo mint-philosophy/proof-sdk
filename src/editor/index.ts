@@ -65,6 +65,7 @@ import {
   hasRecentSuggestionsInsertCoalescingState,
   transactionCarriesInsertedSuggestionMarks,
   wrapTransactionForSuggestions,
+  buildTextPreservingInsertPersistenceTransaction,
   shouldSuppressHandledTextInputEcho,
   consumePendingNativeTextInputTransactionMatch,
   isSuggestionsModuleEnabled,
@@ -5833,6 +5834,20 @@ class ProofEditorImpl implements ProofEditor {
     beforeState: any,
     dispatchBase: (transaction: any) => void,
   ): void {
+    const textPreservingRepair = buildTextPreservingInsertPersistenceTransaction(beforeState, view.state);
+    if (textPreservingRepair) {
+      console.log('[tc.remoteInsertPersistenceRepair]', {
+        steps: textPreservingRepair.steps.map((step: any) => {
+          const stepJson = step?.toJSON?.() as { stepType?: string } | undefined;
+          return stepJson?.stepType ?? step?.constructor?.name ?? 'unknown';
+        }),
+      });
+      this.runWithTrackChangesSystemTransactionsSuppressed(() => {
+        dispatchBase(textPreservingRepair);
+      });
+      return;
+    }
+
     const currentMetadata = getMarkMetadata(view.state);
     const repair = buildRemoteInsertSuggestionBoundaryRepair(beforeState, view.state, currentMetadata, {
       preferLocalInsertGrowthAtSelection: Date.now() - this.lastLocalTypingAt < 1500,

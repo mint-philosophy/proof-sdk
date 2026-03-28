@@ -847,7 +847,7 @@ function expandChangedRange(doc: ProseMirrorNode, from: number, to: number): Mar
   };
 }
 
-function buildTextPreservingInsertPersistenceTransaction(
+export function buildTextPreservingInsertPersistenceTransaction(
   oldState: EditorState,
   newState: EditorState,
 ): Transaction | null {

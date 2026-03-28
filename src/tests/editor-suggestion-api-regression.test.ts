@@ -288,6 +288,7 @@ function run(): void {
       && suggestionsSource.includes('resetSuggestionsInsertCoalescing();')
       && suggestionsSource.includes("const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';")
       && suggestionsSource.includes("const NATIVE_TEXT_INPUT_MATCH_META = 'proof-native-typed-input-match';")
+      && suggestionsSource.includes('export function buildTextPreservingInsertPersistenceTransaction(')
       && handleTextInputBlock.includes('handleTextInput(view, from, to, text) {')
       && handleTextInputBlock.includes('return false;')
       && !handleTextInputBlock.includes('view.dispatch(')
@@ -330,6 +331,7 @@ function run(): void {
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
   assert(
     editorSource.includes('consumePendingNativeTextInputTransactionMatch,')
+      && editorSource.includes('buildTextPreservingInsertPersistenceTransaction,')
       && setupSuggestionsInterceptorBlock.includes('const nativeTextInputMatch = consumePendingNativeTextInputTransactionMatch(beforeState, tr);')
       && setupSuggestionsInterceptorBlock.includes('if (nativeTextInputMatch) {')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.passthroughNativeTextInput]', {")
@@ -343,6 +345,11 @@ function run(): void {
     editorSource,
     '  private shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(',
     '\n  /**\n   * Set up the suggestions interceptor to convert edits to tracked changes',
+  );
+  const repairRemoteSuggestionBoundaryInheritanceBlock = sliceBetween(
+    editorSource,
+    '  private repairRemoteSuggestionBoundaryInheritance(',
+    '\n  private shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(',
   );
   assert(
     setupSuggestionsInterceptorBlock.includes('const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (')
@@ -379,6 +386,15 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('if (Boolean(tr?.docChanged) && shouldSuppressHandledTextInputEcho(beforeState, tr)) {')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.suppressHandledTextInputEcho]', {"),
     'Expected the suggestions interceptor to pass through collab/template system transactions, treat recent raw Yjs plain-text self-echoes as remote for repair, honor the latched desired Track Changes state through share/collab resets, and suppress immediate handled-input duplicate echoes before either the local or remote transaction lanes apply them',
+  );
+  assert(
+    repairRemoteSuggestionBoundaryInheritanceBlock.includes('const textPreservingRepair = buildTextPreservingInsertPersistenceTransaction(beforeState, view.state);')
+      && repairRemoteSuggestionBoundaryInheritanceBlock.includes('if (textPreservingRepair) {')
+      && repairRemoteSuggestionBoundaryInheritanceBlock.includes("console.log('[tc.remoteInsertPersistenceRepair]', {")
+      && repairRemoteSuggestionBoundaryInheritanceBlock.includes('dispatchBase(textPreservingRepair);')
+      && repairRemoteSuggestionBoundaryInheritanceBlock.includes('const currentMetadata = getMarkMetadata(view.state);')
+      && repairRemoteSuggestionBoundaryInheritanceBlock.includes('const repair = buildRemoteInsertSuggestionBoundaryRepair(beforeState, view.state, currentMetadata, {'),
+    'Expected remote Yjs/content echoes that preserve text but strip local insert marks to run the existing text-preserving insert repair before boundary inheritance fallback',
   );
   assert(
     suggestionsSource.includes('function sliceRepresentsWrappedPlainText(nodes?: SliceNode[]): boolean {')

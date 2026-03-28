@@ -5,6 +5,7 @@ import { marksPluginKey } from '../editor/plugins/marks.js';
 import {
   buildNativeTextInputFollowupWrapTransaction,
   __debugBuildPlainInsertionSuggestionFallbackTransaction,
+  __debugBuildTextPreservingInsertPersistenceTransaction,
   __debugRememberHandledTextInputDispatch,
   __debugRememberHandledTextInputCall,
   __debugRememberPendingNativeTextInput,
@@ -288,6 +289,43 @@ function run(): void {
     explicitNativePlainChars,
     0,
     'Expected no extra plain-text duplicate character after the delayed native typed-insert follow-up wrap',
+  );
+  const suggestionType = schema.marks.proofSuggestion;
+  const nativeEchoStrippedState = explicitNativeWrappedState.apply(
+    explicitNativeWrappedState.tr.removeMark(18, 19, suggestionType),
+  );
+  const nativeEchoRepairTr = __debugBuildTextPreservingInsertPersistenceTransaction(
+    explicitNativeWrappedState,
+    nativeEchoStrippedState,
+  );
+  assert(
+    nativeEchoRepairTr !== null,
+    'Expected the text-preserving insert repair helper to restore a locally wrapped typed insert after a plain-text self-echo removes its live suggestion mark',
+  );
+  const nativeEchoRepairedState = nativeEchoStrippedState.apply(nativeEchoRepairTr!);
+  let nativeEchoRepairSuggestionChars = 0;
+  let nativeEchoRepairPlainChars = 0;
+  nativeEchoRepairedState.doc.descendants((node) => {
+    if (!node.isText) return true;
+    const text = node.text ?? '';
+    const yChars = [...text].filter((char) => char === 'Y').length;
+    if (yChars === 0) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofSuggestion')) {
+      nativeEchoRepairSuggestionChars += yChars;
+    } else {
+      nativeEchoRepairPlainChars += yChars;
+    }
+    return true;
+  });
+  assertEqual(
+    nativeEchoRepairSuggestionChars,
+    1,
+    'Expected text-preserving insert repair to restore the live suggestion mark on the single typed character',
+  );
+  assertEqual(
+    nativeEchoRepairPlainChars,
+    0,
+    'Expected text-preserving insert repair not to leave behind an extra plain-text duplicate character',
   );
   const explicitNativeMetadata = marksPluginKey.getState(explicitNativeWrappedState)?.metadata ?? {};
   const explicitNativeInsertMetadata = Object.values(explicitNativeMetadata).find((value) => value?.kind === 'insert') as {

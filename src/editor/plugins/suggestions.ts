@@ -585,8 +585,10 @@ function applyMixedInsertDeletion(
 ): { handled: boolean; metadata: Record<string, StoredMark>; metadataChanged: boolean } {
   const segments = collectDeleteRangeSegments(newTr.doc, from, to, suggestionType);
   const hasInsert = segments.some((segment) => segment.kind === 'insert');
+  const hasDelete = segments.some((segment) => segment.kind === 'delete');
+  const hasReplace = segments.some((segment) => segment.kind === 'replace');
   const hasPlain = segments.some((segment) => segment.kind === 'plain');
-  if (!hasInsert || !hasPlain) {
+  if (!hasPlain || (!hasInsert && !hasDelete && !hasReplace)) {
     return { handled: false, metadata, metadataChanged: false };
   }
 
@@ -600,6 +602,9 @@ function applyMixedInsertDeletion(
     if (segment.kind === 'insert') {
       for (const id of segment.insertIds) touchedInsertIds.add(id);
       newTr.delete(segment.from, segment.to);
+      continue;
+    }
+    if (segment.kind === 'delete' || segment.kind === 'replace') {
       continue;
     }
     if (segment.kind !== 'plain') continue;

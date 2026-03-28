@@ -1,11 +1,46 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `08543bb5b2a284040e7aefd414da86869328d2c29b0427ce20330b1c051bef16`
+- Live client bundle on `proof-test.mintresearch.org`: `2b17cf22ffc807b09e1f0dd1a1a4487ab554f3f8d7a7956c0a7a0a928130ef90`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix30 mixed-delete paragraph selection follow-up
+
+Shared reports:
+- browser QA Bug 16: triple-click full paragraph selection + Backspace deleted all paragraph text with zero new marks and destroyed an existing delete mark inside the selection
+
+Requested:
+- stop full-paragraph tracked deletes from erasing already-pending delete marks when the selection contains a mix of plain text plus existing delete-marked text
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - broadened the mixed-delete helper so it handles `plain + delete` and `plain + replace` ranges, not just `plain + insert`
+  - plain text inside the selection now gets a new delete suggestion while pre-existing delete/replace segments are preserved instead of being wiped by a raw `tr.delete(...)`
+- `src/tests/track-changes-structural-delete-regression.test.ts`
+  - added a focused regression for the new repro:
+    - full-paragraph selection over plain text plus an existing delete mark
+    - wrapped delete must preserve the visible paragraph text
+    - wrapped delete must keep the original delete mark id alive
+    - wrapped delete must add one new delete mark for the previously plain text
+
+Why this likely addresses Bug 16:
+- the previous fallback only knew how to decompose `plain + insert` selections
+- when a selection mixed plain text with an existing delete mark, the helper returned `handled: false`
+- the surrounding delete path then executed a raw document delete, which removed both the plain text and the nested pending delete mark
+
+Verified locally:
+- `npx tsx src/tests/track-changes-structural-delete-regression.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npm run build`
+
+Scope note:
+- this fixes the mixed `plain + delete` data-loss path for full-paragraph selections
+- paragraph-break tracking itself is still a separate structural lane
 
 ## Fix29 intended-TC-state follow-up
 

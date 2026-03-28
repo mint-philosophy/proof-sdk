@@ -3,6 +3,7 @@ import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 
 import { marksPluginKey } from '../editor/plugins/marks.js';
 import {
+  buildNativeTextInputFollowupWrapTransaction,
   __debugBuildPlainInsertionSuggestionFallbackTransaction,
   __debugRememberHandledTextInputDispatch,
   __debugRememberHandledTextInputCall,
@@ -234,6 +235,59 @@ function run(): void {
     wrappedNativeSuggestionCount,
     1,
     'Expected in-place native typed-insert wrapping to leave exactly one suggestion-marked text span',
+  );
+
+  const authoredMark = schema.marks.proofAuthored.create({ by: 'human:Anonymous' });
+  const authoredBaseDoc = schema.node('doc', null, [
+    schema.node('paragraph', null, [schema.text('Alpha beta gamma.', [authoredMark])]),
+  ]);
+  const authoredBaseState = EditorState.create({
+    schema,
+    doc: authoredBaseDoc,
+    selection: TextSelection.create(authoredBaseDoc, 18, 18),
+    plugins: [marksStatePlugin],
+  });
+  const authoredInsertedState = authoredBaseState.apply(
+    authoredBaseState.tr.insertText('Y', 18, 18),
+  );
+  const explicitNativeFollowupTr = buildNativeTextInputFollowupWrapTransaction(
+    authoredBaseState,
+    authoredInsertedState,
+    { text: 'Y', from: 18, to: 19 },
+  );
+  assert(
+    explicitNativeFollowupTr !== null,
+    'Expected the delayed native typed-insert follow-up wrap to mark the exact inserted range at an authored boundary',
+  );
+  const explicitNativeWrappedState = authoredInsertedState.apply(explicitNativeFollowupTr!);
+  assertEqual(
+    explicitNativeWrappedState.doc.textContent,
+    'Alpha beta gamma.Y',
+    'Expected the delayed native typed-insert follow-up wrap to preserve exactly one typed character',
+  );
+  let explicitNativeSuggestionChars = 0;
+  let explicitNativePlainChars = 0;
+  explicitNativeWrappedState.doc.descendants((node) => {
+    if (!node.isText) return true;
+    const text = node.text ?? '';
+    const yChars = [...text].filter((char) => char === 'Y').length;
+    if (yChars === 0) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofSuggestion')) {
+      explicitNativeSuggestionChars += yChars;
+    } else {
+      explicitNativePlainChars += yChars;
+    }
+    return true;
+  });
+  assertEqual(
+    explicitNativeSuggestionChars,
+    1,
+    'Expected the delayed native typed-insert follow-up wrap to attach the suggestion mark to the actual typed character',
+  );
+  assertEqual(
+    explicitNativePlainChars,
+    0,
+    'Expected no extra plain-text duplicate character after the delayed native typed-insert follow-up wrap',
   );
 
   console.log('suggestions-text-input-echo-regression.test.ts passed');

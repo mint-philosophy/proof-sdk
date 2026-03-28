@@ -90,6 +90,12 @@ type PendingNativeTextInput = {
   at: number;
 };
 
+export type NativeTextInputMatch = {
+  text: string;
+  from: number;
+  to: number;
+};
+
 const lastInsertByActor = new Map<string, InsertCoalesceState>();
 const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
 const PENDING_DELETE_INTENT_TTL_MS = 1500;
@@ -1506,15 +1512,22 @@ export function shouldPassthroughPendingNativeTextInputTransaction(
   oldState: EditorState,
   tr: Transaction,
 ): boolean {
-  if (!pendingNativeTextInput) return false;
+  return consumePendingNativeTextInputTransactionMatch(oldState, tr) !== null;
+}
+
+export function consumePendingNativeTextInputTransactionMatch(
+  oldState: EditorState,
+  tr: Transaction,
+): NativeTextInputMatch | null {
+  if (!pendingNativeTextInput) return null;
   const age = Date.now() - pendingNativeTextInput.at;
   if (age > PENDING_NATIVE_TEXT_INPUT_TTL_MS) {
     pendingNativeTextInput = null;
-    return false;
+    return null;
   }
 
   const diff = detectPlainTextInsertionBetweenDocs(oldState.doc, tr.doc);
-  if (!diff) return false;
+  if (!diff) return null;
 
   const matches = (
     diff.insertedText === pendingNativeTextInput.text
@@ -1534,11 +1547,15 @@ export function shouldPassthroughPendingNativeTextInputTransaction(
 
   if (matches) {
     pendingNativeTextInput = null;
-    return true;
+    return {
+      text: diff.insertedText,
+      from: diff.from,
+      to: diff.to,
+    };
   }
 
   pendingNativeTextInput = null;
-  return false;
+  return null;
 }
 
 export function shouldSuppressHandledTextInputEcho(
@@ -1761,15 +1778,40 @@ export function __debugWrapPendingNativeTextInputTransaction(
 export function buildNativeTextInputFollowupWrapTransaction(
   oldState: EditorState,
   newState: EditorState,
+  nativeTextInputMatch?: NativeTextInputMatch | null,
 ): Transaction | null {
-  return buildPlainInsertionSuggestionFallbackTransaction(oldState, newState);
+  const explicitDiff = nativeTextInputMatch
+    ? resolveNativeTextInputFollowupDiff(newState, nativeTextInputMatch)
+    : null;
+  return buildPlainInsertionSuggestionFallbackTransaction(oldState, newState, explicitDiff);
+}
+
+function resolveNativeTextInputFollowupDiff(
+  newState: EditorState,
+  nativeTextInputMatch: NativeTextInputMatch,
+): { from: number; to: number; insertedText: string } | null {
+  if (nativeTextInputMatch.to <= nativeTextInputMatch.from) return null;
+  if (nativeTextInputMatch.from < 0 || nativeTextInputMatch.to > newState.doc.content.size) return null;
+  const liveText = newState.doc.textBetween(
+    nativeTextInputMatch.from,
+    nativeTextInputMatch.to,
+    '\n',
+    '\n',
+  );
+  if (liveText !== nativeTextInputMatch.text) return null;
+  return {
+    from: nativeTextInputMatch.from,
+    to: nativeTextInputMatch.to,
+    insertedText: nativeTextInputMatch.text,
+  };
 }
 
 function buildPlainInsertionSuggestionFallbackTransaction(
   oldState: EditorState,
   newState: EditorState,
+  explicitDiff?: { from: number; to: number; insertedText: string } | null,
 ): Transaction | null {
-  const diff = detectPlainTextInsertionDiff(oldState, newState);
+  const diff = explicitDiff ?? detectPlainTextInsertionDiff(oldState, newState);
   if (!diff) return null;
 
   const suggestionType = newState.schema.marks.proofSuggestion;

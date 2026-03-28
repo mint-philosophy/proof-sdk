@@ -1,9 +1,10 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `01ff72a55211291ce16efce1642748aee6fc143dbb34e87a75d2cc1606644cf9`
+- Live client bundle on `proof-test.mintresearch.org`: `2e56d64b45f7d2a385ca7d251aaaea93b1c100fad821497b531afec4c4b1c2f6`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
+  - `fix49` pending commit: carry the exact native typed-insert range into the delayed wrap
   - `fix48` pending commit: defer native typed-input wrapping to a mark-only follow-up transaction
   - `bdea5d4` `fix47: wrap native typed inserts in place`
   - `ca60b7c` `fix46: passthrough native typed insert before wrapping`
@@ -90,6 +91,45 @@ Verified locally:
 - `npx tsx src/tests/track-changes-disabled-direct-edit.test.ts`
 - `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
 - `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npm run build`
+
+## Fix49 carry the exact native typed-insert range into the delayed follow-up wrap
+
+Shared reports:
+- browser QA on fix48 still showed `YY` for a single typed character
+- the key new evidence was:
+  - `scheduleNativeTextInputWrap` and `followupNativeTextInputWrap` both fired
+  - the visible DOM shape was one tracked `Y` widget inside the authored span plus one bare native `Y` outside it
+  - that means the delayed follow-up did run, but it rediscovered the wrong boundary range and created an anchor-style insert preview instead of marking the real native character
+
+Requested:
+- stop rediscovering the delayed wrap range from a generic old/new diff
+- carry the exact matched native insert range from the intercepted native transaction into the microtask follow-up
+- only wrap that exact already-inserted text in the follow-up transaction
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - added `consumePendingNativeTextInputTransactionMatch(oldState, tr)` which returns the exact matched native insert `{ text, from, to }` instead of only a boolean
+  - `buildNativeTextInputFollowupWrapTransaction(...)` now accepts that exact match and prefers it over a generic doc diff
+  - added a small range validator so the follow-up only marks the precise native inserted text when that text is actually present at the matched range in `newState.doc`
+- `src/editor/index.ts`
+  - the interceptor now captures `nativeTextInputMatch` once, dispatches the native transaction untouched, and passes that exact match into the delayed follow-up wrap
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - added an authored-boundary regression where native typing happens at the edge of an authored span
+  - the regression asserts the delayed follow-up produces exactly one suggestion-marked `Y` and zero extra plain `Y` characters
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the source guard to require the exact-match capture and follow-up call shape
+
+Why this is the right next step:
+- fix48 proved the timing needed to change, but the delayed follow-up still used `findDiffStart/findDiffEnd`
+- in the typed-at-boundary case, that generic diff can lock onto the authored-boundary split rather than the actual native inserted character
+- carrying the exact native insert match removes that ambiguity and tells the follow-up exactly which text span should become the tracked insert
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
 - `npm run build`
 
 ## Fix47 wrap the matched native typed-insert transaction in place

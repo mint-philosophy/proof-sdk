@@ -325,16 +325,18 @@ function run(): void {
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
   assert(
-    editorSource.includes('shouldPassthroughPendingNativeTextInputTransaction,')
+    editorSource.includes('consumePendingNativeTextInputTransactionMatch,')
       && editorSource.includes('buildNativeTextInputFollowupWrapTransaction,')
-      && setupSuggestionsInterceptorBlock.includes('if (shouldPassthroughPendingNativeTextInputTransaction(beforeState, tr)) {')
+      && setupSuggestionsInterceptorBlock.includes('const nativeTextInputMatch = consumePendingNativeTextInputTransactionMatch(beforeState, tr);')
+      && setupSuggestionsInterceptorBlock.includes('if (nativeTextInputMatch) {')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.scheduleNativeTextInputWrap]', {")
       && setupSuggestionsInterceptorBlock.includes("tr.setMeta('proof-native-typed-input', true);")
       && setupSuggestionsInterceptorBlock.includes('queueMicrotask(() => {')
-      && setupSuggestionsInterceptorBlock.includes('const followupTr = buildNativeTextInputFollowupWrapTransaction(beforeState, view.state);')
+      && setupSuggestionsInterceptorBlock.includes('const followupTr = buildNativeTextInputFollowupWrapTransaction(')
+      && setupSuggestionsInterceptorBlock.includes('nativeTextInputMatch,')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.followupNativeTextInputWrap]', {")
       && setupSuggestionsInterceptorBlock.includes("followupTr.setMeta('addToHistory', false);"),
-    'Expected the suggestions interceptor to let the native typed-insert transaction commit untouched first, then schedule a mark-only follow-up wrap after the DOM/state have settled, avoiding same-dispatch duplication',
+    'Expected the suggestions interceptor to carry the exact matched native typed-insert range into the delayed follow-up wrap, instead of rediscovering a boundary-shifted diff later',
   );
   const preserveInsertCoalescingBlock = sliceBetween(
     editorSource,

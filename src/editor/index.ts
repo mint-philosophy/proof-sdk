@@ -5835,6 +5835,11 @@ class ProofEditorImpl implements ProofEditor {
     dispatchBase: (transaction: any) => void,
   ): void {
     const textPreservingRepair = buildTextPreservingInsertPersistenceTransaction(beforeState, view.state);
+    console.log('[tc.remoteRepairCheck]', {
+      textPreservingRepair: Boolean(textPreservingRepair),
+      beforeText: beforeState.doc.textBetween(0, beforeState.doc.content.size, '\n', '\n'),
+      afterText: view.state.doc.textBetween(0, view.state.doc.content.size, '\n', '\n'),
+    });
     if (textPreservingRepair) {
       console.log('[tc.remoteInsertPersistenceRepair]', {
         steps: textPreservingRepair.steps.map((step: any) => {

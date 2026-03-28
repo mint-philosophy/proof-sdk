@@ -246,6 +246,33 @@ function collectSuggestionIdsInRange(
   return [...ids];
 }
 
+function summarizeTextMarksInRange(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+): Array<{ from: number; to: number; text: string; marks: Array<{ type: string; attrs: Record<string, unknown> }> }> {
+  const summary: Array<{ from: number; to: number; text: string; marks: Array<{ type: string; attrs: Record<string, unknown> }> }> = [];
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (!node.isText) return true;
+    const nodeFrom = Math.max(from, pos);
+    const nodeTo = Math.min(to, pos + node.nodeSize);
+    if (nodeTo <= nodeFrom) return true;
+    const sliceFrom = nodeFrom - pos;
+    const sliceTo = nodeTo - pos;
+    summary.push({
+      from: nodeFrom,
+      to: nodeTo,
+      text: (node.text ?? '').slice(sliceFrom, sliceTo),
+      marks: node.marks.map((mark) => ({
+        type: mark.type.name,
+        attrs: { ...(mark.attrs as Record<string, unknown>) },
+      })),
+    });
+    return true;
+  });
+  return summary;
+}
+
 function collectSuggestionIdSummaryInRange(
   doc: ProseMirrorNode,
   from: number,
@@ -3195,6 +3222,32 @@ export const suggestionsPlugin = $prose(() => {
               from: nativeTypedInputMatch.from,
               to: nativeTypedInputMatch.to,
               text: nativeTypedInputMatch.text,
+              beforeRangeText: newState.doc.textBetween(
+                nativeTypedInputMatch.from,
+                nativeTypedInputMatch.to,
+                '\n',
+                '\n',
+              ),
+              afterRangeText: nativeWrapTr.doc.textBetween(
+                nativeTypedInputMatch.from,
+                nativeTypedInputMatch.to,
+                '\n',
+                '\n',
+              ),
+              beforeRangeMarks: summarizeTextMarksInRange(
+                newState.doc,
+                nativeTypedInputMatch.from,
+                nativeTypedInputMatch.to,
+              ),
+              afterRangeMarks: summarizeTextMarksInRange(
+                nativeWrapTr.doc,
+                nativeTypedInputMatch.from,
+                nativeTypedInputMatch.to,
+              ),
+              stepTypes: nativeWrapTr.steps.map((step) => {
+                const stepJson = step.toJSON() as { stepType?: string };
+                return stepJson.stepType ?? step.constructor.name;
+              }),
             });
             return nativeWrapTr;
           }

@@ -5953,6 +5953,17 @@ class ProofEditorImpl implements ProofEditor {
           });
         }
 
+        if (Boolean(tr?.docChanged) && shouldSuppressHandledTextInputEcho(beforeState, tr)) {
+          this.pendingDomSuggestionSelection = null;
+          console.log('[tc.dispatch.suppressHandledTextInputEcho]', {
+            selFrom: tr.selection?.from,
+            docChanged: tr.docChanged,
+            remote: isRemoteContentChange,
+            yjsOrigin,
+          });
+          return;
+        }
+
         if (suggestionsEnabled && tr.docChanged) {
           const clearPendingDomSuggestionSelection = () => {
             this.pendingDomSuggestionSelection = null;
@@ -6009,15 +6020,6 @@ class ProofEditorImpl implements ProofEditor {
           if (tr.getMeta('history$') !== undefined) {
             clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr);
-            return;
-          }
-
-          if (shouldSuppressHandledTextInputEcho(beforeState, tr)) {
-            clearPendingDomSuggestionSelection();
-            console.log('[tc.dispatch.suppressHandledTextInputEcho]', {
-              selFrom: tr.selection?.from,
-              docChanged: tr.docChanged,
-            });
             return;
           }
 

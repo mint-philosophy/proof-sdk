@@ -340,9 +340,9 @@ function run(): void {
       && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);')
-      && setupSuggestionsInterceptorBlock.includes('if (shouldSuppressHandledTextInputEcho(beforeState, tr)) {')
+      && setupSuggestionsInterceptorBlock.includes('if (Boolean(tr?.docChanged) && shouldSuppressHandledTextInputEcho(beforeState, tr)) {')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.suppressHandledTextInputEcho]', {"),
-    'Expected the suggestions interceptor to pass through collab/template system transactions, honor the latched desired Track Changes state through share/collab resets, and suppress immediate DOM text-input echoes after handled tracked typing',
+    'Expected the suggestions interceptor to pass through collab/template system transactions, honor the latched desired Track Changes state through share/collab resets, and suppress immediate handled-input duplicate echoes before either the local or remote transaction lanes apply them',
   );
   assert(
     suggestionsSource.includes('function sliceRepresentsWrappedPlainText(nodes?: SliceNode[]): boolean {')

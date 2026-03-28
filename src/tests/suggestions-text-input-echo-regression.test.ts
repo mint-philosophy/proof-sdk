@@ -130,6 +130,25 @@ function run(): void {
     'Expected the original handled text-input transaction not to be suppressed',
   );
 
+  __debugResetHandledTextInputEcho();
+  __debugRememberHandledTextInputDispatch('a', 18, 18);
+  const postInsertState = createState(18, 18).apply(
+    wrapTransactionForSuggestions(
+      createState(18, 18).tr
+        .insertText('a', 18, 18)
+        .setMeta('proof-handled-text-input', { text: 'a', from: 18, to: 18 }),
+      createState(18, 18),
+      true,
+    ),
+  );
+  const handledOriginalPositionEchoTr = postInsertState.tr
+    .insertText('a', 18, 18)
+    .setMeta('proof-handled-text-input', { text: 'a', from: 18, to: 18 });
+  assert(
+    __debugShouldSuppressHandledTextInputEcho(postInsertState, handledOriginalPositionEchoTr),
+    'Expected a second handled-meta insertion at the original position to be suppressed once the first insertion already exists',
+  );
+
   console.log('suggestions-text-input-echo-regression.test.ts passed');
 }
 

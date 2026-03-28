@@ -67,7 +67,14 @@ const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';
 type InsertCoalesceState = { id: string; from: number; to: number; by: string; updatedAt: number };
 type TrackedDeleteIntent = { key: 'Backspace' | 'Delete'; modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean } };
 type PendingTrackedDeleteIntent = { intent: TrackedDeleteIntent; at: number; handled: boolean };
-type PendingHandledTextInputEcho = { text: string; expectedFrom: number; expectedTo: number; at: number };
+type PendingHandledTextInputEcho = {
+  text: string;
+  originalFrom: number;
+  originalTo: number;
+  expectedFrom: number;
+  expectedTo: number;
+  at: number;
+};
 
 const lastInsertByActor = new Map<string, InsertCoalesceState>();
 const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
@@ -1428,6 +1435,8 @@ function rememberHandledTextInputDispatch(text: string, from: number, to: number
   const expectedFrom = insertFrom + text.length;
   pendingHandledTextInputEcho = {
     text,
+    originalFrom: insertFrom,
+    originalTo: insertFrom + text.length,
     expectedFrom,
     expectedTo: expectedFrom + text.length,
     at: Date.now(),
@@ -1436,6 +1445,8 @@ function rememberHandledTextInputDispatch(text: string, from: number, to: number
     text,
     from,
     to,
+    originalFrom: insertFrom,
+    originalTo: insertFrom + text.length,
     expectedFrom,
     expectedTo: expectedFrom + text.length,
   });
@@ -1480,14 +1491,28 @@ export function shouldSuppressHandledTextInputEcho(
     return false;
   }
 
-  const shouldSuppress = diff.insertedText === pendingHandledTextInputEcho.text
+  const matchesExpectedEcho = diff.insertedText === pendingHandledTextInputEcho.text
     && diff.from === pendingHandledTextInputEcho.expectedFrom
     && diff.to === pendingHandledTextInputEcho.expectedTo;
+  const oldHasOriginalText = oldState.doc.textBetween(
+    pendingHandledTextInputEcho.originalFrom,
+    pendingHandledTextInputEcho.originalTo,
+    '',
+    '',
+  ) === pendingHandledTextInputEcho.text;
+  const matchesOriginalDuplicate = diff.insertedText === pendingHandledTextInputEcho.text
+    && diff.from === pendingHandledTextInputEcho.originalFrom
+    && diff.to === pendingHandledTextInputEcho.originalTo
+    && oldHasOriginalText;
+  const shouldSuppress = matchesExpectedEcho || matchesOriginalDuplicate;
 
   console.log('[suggestions.handleTextInput.echoCheck]', {
     pending: pendingHandledTextInputEcho,
     handledMeta: handledMeta ?? null,
     diff,
+    matchesExpectedEcho,
+    matchesOriginalDuplicate,
+    oldHasOriginalText,
     shouldSuppress,
     selectionFrom: tr.selection?.from ?? null,
     selectionTo: tr.selection?.to ?? null,

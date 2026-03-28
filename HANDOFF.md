@@ -1,11 +1,59 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `ab9a79e79b621268c32a429bb9246193fc8c5ac200350100cc0039fb2e8c612a`
+- Live client bundle on `proof-test.mintresearch.org`: `1b1529fe37116eaeb1c351b8a75e361ff98352d2398631ea7c5222aca46b46b9`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix40 suppress duplicate handled-input echoes across original and remote lanes
+
+Shared reports:
+- browser QA on fix39: tracked typing still duplicated every character on fresh docs
+- the console now showed `rememberEcho` + `echoCheck` pairs rather than `skipHandledMeta`, so the suppressor was finally inspecting transactions
+- duplication still persisted, which pointed to two remaining gaps:
+  - duplicate inserts can arrive at either the post-insert position or the original insertion position
+  - duplicate echoes can bypass the local-only TC branch entirely, which means the suppressor must run before the remote/local split
+
+Requested:
+- catch both original-position and post-insert duplicate echoes, including Yjs/collab echoes that arrive outside the local wrapping lane
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - pending handled-input echo state now records:
+    - `originalFrom`
+    - `originalTo`
+    - `expectedFrom`
+    - `expectedTo`
+  - `rememberHandledTextInputDispatch()` logs both the original insert range and the post-insert expected echo range
+  - `shouldSuppressHandledTextInputEcho()` now suppresses either:
+    - a duplicate inserted at the expected post-insert echo range
+    - a duplicate inserted again at the original range once the original text already exists in the document
+  - `echoCheck` diagnostics now log:
+    - `matchesExpectedEcho`
+    - `matchesOriginalDuplicate`
+    - `oldHasOriginalText`
+- `src/editor/index.ts`
+  - the handled-input echo suppressor now runs before the local/remote branching, so recent duplicate echoes can be dropped even if they arrive as remote/Yjs-origin content changes
+  - `tc.dispatch.suppressHandledTextInputEcho` now logs whether the suppressed transaction was remote and includes `yjsOrigin`
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - added a regression for a second handled-meta insert at the original position after the first tracked insert already exists
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the interceptor source guard to reflect the earlier suppression point
+
+Why this is the right next step:
+- fix39 proved the old handled-meta early return was wrong, but suppression was still scoped too narrowly
+- the remaining live duplication can only come from:
+  - a duplicate insert at a different position than the original expected echo assumption
+  - or a duplicate transaction that never reaches the local-only suppression branch
+- this patch addresses both at the interceptor boundary
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npm run build`
 
 ## Fix39 suppress handled-meta duplicate text-input echoes
 

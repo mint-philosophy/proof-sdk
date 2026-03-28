@@ -61,14 +61,18 @@ type DisabledSuggestionStripAnalysis = {
 // browser automation reflect real authoring behavior instead of splitting every key.
 const COALESCE_WINDOW_MS = 5000;
 const DEBUG_VERBOSE_INSERT_REPAIR = false;
+const HANDLED_TEXT_INPUT_ECHO_TTL_MS = 250;
+const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';
 
 type InsertCoalesceState = { id: string; from: number; to: number; by: string; updatedAt: number };
 type TrackedDeleteIntent = { key: 'Backspace' | 'Delete'; modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean } };
 type PendingTrackedDeleteIntent = { intent: TrackedDeleteIntent; at: number; handled: boolean };
+type PendingHandledTextInputEcho = { text: string; expectedFrom: number; expectedTo: number; at: number };
 
 const lastInsertByActor = new Map<string, InsertCoalesceState>();
 const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
 const PENDING_DELETE_INTENT_TTL_MS = 1500;
+let pendingHandledTextInputEcho: PendingHandledTextInputEcho | null = null;
 
 function logVerboseInsertRepair(...args: unknown[]): void {
   if (!DEBUG_VERBOSE_INSERT_REPAIR) return;
@@ -101,6 +105,7 @@ export function setSuggestionsDesiredEnabled(enabled: boolean): void {
 
 export function resetSuggestionsInsertCoalescing(): void {
   lastInsertByActor.clear();
+  pendingHandledTextInputEcho = null;
 }
 
 /** Reset all module-level TC state for fresh document loads.
@@ -109,6 +114,7 @@ export function resetSuggestionsInsertCoalescing(): void {
 export function resetSuggestionsModuleState(): void {
   suggestionsModuleEnabled = false;
   lastInsertByActor.clear();
+  pendingHandledTextInputEcho = null;
 }
 
 export function hasRecentSuggestionsInsertCoalescingState(): boolean {
@@ -1398,16 +1404,74 @@ function detectPlainTextInsertionDiff(
   oldState: EditorState,
   newState: EditorState,
 ): { from: number; to: number; insertedText: string } | null {
-  const from = oldState.doc.content.findDiffStart(newState.doc.content);
+  return detectPlainTextInsertionBetweenDocs(oldState.doc, newState.doc);
+}
+
+function detectPlainTextInsertionBetweenDocs(
+  oldDoc: ProseMirrorNode,
+  newDoc: ProseMirrorNode,
+): { from: number; to: number; insertedText: string } | null {
+  const from = oldDoc.content.findDiffStart(newDoc.content);
   if (typeof from !== 'number') return null;
-  const diffEnd = oldState.doc.content.findDiffEnd(newState.doc.content);
+  const diffEnd = oldDoc.content.findDiffEnd(newDoc.content);
   if (!diffEnd) return null;
 
-  const insertedText = newState.doc.textBetween(from, diffEnd.b, '\n', '\n');
-  const deletedText = oldState.doc.textBetween(from, diffEnd.a, '\n', '\n');
+  const insertedText = newDoc.textBetween(from, diffEnd.b, '\n', '\n');
+  const deletedText = oldDoc.textBetween(from, diffEnd.a, '\n', '\n');
   if (!insertedText || deletedText.length > 0) return null;
 
   return { from, to: diffEnd.b, insertedText };
+}
+
+function rememberHandledTextInputDispatch(text: string, from: number, to: number): void {
+  const insertFrom = Math.min(from, to);
+  const expectedFrom = insertFrom + text.length;
+  pendingHandledTextInputEcho = {
+    text,
+    expectedFrom,
+    expectedTo: expectedFrom + text.length,
+    at: Date.now(),
+  };
+}
+
+export function shouldSuppressHandledTextInputEcho(
+  oldState: EditorState,
+  tr: Transaction,
+): boolean {
+  if (!pendingHandledTextInputEcho) return false;
+  if (tr.getMeta(HANDLED_TEXT_INPUT_META) !== undefined) return false;
+
+  const age = Date.now() - pendingHandledTextInputEcho.at;
+  if (age > HANDLED_TEXT_INPUT_ECHO_TTL_MS) {
+    pendingHandledTextInputEcho = null;
+    return false;
+  }
+
+  if (!tr.docChanged) return false;
+  const diff = detectPlainTextInsertionBetweenDocs(oldState.doc, tr.doc);
+  if (!diff) return false;
+
+  const shouldSuppress = diff.insertedText === pendingHandledTextInputEcho.text
+    && diff.from === pendingHandledTextInputEcho.expectedFrom
+    && diff.to === pendingHandledTextInputEcho.expectedTo;
+
+  if (shouldSuppress) {
+    pendingHandledTextInputEcho = null;
+  }
+
+  return shouldSuppress;
+}
+
+export function __debugRememberHandledTextInputDispatch(text: string, from: number, to: number): void {
+  rememberHandledTextInputDispatch(text, from, to);
+}
+
+export function __debugResetHandledTextInputEcho(): void {
+  pendingHandledTextInputEcho = null;
+}
+
+export function __debugShouldSuppressHandledTextInputEcho(oldState: EditorState, tr: Transaction): boolean {
+  return shouldSuppressHandledTextInputEcho(oldState, tr);
 }
 
 function buildPlainInsertionSuggestionFallbackTransaction(
@@ -2906,14 +2970,20 @@ export const suggestionsPlugin = $prose(() => {
         // at word boundaries, producing interleaved markdown serialization.
         // Inserting at the actual cursor keeps the character adjacent to
         // the existing marked text in the Y.XmlFragment.
-        if (from === to && hasActiveInsertCoalescingCandidate(view.state, from)) {
-          view.dispatch(view.state.tr.insertText(text, from, to));
+        const dispatchHandledTextInput = (insertFrom: number, insertTo: number) => {
+          rememberHandledTextInputDispatch(text, insertFrom, insertTo);
+          const textInputTr = view.state.tr
+            .insertText(text, insertFrom, insertTo)
+            .setMeta(HANDLED_TEXT_INPUT_META, { text, from: insertFrom, to: insertTo });
+          view.dispatch(textInputTr);
           return true;
+        };
+        if (from === to && hasActiveInsertCoalescingCandidate(view.state, from)) {
+          return dispatchHandledTextInput(from, to);
         }
 
         const range = resolveTrackedTextInputRange(view.state, from, to);
-        view.dispatch(view.state.tr.insertText(text, range.from, range.to));
-        return true;
+        return dispatchHandledTextInput(range.from, range.to);
       },
 
       handleKeyDown(view, event) {

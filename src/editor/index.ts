@@ -65,6 +65,7 @@ import {
   hasRecentSuggestionsInsertCoalescingState,
   transactionCarriesInsertedSuggestionMarks,
   wrapTransactionForSuggestions,
+  shouldSuppressHandledTextInputEcho,
   isSuggestionsModuleEnabled,
   setSuggestionsDesiredEnabled,
   resetSuggestionsModuleState,
@@ -6008,6 +6009,15 @@ class ProofEditorImpl implements ProofEditor {
           if (tr.getMeta('history$') !== undefined) {
             clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr);
+            return;
+          }
+
+          if (shouldSuppressHandledTextInputEcho(beforeState, tr)) {
+            clearPendingDomSuggestionSelection();
+            console.log('[tc.dispatch.suppressHandledTextInputEcho]', {
+              selFrom: tr.selection?.from,
+              docChanged: tr.docChanged,
+            });
             return;
           }
 

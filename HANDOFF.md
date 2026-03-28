@@ -1,11 +1,43 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `948f796ebc42ada495aff695b9f6302c2d46098e2ed8cbbec8ac68bbf44dfe4e`
+- Live client bundle on `proof-test.mintresearch.org`: `f9ab76c759aa6a36ed0f2f14b15f0de1b2b5ecf363ee9c6c78aa9837aa0d410f`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix37 suppress handled text-input DOM echoes
+
+Shared reports:
+- browser QA on fix36: the freeze eased, but tracked typing can still corrupt text by duplicating every character (`aabbcc...`)
+- the duplicated output stays inside insert suggestions, which implies a second immediate local insertion is being tracked after the first handled keystroke
+- the append-time mark healers do not insert text; the more plausible lane is a raw DOM/input echo after `handleTextInput` already dispatched the tracked insert
+
+Requested:
+- stop tracked typing from double-inserting characters while preserving legitimate continued typing
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - added a one-shot handled-text-input echo guard keyed by `proof-handled-text-input`
+  - `handleTextInput` now tags its own dispatched transaction with that meta and records the expected immediate plain-text echo position
+  - added `shouldSuppressHandledTextInputEcho()` to drop only the next matching plain insertion within a short TTL
+  - reset paths now clear any pending handled-input echo state on TC reset/doc reset
+- `src/editor/index.ts`
+  - `setupSuggestionsInterceptor()` now calls `shouldSuppressHandledTextInputEcho(beforeState, tr)` before wrapping local typing transactions
+  - matching immediate echoes are logged as `tc.dispatch.suppressHandledTextInputEcho` and skipped instead of being wrapped into a second tracked insert
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - added a focused regression proving:
+    - the immediate identical post-handle echo is suppressed
+    - suppression is one-shot
+    - a different legitimate next character is not suppressed
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the source guard for the interceptor call and handled-input meta key
+
+Why this likely addresses the duplication:
+- `handleTextInput` already dispatches the tracked insert and returns `true`
+- if the browser/DOM observer emits a second immediate raw insertion for the same keystroke, the interceptor previously wrapped it too, producing `aa`, `bb`, `cc`
+- the new guard only drops that immediate matching echo instead of broadly suppressing subsequent typing
 
 ## Fix36 quiet tracked-insert hot-path diagnostics
 

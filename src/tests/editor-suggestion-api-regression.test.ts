@@ -280,8 +280,9 @@ function run(): void {
   assert(
     suggestionsSource.includes('export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {')
       && suggestionsSource.includes('export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {')
-      && suggestionsSource.includes('resetSuggestionsInsertCoalescing();'),
-    'Expected toggling track changes on or off to clear stale insert coalescing state',
+      && suggestionsSource.includes('resetSuggestionsInsertCoalescing();')
+      && suggestionsSource.includes("const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';"),
+    'Expected toggling track changes on or off to clear stale insert coalescing state and define a handled text-input echo suppression meta key',
   );
   const suggestionsAppendTransactionBlock = sliceBetween(
     suggestionsSource,
@@ -338,8 +339,10 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined;")
       && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
-      && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
-    'Expected the suggestions interceptor to pass through collab/template system transactions, while honoring the latched desired Track Changes state so tracked typing survives transient share/collab state resets',
+      && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);')
+      && setupSuggestionsInterceptorBlock.includes('if (shouldSuppressHandledTextInputEcho(beforeState, tr)) {')
+      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.suppressHandledTextInputEcho]', {"),
+    'Expected the suggestions interceptor to pass through collab/template system transactions, honor the latched desired Track Changes state through share/collab resets, and suppress immediate DOM text-input echoes after handled tracked typing',
   );
   assert(
     suggestionsSource.includes('function sliceRepresentsWrappedPlainText(nodes?: SliceNode[]): boolean {')

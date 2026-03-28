@@ -2349,6 +2349,7 @@ class ProofEditorImpl implements ProofEditor {
             const resetTr = view.state.tr
               .replaceWith(0, view.state.doc.content.size, emptyDoc.content)
               .setMeta('document-load', true)
+              .setMeta('addToHistory', false)
               .setMeta(SHARE_CONTENT_FILTER_ALLOW_META, true);
             view.dispatch(resetTr);
           } catch (error) {
@@ -6390,7 +6391,8 @@ class ProofEditorImpl implements ProofEditor {
         console.log('[loadDocument] Resetting stale suggestions plugin state');
         const resetTr = view.state.tr
           .setMeta(suggestionsPluginKey, { enabled: false })
-          .setMeta('document-load', true);
+          .setMeta('document-load', true)
+          .setMeta('addToHistory', false);
         view.dispatch(resetTr);
       }
 
@@ -6519,7 +6521,8 @@ class ProofEditorImpl implements ProofEditor {
       // Replace the entire document (mark as document-load to skip human authorship tracking)
       let tr = view.state.tr
         .replaceWith(0, view.state.doc.content.size, newDoc.content)
-        .setMeta('document-load', true);
+        .setMeta('document-load', true)
+        .setMeta('addToHistory', false);
       if (options?.allowShareContentMutation) {
         tr = tr.setMeta(SHARE_CONTENT_FILTER_ALLOW_META, true);
       }

@@ -1,11 +1,45 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `6aaddac910309d14c8dabf457753e32930165743646c4689935f8b76459e06dc`
+- Live client bundle on `proof-test.mintresearch.org`: `6df314ee6e4e5e3e9dadadbeb8241736de4a7fd3841b4a462667b5d72a81ca56`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix33 document-load undo-boundary follow-up
+
+Shared reports:
+- browser QA Bug 17: with TC on, deleting a word and pressing `Cmd+Z` repeatedly could eventually erase the entire document, remove the Edit/Track Changes toggle, and persist the empty state through reload
+
+Requested:
+- stop undo history from walking back into editor bootstrap / document-load transactions
+
+What changed:
+- `src/editor/index.ts`
+  - added `addToHistory: false` to every full-document `document-load` transaction in the share/editor load path:
+    - the pre-collab reset before binding a Yjs doc
+    - the stale-suggestions reset transaction during `loadDocument()`
+    - the main `loadDocument()` full replace transaction
+- `src/tests/document-load-history-regression.test.ts`
+  - added a focused regression proving:
+    - `document-load` replace stays out of undo history
+    - a subsequent user edit is still undoable
+    - a second undo cannot walk back into the initial loaded document state
+
+Why this likely addresses Bug 17:
+- the browser repro matches ProseMirror history containing bootstrap/document-load replacements
+- once those transactions are undoable, repeated undo can walk past "undo my delete" into "undo the loaded document itself"
+- on a shared doc, that empty/reset state can then sync and persist as the new canonical content
+
+Verified locally:
+- `npx tsx src/tests/document-load-history-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npm run build`
+
+Scope note:
+- this fix is specifically the undo-boundary / total-document-wipe lane
+- it does not address the still-open typed-insertion Root Cause A lane
 
 ## Fix32 actual-plugin-state reapply follow-up
 

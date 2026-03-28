@@ -7,6 +7,40 @@
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
 
+## Fix44 route ordinary tracked typing through ProseMirror deflt()
+
+Shared reports:
+- browser QA on fix43 still showed `XX` for a single typed `X`
+- the decisive new finding was that the custom `beforeinput` blocker never fired in the live browser
+- local inspection of `prosemirror-view` showed `handleTextInput` accepts a fifth `deflt()` argument and is called from the DOM-change reconciliation path after native text input has already been observed
+
+Requested:
+- stop relying on the failed `beforeinput` blocker path
+- make ordinary tracked typing use ProseMirror's own default text-input transaction instead of a second synthetic `insertText(...)`
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - removed the pending native-insert blocker cache and the dead `beforeinput.preventNativeInsertText` branch
+  - `handleTextInput` now accepts `(view, from, to, text, deflt)`
+  - ordinary typing dispatches `deflt().setMeta('proof-handled-text-input', ...)` when the resolved insert range matches the incoming ProseMirror range
+  - only the rare adjusted-range fallback still uses a custom `state.tr.insertText(...)`
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - removed the obsolete beforeinput-blocker regression
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the source guard to require the `handleTextInput(..., deflt)` contract and the absence of the failed beforeinput blocker path
+
+Why this is the right next step:
+- the fix43 blocker path never ran in the live browser
+- ProseMirror already provides the right default text-input transaction for the DOM-change lane
+- the previous synthetic `state.tr.insertText(...)` path was the most plausible place ordinary typing could diverge from the browser's own text-input reconciliation
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npm run build`
+
 ## Fix43 let handleTextInput dispatch and beforeinput only block native insertion
 
 Shared reports:

@@ -3,10 +3,8 @@ import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 
 import { marksPluginKey } from '../editor/plugins/marks.js';
 import {
-  __debugConsumePendingBeforeinputNativeInsertBlock,
   __debugRememberHandledTextInputDispatch,
   __debugRememberHandledTextInputCall,
-  __debugRememberPendingBeforeinputNativeInsertBlock,
   __debugResetHandledTextInputEcho,
   __debugShouldSuppressDuplicateHandledTextInputCall,
   __debugShouldSuppressHandledTextInputEcho,
@@ -163,19 +161,6 @@ function run(): void {
     __debugShouldSuppressDuplicateHandledTextInputCall('a', 19, 19),
     false,
     'Expected a different insertion range not to be suppressed as a duplicate callback',
-  );
-
-  __debugResetHandledTextInputEcho();
-  __debugRememberPendingBeforeinputNativeInsertBlock('a', 18, 18);
-  const pendingNativeBlock = __debugConsumePendingBeforeinputNativeInsertBlock('a');
-  assert(
-    pendingNativeBlock !== null && pendingNativeBlock.from === 18 && pendingNativeBlock.to === 18,
-    'Expected beforeinput native-insert blocking to consume the pending handled-text-input block for the same character',
-  );
-  assertEqual(
-    __debugConsumePendingBeforeinputNativeInsertBlock('a'),
-    null,
-    'Expected beforeinput native-insert blocking to be one-shot',
   );
 
   console.log('suggestions-text-input-echo-regression.test.ts passed');

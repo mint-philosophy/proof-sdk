@@ -63,7 +63,6 @@ const COALESCE_WINDOW_MS = 5000;
 const DEBUG_VERBOSE_INSERT_REPAIR = false;
 const HANDLED_TEXT_INPUT_ECHO_TTL_MS = 250;
 const DUPLICATE_HANDLED_TEXT_INPUT_CALL_TTL_MS = 75;
-const PENDING_BEFOREINPUT_NATIVE_INSERT_BLOCK_TTL_MS = 150;
 const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';
 
 type InsertCoalesceState = { id: string; from: number; to: number; by: string; updatedAt: number };
@@ -83,19 +82,12 @@ type RecentHandledTextInputCall = {
   to: number;
   at: number;
 };
-type PendingBeforeinputNativeInsertBlock = {
-  text: string;
-  from: number;
-  to: number;
-  at: number;
-};
 
 const lastInsertByActor = new Map<string, InsertCoalesceState>();
 const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
 const PENDING_DELETE_INTENT_TTL_MS = 1500;
 let pendingHandledTextInputEcho: PendingHandledTextInputEcho | null = null;
 let recentHandledTextInputCall: RecentHandledTextInputCall | null = null;
-let pendingBeforeinputNativeInsertBlock: PendingBeforeinputNativeInsertBlock | null = null;
 
 function logVerboseInsertRepair(...args: unknown[]): void {
   if (!DEBUG_VERBOSE_INSERT_REPAIR) return;
@@ -130,7 +122,6 @@ export function resetSuggestionsInsertCoalescing(): void {
   lastInsertByActor.clear();
   pendingHandledTextInputEcho = null;
   recentHandledTextInputCall = null;
-  pendingBeforeinputNativeInsertBlock = null;
 }
 
 /** Reset all module-level TC state for fresh document loads.
@@ -141,7 +132,6 @@ export function resetSuggestionsModuleState(): void {
   lastInsertByActor.clear();
   pendingHandledTextInputEcho = null;
   recentHandledTextInputCall = null;
-  pendingBeforeinputNativeInsertBlock = null;
 }
 
 export function hasRecentSuggestionsInsertCoalescingState(): boolean {
@@ -1493,30 +1483,6 @@ function rememberHandledTextInputCall(text: string, from: number, to: number): v
   };
 }
 
-function rememberPendingBeforeinputNativeInsertBlock(text: string, from: number, to: number): void {
-  pendingBeforeinputNativeInsertBlock = {
-    text,
-    from,
-    to,
-    at: Date.now(),
-  };
-}
-
-function consumePendingBeforeinputNativeInsertBlock(text: string): PendingBeforeinputNativeInsertBlock | null {
-  if (!pendingBeforeinputNativeInsertBlock) return null;
-  const age = Date.now() - pendingBeforeinputNativeInsertBlock.at;
-  if (age > PENDING_BEFOREINPUT_NATIVE_INSERT_BLOCK_TTL_MS) {
-    pendingBeforeinputNativeInsertBlock = null;
-    return null;
-  }
-  if (pendingBeforeinputNativeInsertBlock.text !== text) {
-    return null;
-  }
-  const pending = pendingBeforeinputNativeInsertBlock;
-  pendingBeforeinputNativeInsertBlock = null;
-  return pending;
-}
-
 export function shouldSuppressHandledTextInputEcho(
   oldState: EditorState,
   tr: Transaction,
@@ -1598,7 +1564,6 @@ export function __debugRememberHandledTextInputDispatch(text: string, from: numb
 export function __debugResetHandledTextInputEcho(): void {
   pendingHandledTextInputEcho = null;
   recentHandledTextInputCall = null;
-  pendingBeforeinputNativeInsertBlock = null;
 }
 
 export function __debugShouldSuppressHandledTextInputEcho(oldState: EditorState, tr: Transaction): boolean {
@@ -1611,14 +1576,6 @@ export function __debugRememberHandledTextInputCall(text: string, from: number, 
 
 export function __debugShouldSuppressDuplicateHandledTextInputCall(text: string, from: number, to: number): boolean {
   return shouldSuppressDuplicateHandledTextInputCall(text, from, to);
-}
-
-export function __debugRememberPendingBeforeinputNativeInsertBlock(text: string, from: number, to: number): void {
-  rememberPendingBeforeinputNativeInsertBlock(text, from, to);
-}
-
-export function __debugConsumePendingBeforeinputNativeInsertBlock(text: string): PendingBeforeinputNativeInsertBlock | null {
-  return consumePendingBeforeinputNativeInsertBlock(text);
 }
 
 function buildPlainInsertionSuggestionFallbackTransaction(
@@ -3064,25 +3021,6 @@ export const suggestionsPlugin = $prose(() => {
             }
           }
 
-          if (!view.composing && isSuggestionsEnabled(view.state) && inputEvent.inputType === 'insertText') {
-            const text = typeof inputEvent.data === 'string' ? inputEvent.data : '';
-            if (text.length > 0) {
-              const pendingBlock = consumePendingBeforeinputNativeInsertBlock(text);
-              if (pendingBlock) {
-                console.log('[suggestions.beforeinput.preventNativeInsertText]', {
-                  text,
-                  pendingFrom: pendingBlock.from,
-                  pendingTo: pendingBlock.to,
-                  selectionFrom: view.state.selection.from,
-                  selectionTo: view.state.selection.to,
-                });
-                event.preventDefault();
-                event.stopPropagation();
-                return true;
-              }
-            }
-          }
-
           if (!isSuggestionsEnabled(view.state)) return false;
           if (view.composing) return false;
           const pendingIntent = takePendingModifiedDeleteIntent(view);
@@ -3111,7 +3049,7 @@ export const suggestionsPlugin = $prose(() => {
         },
       },
 
-      handleTextInput(view, from, to, text) {
+      handleTextInput(view, from, to, text, deflt) {
         const enabled = isSuggestionsEnabled(view.state);
         console.log('[suggestions.handleTextInput]', {
           enabled,
@@ -3146,11 +3084,12 @@ export const suggestionsPlugin = $prose(() => {
             return true;
           }
           rememberHandledTextInputCall(text, insertFrom, insertTo);
-          rememberPendingBeforeinputNativeInsertBlock(text, insertFrom, insertTo);
           rememberHandledTextInputDispatch(text, insertFrom, insertTo);
-          const textInputTr = view.state.tr
-            .insertText(text, insertFrom, insertTo)
-            .setMeta(HANDLED_TEXT_INPUT_META, { text, from: insertFrom, to: insertTo });
+          const textInputTr = (insertFrom === from && insertTo === to)
+            ? deflt().setMeta(HANDLED_TEXT_INPUT_META, { text, from: insertFrom, to: insertTo })
+            : view.state.tr
+                .insertText(text, insertFrom, insertTo)
+                .setMeta(HANDLED_TEXT_INPUT_META, { text, from: insertFrom, to: insertTo });
           view.dispatch(textInputTr);
           return true;
         };

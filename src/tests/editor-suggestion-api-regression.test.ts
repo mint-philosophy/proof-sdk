@@ -203,8 +203,11 @@ function run(): void {
   );
 
   assert(
-    editorSource.includes('mergedIncomingMarks = mergePendingServerMarks(getMarkMetadataWithQuotes(view.state), incomingMarks);'),
-    'Expected collab.onMarks to merge incoming metadata against the quote-aware local snapshot',
+    editorSource.includes('const pmMetadata = getMarkMetadataWithQuotes(view.state);')
+      && editorSource.includes('mergedIncomingMarks = mergePendingServerMarks(')
+      && editorSource.includes('{ ...this.lastReceivedServerMarks, ...pmMetadata },')
+      && editorSource.includes('incomingMarks,'),
+    'Expected collab.onMarks to merge incoming metadata against the quote-aware local snapshot while retaining pre-hydration server marks as fallback',
   );
 
   const applyAuthoritativeShareMarksBlock = sliceBetween(
@@ -273,6 +276,8 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('const carriesIncomingSuggestionMarks = Boolean(tr?.docChanged) && transactionCarriesInsertedSuggestionMarks(tr);')
       && setupSuggestionsInterceptorBlock.includes("const isRemoteContentChange = Boolean(tr?.docChanged) && (")
       && setupSuggestionsInterceptorBlock.includes('|| (yjsOrigin.isYjsOrigin && carriesIncomingSuggestionMarks)')
+      && setupSuggestionsInterceptorBlock.includes('const suggestionsEnabled = isSuggestionsEnabledPlugin(view.state);')
+      && !setupSuggestionsInterceptorBlock.includes('const suggestionsEnabled = pluginEnabled && isSuggestionsModuleEnabled();')
       && setupSuggestionsInterceptorBlock.includes('if (isRemoteContentChange) {')
       && setupSuggestionsInterceptorBlock.includes('const preserveInsertCoalescing = this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(')
       && setupSuggestionsInterceptorBlock.includes('if (!preserveInsertCoalescing) {')
@@ -283,7 +288,7 @@ function run(): void {
       && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
-    'Expected the suggestions interceptor to pass through collab/template system transactions, while skipping TC wrapping for explicit Yjs echoes and raw y-sync transactions that already carry incoming suggestion-marked content',
+    'Expected the suggestions interceptor to pass through collab/template system transactions, while deriving TC enabled state from the canonical plugin/module helper so tracked typing cannot diverge from tracked deletes',
   );
   assert(
     preserveInsertCoalescingBlock.includes('if (!this.collabEnabled) return false;')

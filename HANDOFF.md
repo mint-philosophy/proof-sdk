@@ -7,6 +7,50 @@
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
 
+## Fix26 stress-report follow-up
+
+Shared report:
+- `/tmp/codex-qa-stress-test.md`
+
+Requested:
+- investigate the fresh browser QA stress failures where shared-doc tracked inserts were rendering as plain text, reloads were reading stale/degraded mark state, overwrite+reload showed both original and replacement content, and multi-paragraph reject still had a separate failing lane
+
+What changed:
+- `server/routes.ts`
+  - switched `/api/documents/:slug` and `/api/documents/:slug/open-context` from the sync canonical reader to `await getCanonicalReadableDocument(slug, 'share')`
+  - this makes share reads follow fragment-derived canonical authority instead of stale `Y.Text` snapshots when the live fragment is ahead
+- `src/tests/share-open-context-canonical-fallback.test.ts`
+  - extended the fallback regression so a live fragment can be ahead of `Y.Text`, and both `/api/documents/:slug` and `/open-context` must still serve the fragment-authoritative markdown
+- `src/editor/index.ts`
+  - normalized the dispatch interceptor to use the canonical suggestions-enabled helper instead of a stricter local `pluginEnabled && moduleFlag` gate
+- `src/editor/plugins/suggestions.ts`
+  - removed the extra module-flag hard stop inside `wrapTransactionForSuggestions`
+  - relaxed appendTransaction’s “TC off” leak-strip gate so it only treats TC as disabled when both the plugin state and module flag are off
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the source guard to assert the new unified enabled-state wiring and the current `collab.onMarks` merge shape
+
+Why this likely addresses the stress report:
+- the browser delete-vs-insert asymmetry matched a concrete code split:
+  - delete handlers were using the OR-combined suggestions-enabled helper
+  - text wrapping was gated more strictly and could pass plain insertions through
+- the share reload mismatch was also concrete:
+  - `/state` already used the async canonical reader
+  - `/open-context` and `/api/documents/:slug` were still using the sync reader, so the browser could rehydrate from a different truth than the one QA saw via `/state`
+
+Verified locally:
+- `npx tsx src/tests/share-open-context-canonical-fallback.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npx tsx src/tests/track-changes-disabled-direct-edit.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/share-client-mark-preconditions.test.ts`
+- `npx tsx src/tests/share-marks-refresh.test.ts`
+- `npm run test:server-routes-share`
+- `npm run test:proof-sdk`
+- `npm run build`
+
+Known note:
+- `npx tsx src/tests/suggestions-replacement-decomposition.test.ts` still hits the existing `split-gap` adjacent-merge assertion (`Expected adjacent split insert merge to heal a bare-space split into a single pending insert`). I did not change that merge logic in this fix.
+
 ## Fix25 browser QA pass
 
 Shared reports:

@@ -1617,17 +1617,6 @@ export function wrapTransactionForSuggestions(
   if (!enabled || !tr.docChanged) {
     return tr;
   }
-  // Module-level defense: even if the dispatch interceptor passed enabled=true,
-  // refuse to wrap when the module flag says TC is off. This catches stale
-  // plugin state reads in the dispatch interceptor.
-  if (!suggestionsModuleEnabled) {
-    console.log('[suggestions.wrapTransactionForSuggestions.moduleDisabled]', {
-      enabled,
-      suggestionsModuleEnabled,
-      docChanged: tr.docChanged,
-    });
-    return tr;
-  }
   if (isExplicitYjsChangeOriginTransaction(tr)) {
     return tr;
   }
@@ -2494,7 +2483,7 @@ export const suggestionsPlugin = $prose(() => {
 
       // Use module flag as fallback — catches cases where plugin state
       // reads return stale data in the dispatch interceptor
-      const effectivelyDisabled = !isEnabled || !suggestionsModuleEnabled;
+      const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled;
       if (effectivelyDisabled) {
         // When TC is off, strip any suggestion marks that leaked onto new content.
         // We check ALL doc-changing transactions, including those marked as

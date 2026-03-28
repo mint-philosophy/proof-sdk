@@ -6,6 +6,7 @@ import {
   applyAgentPresenceToLoadedCollab,
   applyCanonicalDocumentToCollab,
   buildCollabSession,
+  getCanonicalReadableDocument,
   getCanonicalReadableDocumentSync,
   getCollabRuntime,
   invalidateCollabDocument,
@@ -1170,14 +1171,14 @@ export async function handleShareMarkdown(req: Request, res: Response): Promise<
 }
 
 // Get a shared document
-apiRoutes.get('/documents/:slug', (req: Request, res: Response) => {
+apiRoutes.get('/documents/:slug', async (req: Request, res: Response) => {
   const slug = getSlugParam(req);
   if (!slug) {
     res.status(400).json({ error: 'Invalid slug' });
     return;
   }
 
-  const doc = getCanonicalReadableDocumentSync(slug, 'share') ?? getDocumentBySlug(slug);
+  const doc = await getCanonicalReadableDocument(slug, 'share') ?? getDocumentBySlug(slug);
   if (!doc) {
     res.status(404).json({ error: 'Document not found' });
     return;
@@ -1941,7 +1942,7 @@ apiRoutes.get('/documents/:slug/open-context', async (req: Request, res: Respons
     res.status(400).json({ error: 'Invalid slug' });
     return;
   }
-  const doc = getCanonicalReadableDocumentSync(slug, 'share') ?? getDocumentBySlug(slug);
+  const doc = await getCanonicalReadableDocument(slug, 'share') ?? getDocumentBySlug(slug);
   if (!doc) {
     res.status(404).json({ error: 'Document not found' });
     return;

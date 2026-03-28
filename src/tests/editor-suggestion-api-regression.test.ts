@@ -282,10 +282,10 @@ function run(): void {
       && suggestionsSource.includes('export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {')
       && suggestionsSource.includes('resetSuggestionsInsertCoalescing();')
       && suggestionsSource.includes("const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';")
-      && suggestionsSource.includes("const BEFOREINPUT_HANDLED_TEXT_INPUT_TTL_MS = 150;")
-      && suggestionsSource.includes("console.log('[suggestions.beforeinput.insertText]', {")
-      && suggestionsSource.includes("console.log('[suggestions.handleTextInput.skipBeforeinputHandled]', {"),
-    'Expected toggling track changes on or off to clear stale insert coalescing state, define handled text-input suppression keys, and route ordinary TC typing through beforeinput with a handleTextInput fallback skip',
+      && suggestionsSource.includes("const PENDING_BEFOREINPUT_NATIVE_INSERT_BLOCK_TTL_MS = 150;")
+      && suggestionsSource.includes("console.log('[suggestions.beforeinput.preventNativeInsertText]', {")
+      && suggestionsSource.includes('rememberPendingBeforeinputNativeInsertBlock(text, insertFrom, insertTo);'),
+    'Expected toggling track changes on or off to clear stale insert coalescing state, define handled text-input suppression keys, and let handleTextInput own tracked insertion while beforeinput only blocks the browser native insert',
   );
   const suggestionsAppendTransactionBlock = sliceBetween(
     suggestionsSource,

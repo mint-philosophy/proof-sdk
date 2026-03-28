@@ -1,11 +1,56 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `56da2a8ead9df185438272fe741ab8e2988754e9b9b409e765bb79ca5b234f60`
+- Live client bundle on `proof-test.mintresearch.org`: `2a4eb6591de8a4ce06751443ad89f1816373e8bdca45cba53229951f9f2d2836`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix43 let handleTextInput dispatch and beforeinput only block native insertion
+
+Shared reports:
+- browser QA on fix42 showed the exact event order for a single typed character:
+  1. `handleTextInput` dispatched the tracked insert
+  2. the custom `beforeinput` handler ran afterward
+  3. the old fix42 `beforeinput` path dispatched a second tracked insert
+- that means fix42 was architecturally backwards for this browser/runtime:
+  - `handleTextInput` is the first dispatch source
+  - `beforeinput` is only useful as a later native-DOM blocker
+
+Requested:
+- keep `handleTextInput` as the only tracked-insert dispatcher and make `beforeinput` block only the browser's raw insertion after that dispatch
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - removed the fix42 behavior where `beforeinput` dispatched an insert transaction
+  - `handleTextInput` now records a short-lived pending native-insert block before it dispatches the tracked insert
+  - `beforeinput` for `insertText` now only:
+    - consumes that pending block when the text matches
+    - logs `[suggestions.beforeinput.preventNativeInsertText]`
+    - calls `preventDefault()` / `stopPropagation()`
+    - returns `true`
+  - ordinary tracked insertion still originates only from `handleTextInput`
+  - removed the old `skipBeforeinputHandled` fallback logic because the order is the opposite in the live browser
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - replaced the fix42 regression with a blocker-only regression proving the pending native-insert block is consumed once and then clears
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the source guard to expect:
+    - `rememberPendingBeforeinputNativeInsertBlock(...)` in `handleTextInput`
+    - `[suggestions.beforeinput.preventNativeInsertText]` in `beforeinput`
+
+Why this is the right next step:
+- the browser logs ruled out duplicate `handleTextInput` callbacks
+- they also ruled out `beforeinput` as the first dispatch source
+- once the ordering is known, the only coherent fix is:
+  - `handleTextInput` dispatches once
+  - `beforeinput` blocks the browser/native insert and nothing else
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npm run build`
 
 ## Fix42 route ordinary TC typing through beforeinput
 

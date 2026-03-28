@@ -3,11 +3,11 @@ import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 
 import { marksPluginKey } from '../editor/plugins/marks.js';
 import {
-  __debugRememberBeforeinputHandledTextInput,
+  __debugConsumePendingBeforeinputNativeInsertBlock,
   __debugRememberHandledTextInputDispatch,
   __debugRememberHandledTextInputCall,
+  __debugRememberPendingBeforeinputNativeInsertBlock,
   __debugResetHandledTextInputEcho,
-  __debugShouldSkipHandleTextInputBecauseBeforeinputHandled,
   __debugShouldSuppressDuplicateHandledTextInputCall,
   __debugShouldSuppressHandledTextInputEcho,
   wrapTransactionForSuggestions,
@@ -166,15 +166,16 @@ function run(): void {
   );
 
   __debugResetHandledTextInputEcho();
-  __debugRememberBeforeinputHandledTextInput('a', 18, 18);
+  __debugRememberPendingBeforeinputNativeInsertBlock('a', 18, 18);
+  const pendingNativeBlock = __debugConsumePendingBeforeinputNativeInsertBlock('a');
   assert(
-    __debugShouldSkipHandleTextInputBecauseBeforeinputHandled('a', 18, 18),
-    'Expected handleTextInput to skip when beforeinput already handled the same text and range',
+    pendingNativeBlock !== null && pendingNativeBlock.from === 18 && pendingNativeBlock.to === 18,
+    'Expected beforeinput native-insert blocking to consume the pending handled-text-input block for the same character',
   );
   assertEqual(
-    __debugShouldSkipHandleTextInputBecauseBeforeinputHandled('a', 18, 18),
-    false,
-    'Expected beforeinput-handled skipping to be one-shot',
+    __debugConsumePendingBeforeinputNativeInsertBlock('a'),
+    null,
+    'Expected beforeinput native-insert blocking to be one-shot',
   );
 
   console.log('suggestions-text-input-echo-regression.test.ts passed');

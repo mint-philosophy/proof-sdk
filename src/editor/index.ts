@@ -1071,6 +1071,7 @@ type NativeTextInputRuntimeTrace = {
   startedAt: number;
   expiresAt: number;
   reason: string;
+  suppressedMetadataStrip: boolean;
 };
 
 type RuntimeRangeSnapshot = {
@@ -5901,10 +5902,26 @@ class ProofEditorImpl implements ProofEditor {
       startedAt: now,
       expiresAt: now + this.nativeTextInputRuntimeTraceWindowMs,
       reason,
+      suppressedMetadataStrip: false,
     };
     this.activeNativeTextInputRuntimeTrace = trace;
     console.log('[tc.runtime.nativeTextInputTrace.begin]', trace);
     return trace;
+  }
+
+  private clearActiveNativeTextInputRuntimeTrace(reason: string, extra: Record<string, unknown> = {}): void {
+    const trace = this.activeNativeTextInputRuntimeTrace;
+    if (!trace) return;
+    console.log('[tc.runtime.nativeTextInputTrace.clear]', {
+      traceId: trace.id,
+      from: trace.from,
+      to: trace.to,
+      text: trace.text,
+      reason,
+      suppressedMetadataStrip: trace.suppressedMetadataStrip,
+      ...extra,
+    });
+    this.activeNativeTextInputRuntimeTrace = null;
   }
 
   private getActiveNativeTextInputRuntimeTrace(): NativeTextInputRuntimeTrace | null {
@@ -5960,6 +5977,8 @@ class ProofEditorImpl implements ProofEditor {
     const beforeHasSuggestion = beforeRange.marks.some((mark) => mark.startsWith('proofSuggestion'));
     const afterHasSuggestion = afterRange.marks.some((mark) => mark.startsWith('proofSuggestion'));
     if (!beforeHasSuggestion || afterHasSuggestion) return false;
+
+    trace.suppressedMetadataStrip = true;
 
     console.log('[tc.dispatch.suppressNativeTextInputMetadataStrip]', {
       traceId: trace.id,
@@ -6383,10 +6402,13 @@ class ProofEditorImpl implements ProofEditor {
               nativeTextInputMatch.from,
               nativeTextInputMatch.to,
             );
+            const activeNativeTrace = this.getActiveNativeTextInputRuntimeTrace();
+            const suppressedMetadataStrip = activeNativeTrace?.suppressedMetadataStrip === true;
             console.log('[tc.dispatch.nativeTextInputResult]', {
               from: nativeTextInputMatch.from,
               to: nativeTextInputMatch.to,
               text: nativeTextInputMatch.text,
+              suppressedMetadataStrip,
               finalText: view.state.doc.textBetween(
                 nativeTextInputMatch.from,
                 nativeTextInputMatch.to,
@@ -6404,7 +6426,15 @@ class ProofEditorImpl implements ProofEditor {
               '\n',
               '\n',
             ) === nativeTextInputMatch.text;
-            if (!finalHasSuggestionMark && finalTextMatches) {
+            if (finalHasSuggestionMark && finalTextMatches) {
+              this.clearActiveNativeTextInputRuntimeTrace('nativeTextInputStable', {
+                from: nativeTextInputMatch.from,
+                to: nativeTextInputMatch.to,
+                text: nativeTextInputMatch.text,
+              });
+              return;
+            }
+            if (!finalHasSuggestionMark && finalTextMatches && !suppressedMetadataStrip) {
               const settledRepairTr = buildNativeTextInputFollowupWrapTransaction(
                 beforeState,
                 view.state,
@@ -6422,8 +6452,28 @@ class ProofEditorImpl implements ProofEditor {
                   }),
                 });
                 dispatchWithRevision(settledRepairTr, 'nativeTextInputSettledRepair');
+                this.clearActiveNativeTextInputRuntimeTrace('nativeTextInputSettledRepairDispatched', {
+                  from: nativeTextInputMatch.from,
+                  to: nativeTextInputMatch.to,
+                  text: nativeTextInputMatch.text,
+                });
               }
             }
+            if (suppressedMetadataStrip) {
+              this.clearActiveNativeTextInputRuntimeTrace('nativeTextInputSuppressedStripSkipRepair', {
+                from: nativeTextInputMatch.from,
+                to: nativeTextInputMatch.to,
+                text: nativeTextInputMatch.text,
+              });
+              return;
+            }
+            this.clearActiveNativeTextInputRuntimeTrace('nativeTextInputResultNoRepair', {
+              from: nativeTextInputMatch.from,
+              to: nativeTextInputMatch.to,
+              text: nativeTextInputMatch.text,
+              finalHasSuggestionMark,
+              finalTextMatches,
+            });
             return;
           }
 

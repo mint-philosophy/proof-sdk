@@ -1,11 +1,43 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `f9ab76c759aa6a36ed0f2f14b15f0de1b2b5ecf363ee9c6c78aa9837aa0d410f`
+- Live client bundle on `proof-test.mintresearch.org`: `75d73c5c166a0665974358e387aefb3236bdc26029693e2d90897f031c08809f`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix38 handled-text-input echo diagnostics
+
+Shared reports:
+- browser QA on fix37: character duplication still happens on fresh docs
+- console showed many `handleTextInput` logs but zero `tc.dispatch.suppressHandledTextInputEcho` logs
+- that means the echo suppressor is not matching the duplicate transaction shape, or the duplicate path is a second handled text-input dispatch rather than a raw DOM echo
+
+Requested:
+- log the exact remembered expectation versus the actual follow-up transaction shape so the duplicate path can be identified precisely
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - `rememberHandledTextInputDispatch()` now logs `[suggestions.handleTextInput.rememberEcho]` with:
+    - `text`
+    - `from`
+    - `to`
+    - `expectedFrom`
+    - `expectedTo`
+  - `shouldSuppressHandledTextInputEcho()` now logs:
+    - `[suggestions.handleTextInput.echoCheck.skipHandledMeta]` when the follow-up transaction is itself tagged as handled text input
+    - `[suggestions.handleTextInput.echoCheck.expired]` when the pending echo window times out
+    - `[suggestions.handleTextInput.echoCheck.noDocChange]` when a checked transaction does not change the doc
+    - `[suggestions.handleTextInput.echoCheck.noPlainInsertDiff]` when the transaction is not a simple plain insertion diff
+    - `[suggestions.handleTextInput.echoCheck]` with both the pending expectation and the actual detected diff when a plain insertion diff exists
+
+Why this is the right next step:
+- fix37’s predicate works in the local regression, so the remaining failure is now about the live browser transaction shape
+- these logs will tell us whether the duplicate path is:
+  - a second handled `handleTextInput` dispatch
+  - a raw DOM echo with different positions than expected
+  - a non-plain diff shape entirely
 
 ## Fix37 suppress handled text-input DOM echoes
 

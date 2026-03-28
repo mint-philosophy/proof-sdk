@@ -1432,6 +1432,13 @@ function rememberHandledTextInputDispatch(text: string, from: number, to: number
     expectedTo: expectedFrom + text.length,
     at: Date.now(),
   };
+  console.log('[suggestions.handleTextInput.rememberEcho]', {
+    text,
+    from,
+    to,
+    expectedFrom,
+    expectedTo: expectedFrom + text.length,
+  });
 }
 
 export function shouldSuppressHandledTextInputEcho(
@@ -1439,21 +1446,58 @@ export function shouldSuppressHandledTextInputEcho(
   tr: Transaction,
 ): boolean {
   if (!pendingHandledTextInputEcho) return false;
-  if (tr.getMeta(HANDLED_TEXT_INPUT_META) !== undefined) return false;
+  if (tr.getMeta(HANDLED_TEXT_INPUT_META) !== undefined) {
+    console.log('[suggestions.handleTextInput.echoCheck.skipHandledMeta]', {
+      pending: pendingHandledTextInputEcho,
+      selectionFrom: tr.selection?.from ?? null,
+      selectionTo: tr.selection?.to ?? null,
+      stepTypes: tr.steps.map((step) => (step?.toJSON?.() as { stepType?: string } | undefined)?.stepType ?? 'unknown'),
+    });
+    return false;
+  }
 
   const age = Date.now() - pendingHandledTextInputEcho.at;
   if (age > HANDLED_TEXT_INPUT_ECHO_TTL_MS) {
+    console.log('[suggestions.handleTextInput.echoCheck.expired]', {
+      pending: pendingHandledTextInputEcho,
+      age,
+      ttlMs: HANDLED_TEXT_INPUT_ECHO_TTL_MS,
+    });
     pendingHandledTextInputEcho = null;
     return false;
   }
 
-  if (!tr.docChanged) return false;
+  if (!tr.docChanged) {
+    console.log('[suggestions.handleTextInput.echoCheck.noDocChange]', {
+      pending: pendingHandledTextInputEcho,
+      selectionFrom: tr.selection?.from ?? null,
+      selectionTo: tr.selection?.to ?? null,
+    });
+    return false;
+  }
   const diff = detectPlainTextInsertionBetweenDocs(oldState.doc, tr.doc);
-  if (!diff) return false;
+  if (!diff) {
+    console.log('[suggestions.handleTextInput.echoCheck.noPlainInsertDiff]', {
+      pending: pendingHandledTextInputEcho,
+      selectionFrom: tr.selection?.from ?? null,
+      selectionTo: tr.selection?.to ?? null,
+      stepTypes: tr.steps.map((step) => (step?.toJSON?.() as { stepType?: string } | undefined)?.stepType ?? 'unknown'),
+    });
+    return false;
+  }
 
   const shouldSuppress = diff.insertedText === pendingHandledTextInputEcho.text
     && diff.from === pendingHandledTextInputEcho.expectedFrom
     && diff.to === pendingHandledTextInputEcho.expectedTo;
+
+  console.log('[suggestions.handleTextInput.echoCheck]', {
+    pending: pendingHandledTextInputEcho,
+    diff,
+    shouldSuppress,
+    selectionFrom: tr.selection?.from ?? null,
+    selectionTo: tr.selection?.to ?? null,
+    stepTypes: tr.steps.map((step) => (step?.toJSON?.() as { stepType?: string } | undefined)?.stepType ?? 'unknown'),
+  });
 
   if (shouldSuppress) {
     pendingHandledTextInputEcho = null;

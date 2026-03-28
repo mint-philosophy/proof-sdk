@@ -337,9 +337,12 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.passthroughNativeTextInput]', {")
       && setupSuggestionsInterceptorBlock.includes("tr.setMeta('proof-native-typed-input', true);")
       && setupSuggestionsInterceptorBlock.includes("tr.setMeta('proof-native-typed-input-match', nativeTextInputMatch);")
-      && !setupSuggestionsInterceptorBlock.includes('queueMicrotask(() => {')
-      && !setupSuggestionsInterceptorBlock.includes('buildNativeTextInputFollowupWrapTransaction('),
-    'Expected the suggestions interceptor to annotate the matched native typed-insert transaction directly and let appendTransaction perform the immediate mark-only wrap',
+      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.nativeTextInputResult]', {")
+      && setupSuggestionsInterceptorBlock.includes('const finalHasSuggestionMark = finalNodes.some((node) =>')
+      && setupSuggestionsInterceptorBlock.includes('const settledRepairTr = buildNativeTextInputFollowupWrapTransaction(')
+      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.nativeTextInputSettledRepair]', {")
+      && !setupSuggestionsInterceptorBlock.includes('queueMicrotask(() => {'),
+    'Expected the suggestions interceptor to annotate the matched native typed-insert transaction directly, inspect the settled post-dispatch state, and immediately rewrap the exact native insert range if the full dispatch cycle strips the live suggestion mark',
   );
   const preserveInsertCoalescingBlock = sliceBetween(
     editorSource,

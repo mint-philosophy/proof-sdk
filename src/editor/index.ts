@@ -65,6 +65,7 @@ import {
   hasRecentSuggestionsInsertCoalescingState,
   transactionCarriesInsertedSuggestionMarks,
   wrapTransactionForSuggestions,
+  buildNativeTextInputFollowupWrapTransaction,
   buildTextPreservingInsertPersistenceTransaction,
   shouldSuppressHandledTextInputEcho,
   consumePendingNativeTextInputTransactionMatch,
@@ -6067,6 +6068,11 @@ class ProofEditorImpl implements ProofEditor {
             tr.setMeta('proof-native-typed-input', true);
             tr.setMeta('proof-native-typed-input-match', nativeTextInputMatch);
             dispatchWithRevision(tr);
+            const finalNodes = summarizeTransactionDocChangeNodes(
+              view.state.doc,
+              nativeTextInputMatch.from,
+              nativeTextInputMatch.to,
+            );
             console.log('[tc.dispatch.nativeTextInputResult]', {
               from: nativeTextInputMatch.from,
               to: nativeTextInputMatch.to,
@@ -6077,12 +6083,37 @@ class ProofEditorImpl implements ProofEditor {
                 '\n',
                 '\n',
               ),
-              finalNodes: summarizeTransactionDocChangeNodes(
-                view.state.doc,
-                nativeTextInputMatch.from,
-                nativeTextInputMatch.to,
-              ),
+              finalNodes,
             });
+            const finalHasSuggestionMark = finalNodes.some((node) =>
+              node.marks.some((mark) => mark.startsWith('proofSuggestion')),
+            );
+            const finalTextMatches = view.state.doc.textBetween(
+              nativeTextInputMatch.from,
+              nativeTextInputMatch.to,
+              '\n',
+              '\n',
+            ) === nativeTextInputMatch.text;
+            if (!finalHasSuggestionMark && finalTextMatches) {
+              const settledRepairTr = buildNativeTextInputFollowupWrapTransaction(
+                beforeState,
+                view.state,
+                nativeTextInputMatch,
+              );
+              if (settledRepairTr) {
+                settledRepairTr.setMeta('addToHistory', false);
+                console.log('[tc.dispatch.nativeTextInputSettledRepair]', {
+                  from: nativeTextInputMatch.from,
+                  to: nativeTextInputMatch.to,
+                  text: nativeTextInputMatch.text,
+                  stepTypes: settledRepairTr.steps.map((step: any) => {
+                    const stepJson = step?.toJSON?.() as { stepType?: string } | undefined;
+                    return stepJson?.stepType ?? step?.constructor?.name ?? 'unknown';
+                  }),
+                });
+                dispatchWithRevision(settledRepairTr);
+              }
+            }
             return;
           }
 

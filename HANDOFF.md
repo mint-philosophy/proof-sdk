@@ -1,10 +1,10 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `7fd8c67b42659d776b789d455670c7adf4f14523f59148b790e45acc4839c01b`
+- Live client bundle on `proof-test.mintresearch.org`: `badacd3056364c9af8550ece84f8919f85ef1de5d2cb4c73cf60d5d2708c052c`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
-  - `FIX46_PENDING` local only until pushed from this checkout
+  - `ca60b7c` `fix46: passthrough native typed insert before wrapping`
   - `b32f272` `fix45: defer tracked typing to native prosemirror flow`
   - `273b3b6` `fix44: use prosemirror default text input transactions`
   - `c9615af` `fix25: repair fragmented share insert marks on reload`

@@ -371,6 +371,21 @@ function resolveStoredMarkRange(doc: ProseMirrorNode, stored: StoredMark): MarkR
     && (storedRange.to > storedRange.from || stored.kind === 'insert')
   ) {
     const candidateRange = { from: storedRange.from, to: storedRange.to };
+    if (
+      stored.kind === 'insert'
+      && stored.status !== 'accepted'
+      && stored.status !== 'rejected'
+      && candidateRange.from === candidateRange.to
+    ) {
+      const materializedRange = resolveMaterializedPendingInsertRange(
+        doc,
+        getExpectedPendingInsertRawText(doc, stored, candidateRange),
+        [candidateRange.from, candidateRange.to],
+      );
+      if (materializedRange) {
+        return materializedRange;
+      }
+    }
     if (!normalizedStoredQuote) {
       if (allowsQuoteLessAnchorFallback) {
         return candidateRange;

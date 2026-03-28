@@ -4258,6 +4258,114 @@ test('metadata-only insert suggestions with collapsed ranges rehydrate at the in
   );
 });
 
+test('applyRemoteMarks materializes collapsed insert metadata onto existing plain text instead of rendering a widget duplicate', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'inline*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'insert' },
+          by: { default: 'unknown' },
+          status: { default: 'pending' },
+          content: { default: null },
+          createdAt: { default: null },
+          updatedAt: { default: null },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      proofAuthored: {
+        attrs: {
+          by: { default: 'unknown' },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+    },
+  });
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        return value;
+      },
+    },
+  });
+
+  const markId = 'm-materialized-collapsed-insert';
+  let state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text('Alpha brave beta gamma.')]),
+    ]),
+    plugins: [marksStatePlugin],
+  });
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  applyRemoteMarks(view, {
+    [markId]: {
+      kind: 'insert',
+      by: 'human:test',
+      createdAt: new Date('2026-03-28T12:00:00.000Z').toISOString(),
+      content: ' brave',
+      status: 'pending',
+      range: { from: 6, to: 6 },
+    },
+  }, { hydrateAnchors: true });
+
+  const materializedInsert = getMarks(view.state).find((mark) => mark.id === markId);
+  assert(materializedInsert, 'Collapsed insert metadata should remain actionable when its text is already materialized in the document');
+  assertDeepEqual(
+    materializedInsert!.range,
+    { from: 6, to: 12 },
+    'Materialized plain insert text should resolve to the live inserted span instead of staying collapsed',
+  );
+
+  const decorations = __debugDescribeDecorations(
+    view.state,
+    getMarks(view.state),
+    null,
+    null,
+    'simple',
+  );
+  assert(
+    !decorations.some((decoration) =>
+      decoration.markId === markId
+      && decoration.decorationRole === 'replace-preview'
+      && decoration.text === ' brave'
+    ),
+    'Materialized collapsed inserts should not render a preview widget duplicate once the inserted text already exists',
+  );
+  assert(
+    decorations.some((decoration) =>
+      decoration.markId === markId
+      && decoration.to > decoration.from
+      && decoration.className.includes('mark-insert')
+      && decoration.decorationRole === 'inline-mark'
+    ),
+    'Materialized collapsed inserts should render as a single inline insert decoration over the existing text',
+  );
+});
+
 test('accept does not duplicate split insert suggestions that already exist in the document', () => {
   const schema = new Schema({
     nodes: {

@@ -19,7 +19,7 @@ import {
   syncInsertSuggestionMetadataFromDoc,
 } from './suggestion-boundaries';
 import { shouldSuppressTrackChangesDeleteIntent, shouldSuppressTrackChangesKeydown } from './track-changes-delete-guard.js';
-import { isExplicitYjsChangeOriginTransaction } from './transaction-origins';
+import { getYjsTransactionOriginInfo, isExplicitYjsChangeOriginTransaction } from './transaction-origins';
 import { generateMarkId, type MarkRange, type StoredMark } from '../../formats/marks';
 import { getCurrentActor } from '../actor';
 
@@ -41,6 +41,19 @@ type SliceNode = {
   text?: string;
   marks?: Array<{ type?: string; attrs?: Record<string, unknown> }>;
   content?: SliceNode[];
+};
+
+type SuggestionIdSummary = {
+  insertIds: string[];
+  deleteIds: string[];
+  replaceIds: string[];
+};
+
+type DisabledSuggestionStripAnalysis = {
+  oldSummary: SuggestionIdSummary;
+  newSummary: SuggestionIdSummary;
+  introducedSummary: SuggestionIdSummary;
+  shouldStrip: boolean;
 };
 
 // Word-style track changes should keep a contiguous typing run together even when
@@ -185,6 +198,99 @@ function collectSuggestionIdsInRange(
   });
 
   return [...ids];
+}
+
+function collectSuggestionIdSummaryInRange(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+): SuggestionIdSummary {
+  return {
+    insertIds: collectSuggestionIdsInRange(doc, 'insert', from, to).sort(),
+    deleteIds: collectSuggestionIdsInRange(doc, 'delete', from, to).sort(),
+    replaceIds: collectSuggestionIdsInRange(doc, 'replace', from, to).sort(),
+  };
+}
+
+function collectIntroducedSuggestionIds(nextIds: string[], previousIds: string[]): string[] {
+  const previous = new Set(previousIds);
+  return nextIds.filter((id) => !previous.has(id)).sort();
+}
+
+function analyzeDisabledSuggestionStripDecision(
+  oldDoc: ProseMirrorNode,
+  newDoc: ProseMirrorNode,
+  oldRange: MarkRange,
+  newRange: MarkRange,
+): DisabledSuggestionStripAnalysis {
+  const oldSummary = collectSuggestionIdSummaryInRange(oldDoc, oldRange.from, oldRange.to);
+  const newSummary = collectSuggestionIdSummaryInRange(newDoc, newRange.from, newRange.to);
+  const introducedSummary = {
+    insertIds: collectIntroducedSuggestionIds(newSummary.insertIds, oldSummary.insertIds),
+    deleteIds: collectIntroducedSuggestionIds(newSummary.deleteIds, oldSummary.deleteIds),
+    replaceIds: collectIntroducedSuggestionIds(newSummary.replaceIds, oldSummary.replaceIds),
+  };
+  const shouldStrip = introducedSummary.insertIds.length > 0
+    || introducedSummary.deleteIds.length > 0
+    || introducedSummary.replaceIds.length > 0;
+  return {
+    oldSummary,
+    newSummary,
+    introducedSummary,
+    shouldStrip,
+  };
+}
+
+function removeSuggestionIdsFromRange(
+  tr: Transaction,
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+  suggestionType: MarkType,
+  suggestionIds: string[],
+): Transaction {
+  if (suggestionIds.length === 0) return tr;
+  const targetIds = new Set(suggestionIds);
+  let nextTr = tr;
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (!node.isText) return true;
+    const nodeStart = pos;
+    const nodeEnd = pos + node.nodeSize;
+    for (const mark of node.marks) {
+      if (mark.type !== suggestionType) continue;
+      const id = typeof mark.attrs.id === 'string' ? mark.attrs.id : '';
+      if (!id || !targetIds.has(id)) continue;
+      nextTr = nextTr.removeMark(nodeStart, nodeEnd, mark);
+    }
+    return true;
+  });
+  return nextTr;
+}
+
+function summarizeAppendTransactionsForDebug(trs: readonly Transaction[]): Array<Record<string, unknown>> {
+  return trs.map((tr, index) => {
+    const suggestionsMeta = tr.getMeta(suggestionsPluginKey) as { enabled?: unknown } | undefined;
+    const marksMeta = tr.getMeta(marksPluginKey) as { type?: unknown } | undefined;
+    return {
+      index,
+      docChanged: tr.docChanged,
+      history: tr.getMeta('history$') !== undefined,
+      documentLoad: tr.getMeta('document-load') !== undefined,
+      wrapped: tr.getMeta('suggestions-wrapped') === true,
+      suggestionMetaEnabled: typeof suggestionsMeta?.enabled === 'boolean' ? suggestionsMeta.enabled : null,
+      marksMetaType: typeof marksMeta?.type === 'string' ? marksMeta.type : null,
+      yjsOrigin: getYjsTransactionOriginInfo(tr),
+    };
+  });
+}
+
+export function __debugAnalyzeDisabledSuggestionStripDecision(
+  oldDoc: ProseMirrorNode,
+  newDoc: ProseMirrorNode,
+  oldRange: MarkRange,
+  newRange: MarkRange,
+): DisabledSuggestionStripAnalysis {
+  return analyzeDisabledSuggestionStripDecision(oldDoc, newDoc, oldRange, newRange);
 }
 
 function findEditableInsertSuggestionAtPosition(
@@ -2529,6 +2635,10 @@ export const suggestionsPlugin = $prose(() => {
       const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled && !suggestionsDesiredEnabled;
       if (effectivelyDisabled) {
         const hasHistoryChange = trs.some((tr) => tr.getMeta('history$') !== undefined);
+        const hasExplicitDisable = trs.some((tr) => {
+          const meta = tr.getMeta(suggestionsPluginKey) as { enabled?: unknown } | undefined;
+          return Boolean(meta && typeof meta === 'object' && !Array.isArray(meta) && meta.enabled === false);
+        });
         // When TC is off, strip any suggestion marks that leaked onto new content.
         // We check ALL doc-changing transactions, including those marked as
         // 'suggestions-wrapped' — if TC is off, wrapped marks are leaks too.
@@ -2546,12 +2656,23 @@ export const suggestionsPlugin = $prose(() => {
                   return !hasLeakedMark;
                 });
                 if (hasLeakedMark) {
+                  const stripAnalysis = analyzeDisabledSuggestionStripDecision(
+                    oldState.doc,
+                    newState.doc,
+                    { from: diff, to: diffEnd.a },
+                    { from: diff, to: diffEnd.b },
+                  );
                   if (hasHistoryChange) {
                     console.log('[suggestions.appendTransaction.historyRestoreEnable]', {
                       diff,
+                      diffEndA: diffEnd.a,
                       diffEndB: diffEnd.b,
                       isEnabled,
                       suggestionsModuleEnabled,
+                      suggestionsDesiredEnabled,
+                      hasExplicitDisable,
+                      stripAnalysis,
+                      transactions: summarizeAppendTransactionsForDebug(trs),
                     });
                     suggestionsModuleEnabled = true;
                     const tr = newState.tr
@@ -2560,14 +2681,47 @@ export const suggestionsPlugin = $prose(() => {
                     tr.setMeta('suggestions-wrapped', true);
                     return tr;
                   }
+                  if (!stripAnalysis.shouldStrip) {
+                    console.log('[suggestions.appendTransaction.tcOffStripSkip]', {
+                      diff,
+                      diffEndA: diffEnd.a,
+                      diffEndB: diffEnd.b,
+                      isEnabled,
+                      suggestionsModuleEnabled,
+                      suggestionsDesiredEnabled,
+                      hasExplicitDisable,
+                      stripAnalysis,
+                      hadWrappedTr: trs.some((tr) => tr.getMeta('suggestions-wrapped')),
+                      transactions: summarizeAppendTransactionsForDebug(trs),
+                    });
+                    return null;
+                  }
                   console.log('[suggestions.appendTransaction.tcOffStrip]', {
                     diff,
+                    diffEndA: diffEnd.a,
                     diffEndB: diffEnd.b,
                     isEnabled,
                     suggestionsModuleEnabled,
+                    suggestionsDesiredEnabled,
+                    hasExplicitDisable,
+                    stripAnalysis,
                     hadWrappedTr: trs.some((tr) => tr.getMeta('suggestions-wrapped')),
+                    transactions: summarizeAppendTransactionsForDebug(trs),
                   });
-                  const tr = newState.tr.removeMark(diff, diffEnd.b, suggestionType);
+                  const introducedIds = [
+                    ...stripAnalysis.introducedSummary.insertIds,
+                    ...stripAnalysis.introducedSummary.deleteIds,
+                    ...stripAnalysis.introducedSummary.replaceIds,
+                  ];
+                  const tr = removeSuggestionIdsFromRange(
+                    newState.tr,
+                    newState.doc,
+                    diff,
+                    diffEnd.b,
+                    suggestionType,
+                    introducedIds,
+                  );
+                  if (tr.steps.length === 0) return null;
                   tr.setMeta('suggestions-wrapped', true);
                   return tr;
                 }

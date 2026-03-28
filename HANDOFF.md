@@ -1,11 +1,55 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `6df314ee6e4e5e3e9dadadbeb8241736de4a7fd3841b4a462667b5d72a81ca56`
+- Live client bundle on `proof-test.mintresearch.org`: `8d49822a3183fa90b29b26582b9e33ef5e4f468a21acd8f33818995688b229e4`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix34 TC-off strip diff guard follow-up
+
+Shared reports:
+- browser QA: insert suggestions now appear after hard reload, but later transactions can strip them back out
+- after hard reload + TC on, first typing produced a partial insert mark that was removed on a subsequent transaction
+- after toggle off/on, typing produced full insert marks, but the next user action could still strip them
+- deletions continued to track correctly, so the regression narrowed to post-insert cleanup rather than insert creation itself
+
+Requested:
+- stop the TC-off appendTransaction cleanup from stripping pre-existing insert suggestions that merely fall inside a later changed diff range
+- add diagnostics that show exactly which suggestion ids and runtime flags were present when TC-off cleanup decides to strip or skip
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - added diff-analysis helpers that compare old/new suggestion ids by kind across the changed range
+  - `appendTransaction.tcOffStrip` now removes only suggestion ids that are newly introduced by the current changed diff, instead of blanket-removing every suggestion mark in the diff range
+  - added `tcOffStripSkip` diagnostics plus richer `tcOffStrip` / `historyRestoreEnable` logs, including:
+    - `isEnabled`
+    - `suggestionsModuleEnabled`
+    - `suggestionsDesiredEnabled`
+    - explicit disable meta detection
+    - per-transaction origin/meta summaries
+    - old/new/introduced suggestion-id summaries by kind
+- `src/tests/suggestions-disabled-strip-regression.test.ts`
+  - added a focused regression proving:
+    - a later diff that still contains an existing insert id does not count as a new strip target
+    - a genuinely newly introduced insert id still does count as a strip target
+
+Why this likely addresses the current browser symptom:
+- the previous TC-off cleanup only asked "is there any suggestion mark anywhere in the changed diff range?"
+- that is too coarse once insert suggestions exist: a later unrelated transaction can produce a diff that overlaps an existing insert mark, and the cleanup would remove it even though that mark was not introduced by the new transaction
+- by narrowing strip targets to newly introduced suggestion ids, existing insert marks should survive follow-up edits while still allowing true TC-off leaks to be removed
+
+Verified locally:
+- `npx tsx src/tests/suggestions-disabled-strip-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npm run build`
+
+Scope note:
+- this patch is for the "insert mark created, then stripped later" lane
+- it adds diagnostics for the remaining TC-state mystery if stripping still happens
 
 ## Fix33 document-load undo-boundary follow-up
 

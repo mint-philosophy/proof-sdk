@@ -1,11 +1,37 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `406b33d9d9c5f7c51c82d99a2c508c42d228745a734fda63895d6dceddd9ebc6`
+- Live client bundle on `proof-test.mintresearch.org`: `948f796ebc42ada495aff695b9f6302c2d46098e2ed8cbbec8ac68bbf44dfe4e`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix36 quiet tracked-insert hot-path diagnostics
+
+Shared reports:
+- browser QA on fix34/fix35: typed insert suggestions now survive local follow-up actions much better, but long TC typing can freeze the tab
+- the freeze reproduces during tracked insert typing, not during delete review flows
+- fresh-tab local typing survival improved enough that the remaining hot path is the insert/coalesce repair machinery itself
+
+Requested:
+- stop tracked typing from stalling the browser while insert persistence/collab work continues
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - moved the high-frequency tracked-insert diagnostics behind a disabled `DEBUG_VERBOSE_INSERT_REPAIR` flag
+  - this covers the per-keystroke logs emitted by:
+    - insert coalescing candidate resolution
+    - whitespace-gap repair
+    - insert-decision routing
+    - adjacent split-merge run/window/skip scans
+- `src/tests/suggestions-split-merge-fixed-point.test.ts`
+  - added a fixed-point regression proving adjacent split-insert healing returns `null` once the healed state is already stable
+
+Why this likely addresses the freeze:
+- fix34 left very chatty diagnostics in the hottest typing path
+- when insert typing is fragmented, each keystroke can traverse and log multiple merge windows across the document
+- local helper simulation reached a fixed point instead of looping, which points to hot-path logging pressure rather than an endless appendTransaction repair cycle
 
 ## Fix35 preserve missing remote insert metadata follow-up
 

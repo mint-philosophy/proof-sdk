@@ -60,6 +60,7 @@ type DisabledSuggestionStripAnalysis = {
 // the user pauses briefly between keystrokes. A slightly longer window also makes
 // browser automation reflect real authoring behavior instead of splitting every key.
 const COALESCE_WINDOW_MS = 5000;
+const DEBUG_VERBOSE_INSERT_REPAIR = false;
 
 type InsertCoalesceState = { id: string; from: number; to: number; by: string; updatedAt: number };
 type TrackedDeleteIntent = { key: 'Backspace' | 'Delete'; modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean } };
@@ -68,6 +69,11 @@ type PendingTrackedDeleteIntent = { intent: TrackedDeleteIntent; at: number; han
 const lastInsertByActor = new Map<string, InsertCoalesceState>();
 const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
 const PENDING_DELETE_INTENT_TTL_MS = 1500;
+
+function logVerboseInsertRepair(...args: unknown[]): void {
+  if (!DEBUG_VERBOSE_INSERT_REPAIR) return;
+  console.log(...args);
+}
 
 /**
  * Module-level enabled flag — independent of ProseMirror plugin state.
@@ -471,26 +477,26 @@ function getCoalescableInsertCandidate(
 ): { id: string; range: MarkRange; direction: 'append' | 'prepend'; insertPos: number } | null {
   const cached = lastInsertByActor.get(by);
   if (!cached) {
-    console.log('[coalesce.debug] no cached entry for actor', by);
+    logVerboseInsertRepair('[coalesce.debug] no cached entry for actor', by);
     return null;
   }
   const elapsed = now - cached.updatedAt;
   if (elapsed > COALESCE_WINDOW_MS) {
-    console.log('[coalesce.debug] expired', { elapsed, COALESCE_WINDOW_MS, cachedId: cached.id });
+    logVerboseInsertRepair('[coalesce.debug] expired', { elapsed, COALESCE_WINDOW_MS, cachedId: cached.id });
     lastInsertByActor.delete(by);
     return null;
   }
 
   const stored = metadata[cached.id];
   if (stored?.kind && stored.kind !== 'insert') {
-    console.log('[coalesce.debug] wrong kind', { cachedId: cached.id, kind: stored.kind });
+    logVerboseInsertRepair('[coalesce.debug] wrong kind', { cachedId: cached.id, kind: stored.kind });
     lastInsertByActor.delete(by);
     return null;
   }
 
   const status = stored?.status;
   if (status && status !== 'pending') {
-    console.log('[coalesce.debug] wrong status', { cachedId: cached.id, status });
+    logVerboseInsertRepair('[coalesce.debug] wrong status', { cachedId: cached.id, status });
     lastInsertByActor.delete(by);
     return null;
   }
@@ -498,12 +504,12 @@ function getCoalescableInsertCandidate(
   const range = resolveLiveInsertSuggestionRange(doc, cached.id)
     ?? (stored?.kind === 'insert' && stored.range ? { from: stored.range.from, to: stored.range.to } : null);
   if (!range) {
-    console.log('[coalesce.debug] range not found', { cachedId: cached.id, storedKind: stored?.kind, storedRange: stored?.range });
+    logVerboseInsertRepair('[coalesce.debug] range not found', { cachedId: cached.id, storedKind: stored?.kind, storedRange: stored?.range });
     lastInsertByActor.delete(by);
     return null;
   }
 
-  console.log('[coalesce.debug] range resolved', { cachedId: cached.id, range, pos, elapsed });
+  logVerboseInsertRepair('[coalesce.debug] range resolved', { cachedId: cached.id, range, pos, elapsed });
 
   if (range.to === pos) {
     return { id: cached.id, range, direction: 'append', insertPos: pos };
@@ -513,7 +519,7 @@ function getCoalescableInsertCandidate(
     return { id: cached.id, range, direction: 'prepend', insertPos: pos };
   }
 
-  console.log('[coalesce.debug] position mismatch', { cachedId: cached.id, rangeFrom: range.from, rangeTo: range.to, pos });
+  logVerboseInsertRepair('[coalesce.debug] position mismatch', { cachedId: cached.id, rangeFrom: range.from, rangeTo: range.to, pos });
 
   const trailingDeleteRange = findTrailingDeleteRangeForInsert(doc, range, by, pos);
   if (trailingDeleteRange) {
@@ -1120,7 +1126,7 @@ function buildAdjacentSplitInsertMergeTransaction(
   if (oldPendingInsertIds.size === 0) return null;
 
   const runs = collectInlineInsertRuns(newState.doc);
-  console.log('[suggestions.mergeCheck.runs]', summarizeInlineInsertRuns(runs));
+  logVerboseInsertRepair('[suggestions.mergeCheck.runs]', summarizeInlineInsertRuns(runs));
   const mergedInsertIds = new Set<string>();
 
   for (let index = 0; index < runs.length; index += 1) {
@@ -1128,7 +1134,7 @@ function buildAdjacentSplitInsertMergeTransaction(
     const gap = runs[index + 1];
     const right = runs[index + 2];
     if (!left) continue;
-    console.log('[suggestions.mergeCheck.window]', {
+    logVerboseInsertRepair('[suggestions.mergeCheck.window]', {
       index,
       left: left.kind === 'insert'
         ? { kind: left.kind, id: left.id, by: left.by, text: left.text, from: left.from, to: left.to }
@@ -1194,7 +1200,7 @@ function buildAdjacentSplitInsertMergeTransaction(
 
     if (gap?.kind === 'plain' && right?.kind === 'insert') {
       if (!areInlineRunsAdjacent(left, gap) || !areInlineRunsAdjacent(gap, right)) {
-        console.log('[suggestions.mergeCheck.skip]', {
+        logVerboseInsertRepair('[suggestions.mergeCheck.skip]', {
           reason: 'non-adjacent-runs',
           leftId: left.id,
           rightId: right.id,
@@ -1206,16 +1212,16 @@ function buildAdjacentSplitInsertMergeTransaction(
         continue;
       }
       if (left.id === right.id) {
-        console.log('[suggestions.mergeCheck.skip]', { reason: 'same-id', id: left.id });
+        logVerboseInsertRepair('[suggestions.mergeCheck.skip]', { reason: 'same-id', id: left.id });
         continue;
       }
       const rightMeta = metadata[right.id];
       if (!rightMeta || rightMeta.kind !== 'insert') {
-        console.log('[suggestions.mergeCheck.skip]', { reason: 'missing-insert-metadata', leftId: left.id, rightId: right.id });
+        logVerboseInsertRepair('[suggestions.mergeCheck.skip]', { reason: 'missing-insert-metadata', leftId: left.id, rightId: right.id });
         continue;
       }
       if ((rightMeta.status && rightMeta.status !== 'pending')) {
-        console.log('[suggestions.mergeCheck.skip]', {
+        logVerboseInsertRepair('[suggestions.mergeCheck.skip]', {
           reason: 'non-pending-status',
           leftId: left.id,
           rightId: right.id,
@@ -1234,7 +1240,7 @@ function buildAdjacentSplitInsertMergeTransaction(
         rightBy,
       );
       if (rightWasPending && !allowRecentPendingPendingMerge) {
-        console.log('[suggestions.mergeCheck.skip]', {
+        logVerboseInsertRepair('[suggestions.mergeCheck.skip]', {
           reason: 'old-pending-id-shape',
           leftId: left.id,
           rightId: right.id,
@@ -1245,7 +1251,7 @@ function buildAdjacentSplitInsertMergeTransaction(
         continue;
       }
       if (leftBy !== rightBy) {
-        console.log('[suggestions.mergeCheck.skip]', {
+        logVerboseInsertRepair('[suggestions.mergeCheck.skip]', {
           reason: 'different-actors',
           leftId: left.id,
           rightId: right.id,
@@ -1255,7 +1261,7 @@ function buildAdjacentSplitInsertMergeTransaction(
         continue;
       }
       if (isPreExistingPlainText(oldState, newState, gap.from, gap.to, gap.text)) {
-        console.log('[suggestions.mergeCheck.skip]', {
+        logVerboseInsertRepair('[suggestions.mergeCheck.skip]', {
           reason: 'gap-is-pre-existing-authored-text',
           leftId: left.id,
           rightId: right.id,
@@ -1446,7 +1452,7 @@ function buildPlainInsertionSuggestionFallbackTransaction(
       if (liveRange && liveRange.to < diff.from) {
         const gapText = newState.doc.textBetween(liveRange.to, diff.from, '');
         if (gapText.length > 0 && isWhitespaceOnly(gapText)) {
-          console.log('[suggestions.whitespaceGapRepair.fallback]', {
+          logVerboseInsertRepair('[suggestions.whitespaceGapRepair.fallback]', {
             cachedId: cached.id,
             liveRange,
             gapFrom: liveRange.to,
@@ -2118,7 +2124,7 @@ export function wrapTransactionForSuggestions(
             if (liveRange && liveRange.to < safeFrom) {
               const gapText = newTr.doc.textBetween(liveRange.to, safeFrom, '');
               if (gapText.length > 0 && isWhitespaceOnly(gapText)) {
-                console.log('[suggestions.whitespaceGapRepair]', {
+                logVerboseInsertRepair('[suggestions.whitespaceGapRepair]', {
                   cachedId: cached.id,
                   liveRange,
                   gapFrom: liveRange.to,
@@ -2141,7 +2147,7 @@ export function wrapTransactionForSuggestions(
         if (candidate && whitespaceOnly) {
           // Whitespace with active candidate: extend the mark to include it.
           // This keeps "Proof is" as one suggestion instead of splitting at the space.
-          console.log('[suggestions.insertDecision]', {
+          logVerboseInsertRepair('[suggestions.insertDecision]', {
             case: 'coalesce-whitespace',
             insertedText,
             from: safeFrom,
@@ -2193,7 +2199,7 @@ export function wrapTransactionForSuggestions(
           setSelectionAfterInsertedText(newTr, candidate.insertPos + insertedText.length);
         } else if (candidate) {
           // Non-whitespace with active candidate: coalesce into existing mark
-          console.log('[suggestions.insertDecision]', {
+          logVerboseInsertRepair('[suggestions.insertDecision]', {
             case: 'coalesce-text',
             insertedText,
             from: safeFrom,
@@ -2246,7 +2252,7 @@ export function wrapTransactionForSuggestions(
         } else {
           const editableInsert = findEditableInsertSuggestionAtPosition(newTr.doc, safeFrom, actor);
           if (editableInsert) {
-            console.log('[suggestions.insertDecision]', {
+            logVerboseInsertRepair('[suggestions.insertDecision]', {
               case: 'editable-insert',
               insertedText,
               from: safeFrom,
@@ -2294,7 +2300,7 @@ export function wrapTransactionForSuggestions(
             setSelectionAfterInsertedText(newTr, safeFrom + insertedText.length);
           } else if (whitespaceOnly) {
             // Standalone whitespace, no active candidate: create a tracked suggestion mark.
-            console.log('[suggestions.insertDecision]', {
+            logVerboseInsertRepair('[suggestions.insertDecision]', {
               case: 'new-whitespace-mark',
               insertedText,
               from: safeFrom,
@@ -2331,7 +2337,7 @@ export function wrapTransactionForSuggestions(
             setSelectionAfterInsertedText(newTr, safeFrom + insertedText.length);
           } else {
             // New non-whitespace text, no candidate: create fresh suggestion mark
-            console.log('[suggestions.insertDecision]', {
+            logVerboseInsertRepair('[suggestions.insertDecision]', {
               case: 'new-text-mark',
               insertedText,
               from: safeFrom,

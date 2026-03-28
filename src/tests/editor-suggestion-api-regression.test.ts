@@ -287,6 +287,7 @@ function run(): void {
       && suggestionsSource.includes('export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {')
       && suggestionsSource.includes('resetSuggestionsInsertCoalescing();')
       && suggestionsSource.includes("const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';")
+      && suggestionsSource.includes("const NATIVE_TEXT_INPUT_MATCH_META = 'proof-native-typed-input-match';")
       && handleTextInputBlock.includes('handleTextInput(view, from, to, text) {')
       && handleTextInputBlock.includes('return false;')
       && !handleTextInputBlock.includes('view.dispatch(')
@@ -305,6 +306,7 @@ function run(): void {
     suggestionsAppendTransactionBlock.includes('const hasBlockingMarksMeta = trs.some((tr) => {')
       && suggestionsAppendTransactionBlock.includes("const hasWrappedSuggestionTransaction = trs.some((tr) => tr.getMeta('suggestions-wrapped'));")
       && suggestionsAppendTransactionBlock.includes("const hasNativeTypedInputPassthrough = trs.some((tr) => tr.getMeta('proof-native-typed-input') === true);")
+      && suggestionsAppendTransactionBlock.includes('const nativeTypedInputMatch = trs')
       && suggestionsAppendTransactionBlock.includes("if (metaType === 'INTERNAL') return false;")
       && suggestionsAppendTransactionBlock.includes("if (metaType === 'SET_METADATA' && tr.getMeta('suggestions-wrapped')) return false;")
       && suggestionsAppendTransactionBlock.includes('const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled && !suggestionsDesiredEnabled;')
@@ -315,28 +317,27 @@ function run(): void {
       && suggestionsAppendTransactionBlock.includes(".setMeta('addToHistory', false);")
       && suggestionsAppendTransactionBlock.includes('const hasRemoteSuggestionInsert = trs.some((tr) =>')
       && suggestionsAppendTransactionBlock.includes('transactionCarriesInsertedSuggestionMarks(tr)')
+      && suggestionsAppendTransactionBlock.includes('const nativeWrapTr = buildNativeTextInputFollowupWrapTransaction(')
+      && suggestionsAppendTransactionBlock.includes("console.log('[suggestions.appendTransactionNativeTextInputWrap]', {")
       && suggestionsAppendTransactionBlock.includes('const splitMergeTr = buildAdjacentSplitInsertMergeTransaction(oldState, newState);')
       && suggestionsAppendTransactionBlock.includes('if (hasWrappedSuggestionTransaction || hasRemoteSuggestionInsert) {')
       && suggestionsAppendTransactionBlock.includes('if (hasNativeTypedInputPassthrough) {')
       && suggestionsAppendTransactionBlock.includes('|| isExplicitYjsChangeOriginTransaction(tr)')
       && !suggestionsAppendTransactionBlock.includes("|| tr.getMeta(marksPluginKey) !== undefined"),
-    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions, stand down for the first native typed-input transaction, still allow split-insert healing after wrapped local typing, and skip explicit Yjs change-origin echoes plus raw y-sync transactions that already carry incoming suggestion marks',
+    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions, convert matched native typed-input passthroughs into immediate mark-only wrap transactions, still allow split-insert healing after wrapped local typing, and skip explicit Yjs change-origin echoes plus raw y-sync transactions that already carry incoming suggestion marks',
   );
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
   assert(
     editorSource.includes('consumePendingNativeTextInputTransactionMatch,')
-      && editorSource.includes('buildNativeTextInputFollowupWrapTransaction,')
       && setupSuggestionsInterceptorBlock.includes('const nativeTextInputMatch = consumePendingNativeTextInputTransactionMatch(beforeState, tr);')
       && setupSuggestionsInterceptorBlock.includes('if (nativeTextInputMatch) {')
-      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.scheduleNativeTextInputWrap]', {")
+      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.passthroughNativeTextInput]', {")
       && setupSuggestionsInterceptorBlock.includes("tr.setMeta('proof-native-typed-input', true);")
-      && setupSuggestionsInterceptorBlock.includes('queueMicrotask(() => {')
-      && setupSuggestionsInterceptorBlock.includes('const followupTr = buildNativeTextInputFollowupWrapTransaction(')
-      && setupSuggestionsInterceptorBlock.includes('nativeTextInputMatch,')
-      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.followupNativeTextInputWrap]', {")
-      && setupSuggestionsInterceptorBlock.includes("followupTr.setMeta('addToHistory', false);"),
-    'Expected the suggestions interceptor to carry the exact matched native typed-insert range into the delayed follow-up wrap, instead of rediscovering a boundary-shifted diff later',
+      && setupSuggestionsInterceptorBlock.includes("tr.setMeta('proof-native-typed-input-match', nativeTextInputMatch);")
+      && !setupSuggestionsInterceptorBlock.includes('queueMicrotask(() => {')
+      && !setupSuggestionsInterceptorBlock.includes('buildNativeTextInputFollowupWrapTransaction('),
+    'Expected the suggestions interceptor to annotate the matched native typed-insert transaction directly and let appendTransaction perform the immediate mark-only wrap',
   );
   const preserveInsertCoalescingBlock = sliceBetween(
     editorSource,

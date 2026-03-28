@@ -4,6 +4,7 @@
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
+  - `fix51` pending commit: move native typed-insert wrapping into appendTransaction on the matched passthrough cycle
   - `fix50` pending commit: restore dropped local insert marks after a remote plain-text self-echo replaces them
   - `fix49` `14e7edc`: carry the exact native typed-insert range into the delayed wrap
   - `fix48` `bfd049f`: defer native typed-input wrapping to a mark-only follow-up transaction
@@ -13,6 +14,36 @@
   - `273b3b6` `fix44: use prosemirror default text input transactions`
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix51 move native typed-input wrapping onto appendTransaction
+
+Shared reports:
+- browser QA on fix50 still showed `YY`
+- the new decisive evidence was:
+  - `scheduleNativeTextInputWrap` / `followupNativeTextInputWrap` fired
+  - `appendTransactionFallback` did not fire
+  - `tc.yjsIncoming` fired only after the visible duplication
+  - the local helper still looked correct in isolated state, so the failure was not a literal `insertText(...)` in the follow-up helper itself
+
+What changed:
+- `src/editor/index.ts`
+  - the interceptor still matches the native typed insert and lets it through unchanged
+  - instead of scheduling a microtask follow-up transaction, it now annotates that native transaction with `proof-native-typed-input-match`
+- `src/editor/plugins/suggestions.ts`
+  - `appendTransaction(...)` now detects the matched native typed-input passthrough and immediately returns the mark-only wrap transaction for that exact range
+  - this keeps the wrap inside the ProseMirror appendTransaction cycle instead of dispatching a later out-of-band follow-up transaction
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - source guard updated to require the meta-based appendTransaction wrap path and forbid the older queued microtask path
+
+Why this is the right next step:
+- the microtask follow-up path was still producing the widget-plus-bare-text duplication in the browser even though the isolated helper looked clean
+- moving the wrap into appendTransaction should eliminate the delayed dispatch race and let the matched native insert be marked on the same transaction cycle
+
+Verified locally:
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npm run build`
 
 ## Fix50 restore dropped local insert marks after a Yjs self-echo
 

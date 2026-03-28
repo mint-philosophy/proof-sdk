@@ -65,6 +65,7 @@ const HANDLED_TEXT_INPUT_ECHO_TTL_MS = 250;
 const DUPLICATE_HANDLED_TEXT_INPUT_CALL_TTL_MS = 75;
 const PENDING_NATIVE_TEXT_INPUT_TTL_MS = 250;
 const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';
+const NATIVE_TEXT_INPUT_MATCH_META = 'proof-native-typed-input-match';
 
 type InsertCoalesceState = { id: string; from: number; to: number; by: string; updatedAt: number };
 type TrackedDeleteIntent = { key: 'Backspace' | 'Delete'; modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean } };
@@ -1665,6 +1666,19 @@ export function __debugShouldPassthroughPendingNativeTextInputTransaction(
   return shouldPassthroughPendingNativeTextInputTransaction(oldState, tr);
 }
 
+function getNativeTextInputMatchMeta(tr: Transaction): NativeTextInputMatch | null {
+  const meta = tr.getMeta(NATIVE_TEXT_INPUT_MATCH_META) as Partial<NativeTextInputMatch> | null | undefined;
+  if (!meta) return null;
+  if (typeof meta.text !== 'string') return null;
+  if (typeof meta.from !== 'number' || typeof meta.to !== 'number') return null;
+  if (!Number.isFinite(meta.from) || !Number.isFinite(meta.to)) return null;
+  return {
+    text: meta.text,
+    from: meta.from,
+    to: meta.to,
+  };
+}
+
 export function wrapPendingNativeTextInputTransaction(
   oldState: EditorState,
   tr: Transaction,
@@ -3151,6 +3165,10 @@ export const suggestionsPlugin = $prose(() => {
       if (!trs.some((tr) => tr.docChanged)) return null;
       const hasWrappedSuggestionTransaction = trs.some((tr) => tr.getMeta('suggestions-wrapped'));
       const hasNativeTypedInputPassthrough = trs.some((tr) => tr.getMeta('proof-native-typed-input') === true);
+      const nativeTypedInputMatch = trs
+        .map((tr) => getNativeTextInputMatchMeta(tr))
+        .find((match): match is NativeTextInputMatch => match !== null)
+        ?? null;
       const hasBlockingMarksMeta = trs.some((tr) => {
         const meta = tr.getMeta(marksPluginKey);
         if (meta === undefined) return false;
@@ -3165,6 +3183,22 @@ export const suggestionsPlugin = $prose(() => {
         && transactionCarriesInsertedSuggestionMarks(tr)
       );
       if (hasNativeTypedInputPassthrough) {
+        if (nativeTypedInputMatch) {
+          const nativeWrapTr = buildNativeTextInputFollowupWrapTransaction(
+            oldState,
+            newState,
+            nativeTypedInputMatch,
+          );
+          if (nativeWrapTr) {
+            nativeWrapTr.setMeta('addToHistory', false);
+            console.log('[suggestions.appendTransactionNativeTextInputWrap]', {
+              from: nativeTypedInputMatch.from,
+              to: nativeTypedInputMatch.to,
+              text: nativeTypedInputMatch.text,
+            });
+            return nativeWrapTr;
+          }
+        }
         return null;
       }
       if (trs.some((tr) =>

@@ -1,11 +1,51 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `b0e2e8ee47b1444b3f32cf57ea072bde10d8441f5e866d291f910d7f7c95cbae`
+- Live client bundle on `proof-test.mintresearch.org`: `56da2a8ead9df185438272fe741ab8e2988754e9b9b409e765bb79ca5b234f60`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix42 route ordinary TC typing through beforeinput
+
+Shared reports:
+- browser QA on fix41: duplication still persisted
+- the decisive new finding was:
+  - `handleTextInput` fired exactly once per key
+  - there were no `skipDuplicateCall` logs
+  - the only later transactions were mark-only appendTransaction repairs
+- that means the doubling was not caused by a second `handleTextInput` callback
+
+Working hypothesis:
+- the browser's raw DOM insertion is still landing for ordinary typing, while TC also dispatches its own tracked insert
+- if that is true, fixing it in appendTransaction is too late; ordinary text input needs to be intercepted before the browser mutates the DOM
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - `beforeinput` now handles ordinary `insertText` when TC is enabled:
+    - resolves the tracked insertion range
+    - dispatches the tracked insert transaction directly
+    - `preventDefault()` / `stopPropagation()` to block the browser's raw DOM insertion
+    - logs `[suggestions.beforeinput.insertText]`
+  - added a short-lived `recentBeforeinputHandledTextInput` cache so `handleTextInput` can recognize and skip the same keystroke if ProseMirror still calls it afterward
+  - `handleTextInput` now logs `[suggestions.handleTextInput.skipBeforeinputHandled]` when it no-ops because `beforeinput` already handled that text/range
+  - reset paths clear the beforeinput cache alongside the older handled-input caches
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - added a regression proving `handleTextInput` skipping is one-shot after `beforeinput` has already handled the same text/range
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - added source guards for the new beforeinput path and handleTextInput fallback skip
+
+Why this is the right next step:
+- fix41 proved the duplicate is not a second `handleTextInput` callback
+- once that is true, the only earlier control point for ordinary typing is `beforeinput`
+- handling raw text insertion there gives us a place to block the browser's native insertion before any later mark repair or DOM reconciliation happens
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npm run build`
 
 ## Fix41 suppress duplicate handleTextInput callbacks at the source
 

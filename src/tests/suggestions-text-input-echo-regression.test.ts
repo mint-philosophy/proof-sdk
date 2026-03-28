@@ -3,9 +3,11 @@ import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 
 import { marksPluginKey } from '../editor/plugins/marks.js';
 import {
+  __debugRememberBeforeinputHandledTextInput,
   __debugRememberHandledTextInputDispatch,
   __debugRememberHandledTextInputCall,
   __debugResetHandledTextInputEcho,
+  __debugShouldSkipHandleTextInputBecauseBeforeinputHandled,
   __debugShouldSuppressDuplicateHandledTextInputCall,
   __debugShouldSuppressHandledTextInputEcho,
   wrapTransactionForSuggestions,
@@ -161,6 +163,18 @@ function run(): void {
     __debugShouldSuppressDuplicateHandledTextInputCall('a', 19, 19),
     false,
     'Expected a different insertion range not to be suppressed as a duplicate callback',
+  );
+
+  __debugResetHandledTextInputEcho();
+  __debugRememberBeforeinputHandledTextInput('a', 18, 18);
+  assert(
+    __debugShouldSkipHandleTextInputBecauseBeforeinputHandled('a', 18, 18),
+    'Expected handleTextInput to skip when beforeinput already handled the same text and range',
+  );
+  assertEqual(
+    __debugShouldSkipHandleTextInputBecauseBeforeinputHandled('a', 18, 18),
+    false,
+    'Expected beforeinput-handled skipping to be one-shot',
   );
 
   console.log('suggestions-text-input-echo-regression.test.ts passed');

@@ -63,6 +63,7 @@ const COALESCE_WINDOW_MS = 5000;
 const DEBUG_VERBOSE_INSERT_REPAIR = false;
 const HANDLED_TEXT_INPUT_ECHO_TTL_MS = 250;
 const DUPLICATE_HANDLED_TEXT_INPUT_CALL_TTL_MS = 75;
+const BEFOREINPUT_HANDLED_TEXT_INPUT_TTL_MS = 150;
 const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';
 
 type InsertCoalesceState = { id: string; from: number; to: number; by: string; updatedAt: number };
@@ -82,12 +83,19 @@ type RecentHandledTextInputCall = {
   to: number;
   at: number;
 };
+type RecentBeforeinputHandledTextInput = {
+  text: string;
+  from: number;
+  to: number;
+  at: number;
+};
 
 const lastInsertByActor = new Map<string, InsertCoalesceState>();
 const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
 const PENDING_DELETE_INTENT_TTL_MS = 1500;
 let pendingHandledTextInputEcho: PendingHandledTextInputEcho | null = null;
 let recentHandledTextInputCall: RecentHandledTextInputCall | null = null;
+let recentBeforeinputHandledTextInput: RecentBeforeinputHandledTextInput | null = null;
 
 function logVerboseInsertRepair(...args: unknown[]): void {
   if (!DEBUG_VERBOSE_INSERT_REPAIR) return;
@@ -122,6 +130,7 @@ export function resetSuggestionsInsertCoalescing(): void {
   lastInsertByActor.clear();
   pendingHandledTextInputEcho = null;
   recentHandledTextInputCall = null;
+  recentBeforeinputHandledTextInput = null;
 }
 
 /** Reset all module-level TC state for fresh document loads.
@@ -132,6 +141,7 @@ export function resetSuggestionsModuleState(): void {
   lastInsertByActor.clear();
   pendingHandledTextInputEcho = null;
   recentHandledTextInputCall = null;
+  recentBeforeinputHandledTextInput = null;
 }
 
 export function hasRecentSuggestionsInsertCoalescingState(): boolean {
@@ -1483,6 +1493,31 @@ function rememberHandledTextInputCall(text: string, from: number, to: number): v
   };
 }
 
+function rememberBeforeinputHandledTextInput(text: string, from: number, to: number): void {
+  recentBeforeinputHandledTextInput = {
+    text,
+    from,
+    to,
+    at: Date.now(),
+  };
+}
+
+function shouldSkipHandleTextInputBecauseBeforeinputHandled(text: string, from: number, to: number): boolean {
+  if (!recentBeforeinputHandledTextInput) return false;
+  const age = Date.now() - recentBeforeinputHandledTextInput.at;
+  if (age > BEFOREINPUT_HANDLED_TEXT_INPUT_TTL_MS) {
+    recentBeforeinputHandledTextInput = null;
+    return false;
+  }
+  const shouldSkip = recentBeforeinputHandledTextInput.text === text
+    && recentBeforeinputHandledTextInput.from === from
+    && recentBeforeinputHandledTextInput.to === to;
+  if (shouldSkip) {
+    recentBeforeinputHandledTextInput = null;
+  }
+  return shouldSkip;
+}
+
 export function shouldSuppressHandledTextInputEcho(
   oldState: EditorState,
   tr: Transaction,
@@ -1564,6 +1599,7 @@ export function __debugRememberHandledTextInputDispatch(text: string, from: numb
 export function __debugResetHandledTextInputEcho(): void {
   pendingHandledTextInputEcho = null;
   recentHandledTextInputCall = null;
+  recentBeforeinputHandledTextInput = null;
 }
 
 export function __debugShouldSuppressHandledTextInputEcho(oldState: EditorState, tr: Transaction): boolean {
@@ -1576,6 +1612,14 @@ export function __debugRememberHandledTextInputCall(text: string, from: number, 
 
 export function __debugShouldSuppressDuplicateHandledTextInputCall(text: string, from: number, to: number): boolean {
   return shouldSuppressDuplicateHandledTextInputCall(text, from, to);
+}
+
+export function __debugRememberBeforeinputHandledTextInput(text: string, from: number, to: number): void {
+  rememberBeforeinputHandledTextInput(text, from, to);
+}
+
+export function __debugShouldSkipHandleTextInputBecauseBeforeinputHandled(text: string, from: number, to: number): boolean {
+  return shouldSkipHandleTextInputBecauseBeforeinputHandled(text, from, to);
 }
 
 function buildPlainInsertionSuggestionFallbackTransaction(
@@ -3021,6 +3065,29 @@ export const suggestionsPlugin = $prose(() => {
             }
           }
 
+          if (!view.composing && isSuggestionsEnabled(view.state) && inputEvent.inputType === 'insertText') {
+            const text = typeof inputEvent.data === 'string' ? inputEvent.data : '';
+            if (text.length > 0) {
+              const { from, to } = view.state.selection;
+              const range = resolveTrackedTextInputRange(view.state, from, to);
+              rememberBeforeinputHandledTextInput(text, range.from, range.to);
+              rememberHandledTextInputCall(text, range.from, range.to);
+              rememberHandledTextInputDispatch(text, range.from, range.to);
+              const textInputTr = view.state.tr
+                .insertText(text, range.from, range.to)
+                .setMeta(HANDLED_TEXT_INPUT_META, { text, from: range.from, to: range.to });
+              console.log('[suggestions.beforeinput.insertText]', {
+                text,
+                from: range.from,
+                to: range.to,
+              });
+              view.dispatch(textInputTr);
+              event.preventDefault();
+              event.stopPropagation();
+              return true;
+            }
+          }
+
           if (!isSuggestionsEnabled(view.state)) return false;
           if (view.composing) return false;
           const pendingIntent = takePendingModifiedDeleteIntent(view);
@@ -3060,6 +3127,14 @@ export const suggestionsPlugin = $prose(() => {
         });
         if (!enabled) return false;
         if (!text) return false;
+        if (!view.composing && shouldSkipHandleTextInputBecauseBeforeinputHandled(text, from, to)) {
+          console.log('[suggestions.handleTextInput.skipBeforeinputHandled]', {
+            text,
+            from,
+            to,
+          });
+          return true;
+        }
         // Let composition-driven text updates use the same tracked-insert path
         // as ordinary typing. If we opt out here, ProseMirror's DOM observer
         // emits intermediate composition transactions that get tracked as

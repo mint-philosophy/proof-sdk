@@ -4,7 +4,9 @@ import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 import { marksPluginKey } from '../editor/plugins/marks.js';
 import {
   __debugRememberHandledTextInputDispatch,
+  __debugRememberHandledTextInputCall,
   __debugResetHandledTextInputEcho,
+  __debugShouldSuppressDuplicateHandledTextInputCall,
   __debugShouldSuppressHandledTextInputEcho,
   wrapTransactionForSuggestions,
 } from '../editor/plugins/suggestions.js';
@@ -147,6 +149,18 @@ function run(): void {
   assert(
     __debugShouldSuppressHandledTextInputEcho(postInsertState, handledOriginalPositionEchoTr),
     'Expected a second handled-meta insertion at the original position to be suppressed once the first insertion already exists',
+  );
+
+  __debugResetHandledTextInputEcho();
+  __debugRememberHandledTextInputCall('a', 18, 18);
+  assert(
+    __debugShouldSuppressDuplicateHandledTextInputCall('a', 18, 18),
+    'Expected an immediate duplicate handleTextInput callback with the same text and range to be suppressed at the source',
+  );
+  assertEqual(
+    __debugShouldSuppressDuplicateHandledTextInputCall('a', 19, 19),
+    false,
+    'Expected a different insertion range not to be suppressed as a duplicate callback',
   );
 
   console.log('suggestions-text-input-echo-regression.test.ts passed');

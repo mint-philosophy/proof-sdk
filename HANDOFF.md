@@ -1,11 +1,47 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `1b1529fe37116eaeb1c351b8a75e361ff98352d2398631ea7c5222aca46b46b9`
+- Live client bundle on `proof-test.mintresearch.org`: `b0e2e8ee47b1444b3f32cf57ea072bde10d8441f5e866d291f910d7f7c95cbae`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix41 suppress duplicate handleTextInput callbacks at the source
+
+Shared reports:
+- browser QA on fix40: duplication still persisted
+- the key new diagnostic was that the second handled transaction arrived with:
+  - the same `handledMeta`
+  - the same original `diff.from` / `diff.to`
+  - but `oldHasOriginalText = false`
+- that means the duplicate callback happens before `view.state` reflects the first tracked insert, so any suppression rule that waits to observe the first insert in the old document can never fire
+
+Requested:
+- suppress the duplicate at `handleTextInput` call time instead of trying to infer it later from document state
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - added a short-lived `recentHandledTextInputCall` cache keyed by:
+    - `text`
+    - `from`
+    - `to`
+  - `handleTextInput` now drops an immediate duplicate callback with the same text and insertion range before dispatching any transaction
+  - added `[suggestions.handleTextInput.skipDuplicateCall]` logging for that source-level suppression
+  - reset paths now clear both the pending echo matcher and the recent-handleTextInput call cache
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - added a regression proving an immediate duplicate `handleTextInput` callback with the same text/range is suppressed at the source, while a different insertion range is not
+
+Why this is the right next step:
+- fix40 established that the duplicate transaction can arrive before the first tracked insert is visible in `view.state`
+- once that is true, document-based duplicate detection is too late for this lane
+- the remaining reliable discriminator is the callback shape itself: same text, same range, immediate repeat
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npm run build`
 
 ## Fix40 suppress duplicate handled-input echoes across original and remote lanes
 

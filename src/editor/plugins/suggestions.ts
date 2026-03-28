@@ -62,6 +62,7 @@ type DisabledSuggestionStripAnalysis = {
 const COALESCE_WINDOW_MS = 5000;
 const DEBUG_VERBOSE_INSERT_REPAIR = false;
 const HANDLED_TEXT_INPUT_ECHO_TTL_MS = 250;
+const DUPLICATE_HANDLED_TEXT_INPUT_CALL_TTL_MS = 75;
 const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';
 
 type InsertCoalesceState = { id: string; from: number; to: number; by: string; updatedAt: number };
@@ -75,11 +76,18 @@ type PendingHandledTextInputEcho = {
   expectedTo: number;
   at: number;
 };
+type RecentHandledTextInputCall = {
+  text: string;
+  from: number;
+  to: number;
+  at: number;
+};
 
 const lastInsertByActor = new Map<string, InsertCoalesceState>();
 const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
 const PENDING_DELETE_INTENT_TTL_MS = 1500;
 let pendingHandledTextInputEcho: PendingHandledTextInputEcho | null = null;
+let recentHandledTextInputCall: RecentHandledTextInputCall | null = null;
 
 function logVerboseInsertRepair(...args: unknown[]): void {
   if (!DEBUG_VERBOSE_INSERT_REPAIR) return;
@@ -113,6 +121,7 @@ export function setSuggestionsDesiredEnabled(enabled: boolean): void {
 export function resetSuggestionsInsertCoalescing(): void {
   lastInsertByActor.clear();
   pendingHandledTextInputEcho = null;
+  recentHandledTextInputCall = null;
 }
 
 /** Reset all module-level TC state for fresh document loads.
@@ -122,6 +131,7 @@ export function resetSuggestionsModuleState(): void {
   suggestionsModuleEnabled = false;
   lastInsertByActor.clear();
   pendingHandledTextInputEcho = null;
+  recentHandledTextInputCall = null;
 }
 
 export function hasRecentSuggestionsInsertCoalescingState(): boolean {
@@ -1452,6 +1462,27 @@ function rememberHandledTextInputDispatch(text: string, from: number, to: number
   });
 }
 
+function shouldSuppressDuplicateHandledTextInputCall(text: string, from: number, to: number): boolean {
+  if (!recentHandledTextInputCall) return false;
+  const age = Date.now() - recentHandledTextInputCall.at;
+  if (age > DUPLICATE_HANDLED_TEXT_INPUT_CALL_TTL_MS) {
+    recentHandledTextInputCall = null;
+    return false;
+  }
+  return recentHandledTextInputCall.text === text
+    && recentHandledTextInputCall.from === from
+    && recentHandledTextInputCall.to === to;
+}
+
+function rememberHandledTextInputCall(text: string, from: number, to: number): void {
+  recentHandledTextInputCall = {
+    text,
+    from,
+    to,
+    at: Date.now(),
+  };
+}
+
 export function shouldSuppressHandledTextInputEcho(
   oldState: EditorState,
   tr: Transaction,
@@ -1532,10 +1563,19 @@ export function __debugRememberHandledTextInputDispatch(text: string, from: numb
 
 export function __debugResetHandledTextInputEcho(): void {
   pendingHandledTextInputEcho = null;
+  recentHandledTextInputCall = null;
 }
 
 export function __debugShouldSuppressHandledTextInputEcho(oldState: EditorState, tr: Transaction): boolean {
   return shouldSuppressHandledTextInputEcho(oldState, tr);
+}
+
+export function __debugRememberHandledTextInputCall(text: string, from: number, to: number): void {
+  rememberHandledTextInputCall(text, from, to);
+}
+
+export function __debugShouldSuppressDuplicateHandledTextInputCall(text: string, from: number, to: number): boolean {
+  return shouldSuppressDuplicateHandledTextInputCall(text, from, to);
 }
 
 function buildPlainInsertionSuggestionFallbackTransaction(
@@ -3035,6 +3075,15 @@ export const suggestionsPlugin = $prose(() => {
         // Inserting at the actual cursor keeps the character adjacent to
         // the existing marked text in the Y.XmlFragment.
         const dispatchHandledTextInput = (insertFrom: number, insertTo: number) => {
+          if (!view.composing && shouldSuppressDuplicateHandledTextInputCall(text, insertFrom, insertTo)) {
+            console.log('[suggestions.handleTextInput.skipDuplicateCall]', {
+              text,
+              from: insertFrom,
+              to: insertTo,
+            });
+            return true;
+          }
+          rememberHandledTextInputCall(text, insertFrom, insertTo);
           rememberHandledTextInputDispatch(text, insertFrom, insertTo);
           const textInputTr = view.state.tr
             .insertText(text, insertFrom, insertTo)

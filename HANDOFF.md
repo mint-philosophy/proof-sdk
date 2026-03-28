@@ -1,11 +1,48 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `75d73c5c166a0665974358e387aefb3236bdc26029693e2d90897f031c08809f`
+- Live client bundle on `proof-test.mintresearch.org`: `ab9a79e79b621268c32a429bb9246193fc8c5ac200350100cc0039fb2e8c612a`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix39 suppress handled-meta duplicate text-input echoes
+
+Shared reports:
+- browser QA on fix38: duplicated tracked typing still happens on fresh docs
+- for each physical character, the console showed:
+  - `[suggestions.handleTextInput]`
+  - `[suggestions.handleTextInput.rememberEcho]`
+  - `[suggestions.handleTextInput.echoCheck.skipHandledMeta]`
+- there were zero plain-echo match logs, which means the duplicate follow-up transaction was carrying `proof-handled-text-input` meta too, so the suppressor never inspected its actual diff
+
+Requested:
+- stop treated handled-meta follow-up transactions from bypassing the duplicate-echo suppressor
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - `shouldSuppressHandledTextInputEcho()` no longer returns early when a transaction carries `proof-handled-text-input`
+  - it now inspects the transaction diff even for handled-meta transactions and suppresses it when it matches the remembered post-insert duplicate position/text
+  - the echo diagnostics now include `handledMeta` in:
+    - `echoCheck.noDocChange`
+    - `echoCheck.noPlainInsertDiff`
+    - `echoCheck`
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - added coverage for:
+    - suppressing a second handled-meta insertion at the post-insert duplicate position
+    - not suppressing the original handled text-input transaction itself
+
+Why this is the right next step:
+- the isolated wrapper/healer path already proved clean
+- fix38 showed the duplicate lane was not a plain raw DOM echo
+- the browser logs narrowed it to a follow-up transaction reusing handled-input meta, so the suppressor needed to analyze that path rather than skipping it
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npm run build`
 
 ## Fix38 handled-text-input echo diagnostics
 

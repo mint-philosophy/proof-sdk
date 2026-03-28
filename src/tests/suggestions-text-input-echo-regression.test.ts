@@ -109,6 +109,27 @@ function run(): void {
     'Expected a different legitimate next character not to be suppressed as an echo',
   );
 
+  __debugResetHandledTextInputEcho();
+  __debugRememberHandledTextInputDispatch('a', 18, 18);
+  const handledEchoTr = state.tr
+    .insertText('a', 19, 19)
+    .setMeta('proof-handled-text-input', { text: 'a', from: 18, to: 18 });
+  assert(
+    __debugShouldSuppressHandledTextInputEcho(state, handledEchoTr),
+    'Expected a second handled-meta insertion echo to be suppressed when it matches the post-insert duplicate position',
+  );
+
+  __debugResetHandledTextInputEcho();
+  __debugRememberHandledTextInputDispatch('a', 18, 18);
+  const originalHandledTr = createState(18, 18).tr
+    .insertText('a', 18, 18)
+    .setMeta('proof-handled-text-input', { text: 'a', from: 18, to: 18 });
+  assertEqual(
+    __debugShouldSuppressHandledTextInputEcho(createState(18, 18), originalHandledTr),
+    false,
+    'Expected the original handled text-input transaction not to be suppressed',
+  );
+
   console.log('suggestions-text-input-echo-regression.test.ts passed');
 }
 

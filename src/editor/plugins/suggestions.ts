@@ -1446,15 +1446,7 @@ export function shouldSuppressHandledTextInputEcho(
   tr: Transaction,
 ): boolean {
   if (!pendingHandledTextInputEcho) return false;
-  if (tr.getMeta(HANDLED_TEXT_INPUT_META) !== undefined) {
-    console.log('[suggestions.handleTextInput.echoCheck.skipHandledMeta]', {
-      pending: pendingHandledTextInputEcho,
-      selectionFrom: tr.selection?.from ?? null,
-      selectionTo: tr.selection?.to ?? null,
-      stepTypes: tr.steps.map((step) => (step?.toJSON?.() as { stepType?: string } | undefined)?.stepType ?? 'unknown'),
-    });
-    return false;
-  }
+  const handledMeta = tr.getMeta(HANDLED_TEXT_INPUT_META) as { text?: unknown; from?: unknown; to?: unknown } | undefined;
 
   const age = Date.now() - pendingHandledTextInputEcho.at;
   if (age > HANDLED_TEXT_INPUT_ECHO_TTL_MS) {
@@ -1470,6 +1462,7 @@ export function shouldSuppressHandledTextInputEcho(
   if (!tr.docChanged) {
     console.log('[suggestions.handleTextInput.echoCheck.noDocChange]', {
       pending: pendingHandledTextInputEcho,
+      handledMeta: handledMeta ?? null,
       selectionFrom: tr.selection?.from ?? null,
       selectionTo: tr.selection?.to ?? null,
     });
@@ -1479,6 +1472,7 @@ export function shouldSuppressHandledTextInputEcho(
   if (!diff) {
     console.log('[suggestions.handleTextInput.echoCheck.noPlainInsertDiff]', {
       pending: pendingHandledTextInputEcho,
+      handledMeta: handledMeta ?? null,
       selectionFrom: tr.selection?.from ?? null,
       selectionTo: tr.selection?.to ?? null,
       stepTypes: tr.steps.map((step) => (step?.toJSON?.() as { stepType?: string } | undefined)?.stepType ?? 'unknown'),
@@ -1492,6 +1486,7 @@ export function shouldSuppressHandledTextInputEcho(
 
   console.log('[suggestions.handleTextInput.echoCheck]', {
     pending: pendingHandledTextInputEcho,
+    handledMeta: handledMeta ?? null,
     diff,
     shouldSuppress,
     selectionFrom: tr.selection?.from ?? null,

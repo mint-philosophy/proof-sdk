@@ -377,7 +377,6 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('if (!preserveInsertCoalescing) {')
       && setupSuggestionsInterceptorBlock.includes('resetSuggestionsInsertCoalescing();')
       && setupSuggestionsInterceptorBlock.includes("if (marksMeta !== undefined && (marksMetaType !== 'INTERNAL' || !hasReplaceStep)) {")
-      && setupSuggestionsInterceptorBlock.includes('if (!carriesIncomingSuggestionMarks) {')
       && setupSuggestionsInterceptorBlock.includes('this.repairRemoteSuggestionBoundaryInheritance(view, beforeState, dispatchWithRevision);')
       && setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined;")
       && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")

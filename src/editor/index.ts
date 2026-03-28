@@ -6039,9 +6039,7 @@ class ProofEditorImpl implements ProofEditor {
               resetSuggestionsInsertCoalescing();
             }
             originalDispatch(tr);
-            if (!carriesIncomingSuggestionMarks) {
-              this.repairRemoteSuggestionBoundaryInheritance(view, beforeState, dispatchWithRevision);
-            }
+            this.repairRemoteSuggestionBoundaryInheritance(view, beforeState, dispatchWithRevision);
             return;
           }
 

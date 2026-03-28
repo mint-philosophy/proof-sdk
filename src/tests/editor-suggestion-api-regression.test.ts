@@ -380,14 +380,20 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('if (!preserveInsertCoalescing) {')
       && setupSuggestionsInterceptorBlock.includes('resetSuggestionsInsertCoalescing();')
       && setupSuggestionsInterceptorBlock.includes("if (marksMeta !== undefined && (marksMetaType !== 'INTERNAL' || !hasReplaceStep)) {")
-      && setupSuggestionsInterceptorBlock.includes('this.repairRemoteSuggestionBoundaryInheritance(view, beforeState, dispatchWithRevision);')
+      && setupSuggestionsInterceptorBlock.includes('const originalUpdateState = view.updateState.bind(view);')
+      && setupSuggestionsInterceptorBlock.includes("(view as any).updateState = (nextState: any) => {")
+      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.view.dispatch.apply]', {")
+      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.view.updateState]', {")
+      && setupSuggestionsInterceptorBlock.includes('dispatchWithoutRevision(tr, \'remoteContentPassthrough\');')
+      && setupSuggestionsInterceptorBlock.includes('this.repairRemoteSuggestionBoundaryInheritance(')
+      && setupSuggestionsInterceptorBlock.includes("(transaction) => dispatchWithRevision(transaction, 'repairRemoteSuggestionBoundaryInheritance')")
       && setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined;")
       && !setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined || tr?.getMeta?.('addToHistory') === false;")
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
-      && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);')
+      && setupSuggestionsInterceptorBlock.includes("dispatchWithRevision(tr, 'systemTrackChangesSuppressedPassthrough');")
       && setupSuggestionsInterceptorBlock.includes('if (Boolean(tr?.docChanged) && shouldSuppressHandledTextInputEcho(beforeState, tr)) {')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.suppressHandledTextInputEcho]', {"),
-    'Expected the suggestions interceptor to pass through collab/template system transactions, treat recent raw Yjs plain-text self-echoes as remote for repair, honor the latched desired Track Changes state through share/collab resets, and suppress immediate handled-input duplicate echoes before either the local or remote transaction lanes apply them',
+    'Expected the suggestions interceptor to pass through collab/template system transactions, treat recent raw Yjs plain-text self-echoes as remote for repair, honor the latched desired Track Changes state through share/collab resets, suppress immediate handled-input duplicate echoes, and now instrument the live dispatch/updateState runtime around the native typed-input lane',
   );
   assert(
     repairRemoteSuggestionBoundaryInheritanceBlock.includes('const textPreservingRepair = buildTextPreservingInsertPersistenceTransaction(beforeState, view.state);')

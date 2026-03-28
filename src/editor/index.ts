@@ -1063,6 +1063,22 @@ type TransactionDocChangeSummary = {
   nodes: TransactionDocChangeNodeSummary[];
 };
 
+type NativeTextInputRuntimeTrace = {
+  id: number;
+  from: number;
+  to: number;
+  text: string;
+  startedAt: number;
+  expiresAt: number;
+  reason: string;
+};
+
+type RuntimeRangeSnapshot = {
+  text: string;
+  marks: string[];
+  nodes: TransactionDocChangeNodeSummary[];
+};
+
 function clipTransactionDebugText(text: string, maxLength: number = 120): string {
   if (text.length <= maxLength) return text;
   return `${text.slice(0, maxLength)}…`;
@@ -1146,6 +1162,78 @@ function summarizeIncomingYjsDocChange(
       };
     })
     .filter((range) => range.text.length > 0 || range.nodes.length > 0);
+}
+
+function summarizeTransactionStepTypes(transaction: { steps?: Array<{ toJSON?: () => { stepType?: string } }> } | null | undefined): string[] {
+  return (transaction?.steps ?? []).map((step) => {
+    const stepJson = step?.toJSON?.();
+    return stepJson?.stepType ?? (step as { constructor?: { name?: string } })?.constructor?.name ?? 'unknown';
+  });
+}
+
+function summarizeTransactionMeta(
+  transaction: { getMeta?: (key: unknown) => unknown; meta?: Record<string, unknown> } | null | undefined,
+): Record<string, unknown> {
+  const metaKeys = transaction?.meta && typeof transaction.meta === 'object'
+    ? Object.keys(transaction.meta).sort()
+    : [];
+  const marksMeta = transaction?.getMeta?.(marksPluginKey);
+  const marksMetaType = (marksMeta && typeof marksMeta === 'object' && !Array.isArray(marksMeta))
+    ? (marksMeta as { type?: unknown }).type
+    : undefined;
+  const yjsOrigin = getYjsTransactionOriginInfo(transaction);
+  return {
+    metaKeys,
+    addToHistory: transaction?.getMeta?.('addToHistory'),
+    suggestionsWrapped: transaction?.getMeta?.('suggestions-wrapped') === true,
+    documentLoad: transaction?.getMeta?.('document-load') !== undefined,
+    history: transaction?.getMeta?.('history$') !== undefined,
+    proofNativeTypedInput: transaction?.getMeta?.('proof-native-typed-input') === true,
+    proofNativeTypedInputMatch: transaction?.getMeta?.('proof-native-typed-input-match') !== undefined,
+    marksMetaType,
+    yjsOrigin,
+  };
+}
+
+function summarizeSelectionForDebug(selection: { from?: number; to?: number; empty?: boolean } | null | undefined): Record<string, unknown> {
+  return {
+    from: selection?.from ?? null,
+    to: selection?.to ?? null,
+    empty: selection?.empty ?? null,
+  };
+}
+
+function summarizeRuntimeCallerStack(): string[] {
+  const stack = new Error().stack?.split('\n').slice(2) ?? [];
+  return stack
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.includes('summarizeRuntimeCallerStack'))
+    .slice(0, 4);
+}
+
+function summarizeRuntimeRangeSnapshot(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+): RuntimeRangeSnapshot {
+  const safeFrom = Math.max(0, Math.min(from, doc.content.size));
+  const safeTo = Math.max(safeFrom, Math.min(to, doc.content.size));
+  const nodes = summarizeTransactionDocChangeNodes(doc, safeFrom, safeTo);
+  const marks = Array.from(new Set(nodes.flatMap((node) => node.marks))).sort();
+  return {
+    text: clipTransactionDebugText(doc.textBetween(safeFrom, safeTo, '\n', '\n')),
+    marks,
+    nodes,
+  };
+}
+
+function runtimeMarksChanged(
+  beforeSnapshot: RuntimeRangeSnapshot | null,
+  afterSnapshot: RuntimeRangeSnapshot | null,
+): boolean {
+  if (!beforeSnapshot || !afterSnapshot) return false;
+  if (beforeSnapshot.marks.length !== afterSnapshot.marks.length) return true;
+  return beforeSnapshot.marks.some((mark, index) => mark !== afterSnapshot.marks[index]);
 }
 
 class ProofEditorImpl implements ProofEditor {
@@ -1277,8 +1365,19 @@ class ProofEditorImpl implements ProofEditor {
   private lastEditorInputActivitySentAt: number = 0;
   private lastLocalTypingAt: number = 0;
   private pendingDomSuggestionSelection: MarkRange | null = null;
+  private runtimeTraceSeq: number = 0;
+  private runtimeDispatchDepth: number = 0;
+  private runtimeUpdateStateDepth: number = 0;
+  private runtimeDispatchContextStack: Array<{
+    id: number;
+    source: string;
+    stepTypes: string[];
+    meta: Record<string, unknown>;
+  }> = [];
+  private activeNativeTextInputRuntimeTrace: NativeTextInputRuntimeTrace | null = null;
   private lifecycleHandlersInstalled: boolean = false;
   private readonly webHaptics = new WebHaptics();
+  private readonly nativeTextInputRuntimeTraceWindowMs: number = 5_000;
   private readonly collabTemplateClaimStaleMs: number = 3_000;
   private readonly collabTemplateClaimSettleMs: number = 250;
   private readonly collabTemplateRetryMs: number = 450;
@@ -1404,6 +1503,9 @@ class ProofEditorImpl implements ProofEditor {
         // Set up listener for content changes
         ctx.get(listenerCtx).updated((_ctx, doc, prevDoc) => {
           if (prevDoc && doc.eq(prevDoc)) return;
+          this.logActiveNativeTextInputRuntimeEvent('[tc.listener.updated]', doc, {
+            hasPrevDoc: Boolean(prevDoc),
+          });
           this.scheduleContentSync();
           if (
             this.isShareMode
@@ -5438,6 +5540,10 @@ class ProofEditorImpl implements ProofEditor {
         const forcePersistMarks = _options?.forcePersistMarks === true;
         if (this.collabEnabled && this.collabCanEdit) {
           this.publishProjectionMarkdown(view, markdown, 'marks-flush');
+          this.logActiveNativeTextInputRuntimeEvent('[tc.marksSync.setMarksMetadata]', view.state.doc, {
+            source: 'flushShareMarks',
+            metadataKeys: Object.keys(liveMetadata).length,
+          });
           collabClient.setMarksMetadata(liveMetadata);
         }
         if (shouldPersistContent) {
@@ -5782,6 +5888,55 @@ class ProofEditorImpl implements ProofEditor {
     this.lastLocalTypingAt = Date.now();
   }
 
+  private beginNativeTextInputRuntimeTrace(
+    match: { from: number; to: number; text: string },
+    reason: string,
+  ): NativeTextInputRuntimeTrace {
+    const now = Date.now();
+    const trace: NativeTextInputRuntimeTrace = {
+      id: ++this.runtimeTraceSeq,
+      from: match.from,
+      to: match.to,
+      text: match.text,
+      startedAt: now,
+      expiresAt: now + this.nativeTextInputRuntimeTraceWindowMs,
+      reason,
+    };
+    this.activeNativeTextInputRuntimeTrace = trace;
+    console.log('[tc.runtime.nativeTextInputTrace.begin]', trace);
+    return trace;
+  }
+
+  private getActiveNativeTextInputRuntimeTrace(): NativeTextInputRuntimeTrace | null {
+    const trace = this.activeNativeTextInputRuntimeTrace;
+    if (!trace) return null;
+    if (Date.now() <= trace.expiresAt) return trace;
+    this.activeNativeTextInputRuntimeTrace = null;
+    return null;
+  }
+
+  private logActiveNativeTextInputRuntimeEvent(
+    label: string,
+    doc: ProseMirrorNode,
+    extra: Record<string, unknown> = {},
+  ): void {
+    const trace = this.getActiveNativeTextInputRuntimeTrace();
+    if (!trace) return;
+    const range = summarizeRuntimeRangeSnapshot(doc, trace.from, trace.to);
+    console.log(label, {
+      traceId: trace.id,
+      from: trace.from,
+      to: trace.to,
+      text: trace.text,
+      rangeText: range.text,
+      rangeMarks: range.marks,
+      rangeNodes: range.nodes,
+      runtimeDispatchDepth: this.runtimeDispatchDepth,
+      runtimeUpdateStateDepth: this.runtimeUpdateStateDepth,
+      ...extra,
+    });
+  }
+
   private isYjsChangeOriginTransaction(transaction: any): boolean {
     return isRemoteYjsChangeOriginTransaction(transaction);
   }
@@ -5905,15 +6060,112 @@ class ProofEditorImpl implements ProofEditor {
 
       // Store the original dispatchTransaction
       const originalDispatch = view.dispatch.bind(view);
+      const originalUpdateState = view.updateState.bind(view);
+
+      (view as any).updateState = (nextState: any) => {
+        const updateId = ++this.runtimeTraceSeq;
+        const beforeState = view.state;
+        const activeTrace = this.getActiveNativeTextInputRuntimeTrace();
+        const beforeRange = activeTrace
+          ? summarizeRuntimeRangeSnapshot(beforeState.doc, activeTrace.from, activeTrace.to)
+          : null;
+        const dispatchContext = this.runtimeDispatchContextStack[this.runtimeDispatchContextStack.length - 1] ?? null;
+        this.runtimeUpdateStateDepth += 1;
+        console.log('[tc.view.updateState]', {
+          updateId,
+          depth: this.runtimeUpdateStateDepth,
+          dispatchContext,
+          caller: summarizeRuntimeCallerStack(),
+          docChanged: !beforeState.doc.eq(nextState.doc),
+          selectionBefore: summarizeSelectionForDebug(beforeState.selection),
+          selectionAfter: summarizeSelectionForDebug(nextState.selection),
+          pluginCountBefore: beforeState.plugins.length,
+          pluginCountAfter: nextState.plugins.length,
+          activeNativeTextInput: activeTrace,
+          activeRangeBefore: beforeRange,
+        });
+        try {
+          originalUpdateState(nextState);
+        } finally {
+          this.runtimeUpdateStateDepth = Math.max(0, this.runtimeUpdateStateDepth - 1);
+        }
+        const afterTrace = this.getActiveNativeTextInputRuntimeTrace() ?? activeTrace;
+        const afterRange = afterTrace
+          ? summarizeRuntimeRangeSnapshot(view.state.doc, afterTrace.from, afterTrace.to)
+          : null;
+        console.log('[tc.view.updateState.result]', {
+          updateId,
+          depth: this.runtimeUpdateStateDepth,
+          dispatchContext,
+          selectionAfter: summarizeSelectionForDebug(view.state.selection),
+          activeNativeTextInput: afterTrace,
+          activeRangeMarksChanged: runtimeMarksChanged(beforeRange, afterRange),
+          activeRangeTextChanged: beforeRange?.text !== afterRange?.text,
+          activeRangeAfter: afterRange,
+        });
+      };
+
+      const dispatchToView = (
+        transaction: any,
+        source: string,
+        options: { incrementRevision?: boolean } = {},
+      ) => {
+        const dispatchId = ++this.runtimeTraceSeq;
+        const beforeDispatchState = view.state;
+        const stepTypes = summarizeTransactionStepTypes(transaction);
+        const meta = summarizeTransactionMeta(transaction);
+        const activeTrace = this.getActiveNativeTextInputRuntimeTrace();
+        const beforeRange = activeTrace
+          ? summarizeRuntimeRangeSnapshot(beforeDispatchState.doc, activeTrace.from, activeTrace.to)
+          : null;
+        const dispatchContext = { id: dispatchId, source, stepTypes, meta };
+        this.runtimeDispatchDepth += 1;
+        this.runtimeDispatchContextStack.push(dispatchContext);
+        console.log('[tc.view.dispatch.apply]', {
+          dispatchId,
+          source,
+          depth: this.runtimeDispatchDepth,
+          duringUpdateState: this.runtimeUpdateStateDepth > 0,
+          selectionBefore: summarizeSelectionForDebug(beforeDispatchState.selection),
+          stepTypes,
+          meta,
+          caller: summarizeRuntimeCallerStack(),
+          activeNativeTextInput: activeTrace,
+          activeRangeBefore: beforeRange,
+        });
+        try {
+          originalDispatch(transaction);
+        } finally {
+          this.runtimeDispatchContextStack.pop();
+          this.runtimeDispatchDepth = Math.max(0, this.runtimeDispatchDepth - 1);
+        }
+        if (transaction?.docChanged && options.incrementRevision !== false) {
+          this.revision += 1;
+        }
+        const afterTrace = this.getActiveNativeTextInputRuntimeTrace() ?? activeTrace;
+        const afterRange = afterTrace
+          ? summarizeRuntimeRangeSnapshot(view.state.doc, afterTrace.from, afterTrace.to)
+          : null;
+        console.log('[tc.view.dispatch.result]', {
+          dispatchId,
+          source,
+          depth: this.runtimeDispatchDepth,
+          selectionAfter: summarizeSelectionForDebug(view.state.selection),
+          activeNativeTextInput: afterTrace,
+          activeRangeMarksChanged: runtimeMarksChanged(beforeRange, afterRange),
+          activeRangeTextChanged: beforeRange?.text !== afterRange?.text,
+          activeRangeAfter: afterRange,
+        });
+      };
 
       // Override dispatchTransaction to intercept edits
       (view as any).dispatch = (tr: any) => {
         const beforeState = view.state;
-        const dispatchWithRevision = (transaction: any) => {
-          originalDispatch(transaction);
-          if (transaction?.docChanged) {
-            this.revision += 1;
-          }
+        const dispatchWithRevision = (transaction: any, source: string) => {
+          dispatchToView(transaction, source, { incrementRevision: true });
+        };
+        const dispatchWithoutRevision = (transaction: any, source: string) => {
+          dispatchToView(transaction, source, { incrementRevision: false });
         };
         const beforeSelectionFrom = beforeState.selection.from;
         const beforeSelectionEmpty = beforeState.selection.empty;
@@ -5961,6 +6213,17 @@ class ProofEditorImpl implements ProofEditor {
           && !isDocumentLoad
           && !isSystemTrackChangesSuppressed;
 
+        console.log('[tc.view.dispatch]', {
+          callId: ++this.runtimeTraceSeq,
+          depth: this.runtimeDispatchDepth,
+          duringUpdateState: this.runtimeUpdateStateDepth > 0,
+          selection: summarizeSelectionForDebug(beforeState.selection),
+          stepTypes: summarizeTransactionStepTypes(tr),
+          meta: summarizeTransactionMeta(tr),
+          caller: summarizeRuntimeCallerStack(),
+          activeNativeTextInput: this.getActiveNativeTextInputRuntimeTrace(),
+        });
+
         if (isRemoteContentChange) {
           this.recordContentChangeSource('remote');
         } else if (isLocalContentChange) {
@@ -6006,7 +6269,7 @@ class ProofEditorImpl implements ProofEditor {
           // Don't intercept meta transactions (like enabling/disabling suggestions)
           if (tr.getMeta(suggestionsPluginKey) !== undefined) {
             clearPendingDomSuggestionSelection();
-            dispatchWithRevision(tr);
+            dispatchWithRevision(tr, 'suggestionsMetaPassthrough');
             return;
           }
 
@@ -6014,20 +6277,20 @@ class ProofEditorImpl implements ProofEditor {
           // These are internal operations that should not be converted to suggestions
           if (marksMeta !== undefined && (marksMetaType !== 'INTERNAL' || !hasReplaceStep)) {
             clearPendingDomSuggestionSelection();
-            dispatchWithRevision(tr);
+            dispatchWithRevision(tr, 'marksMetaPassthrough');
             return;
           }
 
           // Don't intercept document load transactions
           if (tr.getMeta('document-load') !== undefined) {
             clearPendingDomSuggestionSelection();
-            dispatchWithRevision(tr);
+            dispatchWithRevision(tr, 'documentLoadPassthrough');
             return;
           }
 
           if (isSystemTrackChangesSuppressed) {
             clearPendingDomSuggestionSelection();
-            dispatchWithRevision(tr);
+            dispatchWithRevision(tr, 'systemTrackChangesSuppressedPassthrough');
             return;
           }
 
@@ -6044,20 +6307,25 @@ class ProofEditorImpl implements ProofEditor {
             if (!preserveInsertCoalescing) {
               resetSuggestionsInsertCoalescing();
             }
-            originalDispatch(tr);
-            this.repairRemoteSuggestionBoundaryInheritance(view, beforeState, dispatchWithRevision);
+            dispatchWithoutRevision(tr, 'remoteContentPassthrough');
+            this.repairRemoteSuggestionBoundaryInheritance(
+              view,
+              beforeState,
+              (transaction) => dispatchWithRevision(transaction, 'repairRemoteSuggestionBoundaryInheritance'),
+            );
             return;
           }
 
           // Don't intercept undo/redo transactions (from history plugin)
           if (tr.getMeta('history$') !== undefined) {
             clearPendingDomSuggestionSelection();
-            dispatchWithRevision(tr);
+            dispatchWithRevision(tr, 'historyPassthrough');
             return;
           }
 
           const nativeTextInputMatch = consumePendingNativeTextInputTransactionMatch(beforeState, tr);
           if (nativeTextInputMatch) {
+            this.beginNativeTextInputRuntimeTrace(nativeTextInputMatch, 'view.dispatch.nativeTextInputMatch');
             clearPendingDomSuggestionSelection();
             console.log('[tc.dispatch.passthroughNativeTextInput]', {
               suggestionsEnabled,
@@ -6067,7 +6335,7 @@ class ProofEditorImpl implements ProofEditor {
             });
             tr.setMeta('proof-native-typed-input', true);
             tr.setMeta('proof-native-typed-input-match', nativeTextInputMatch);
-            dispatchWithRevision(tr);
+            dispatchWithRevision(tr, 'nativeTextInputPassthrough');
             const finalNodes = summarizeTransactionDocChangeNodes(
               view.state.doc,
               nativeTextInputMatch.from,
@@ -6111,7 +6379,7 @@ class ProofEditorImpl implements ProofEditor {
                     return stepJson?.stepType ?? step?.constructor?.name ?? 'unknown';
                   }),
                 });
-                dispatchWithRevision(settledRepairTr);
+                dispatchWithRevision(settledRepairTr, 'nativeTextInputSettledRepair');
               }
             }
             return;
@@ -6130,7 +6398,7 @@ class ProofEditorImpl implements ProofEditor {
             selFrom: tr.selection?.from,
           });
           const wrappedTr = wrapTransactionForSuggestions(tr, view.state, true);
-          dispatchWithRevision(wrappedTr);
+          dispatchWithRevision(wrappedTr, 'suggestionsWrapped');
         } else {
           if (tr?.docChanged) {
             console.log('[tc.dispatch.passthrough]', {
@@ -6140,7 +6408,7 @@ class ProofEditorImpl implements ProofEditor {
             });
             this.pendingDomSuggestionSelection = null;
           }
-          dispatchWithRevision(tr);
+          dispatchWithRevision(tr, 'plainPassthrough');
         }
 
         this.stabilizeCursorAfterRemoteYjsTransaction(
@@ -6148,7 +6416,7 @@ class ProofEditorImpl implements ProofEditor {
           tr,
           beforeSelectionFrom,
           beforeSelectionEmpty,
-          originalDispatch,
+          (transaction) => dispatchWithoutRevision(transaction, 'stabilizeCursorAfterRemoteYjsTransaction'),
         );
       };
 
@@ -6224,6 +6492,10 @@ class ProofEditorImpl implements ProofEditor {
           if (this.collabEnabled && this.collabCanEdit && this.shouldPublishProjectionMarkdown('content-sync')) {
             this.publishProjectionMarkdown(view, markdown, 'content-sync');
             const metadata = getMarkMetadataWithQuotes(view.state);
+            this.logActiveNativeTextInputRuntimeEvent('[tc.contentSync.setMarksMetadata]', view.state.doc, {
+              source: 'scheduleContentSync',
+              metadataKeys: Object.keys(metadata).length,
+            });
             collabClient.setMarksMetadata(metadata);
           }
           getTriggerService().updateDocumentContent(
@@ -6335,6 +6607,10 @@ class ProofEditorImpl implements ProofEditor {
       if (this.shouldPublishProjectionMarkdown('direct-content')) {
         this.publishProjectionMarkdown(view, canonicalMarkdown, 'direct-content');
         const metadata = getMarkMetadataWithQuotes(view.state);
+        this.logActiveNativeTextInputRuntimeEvent('[tc.contentSync.setMarksMetadata]', view.state.doc, {
+          source: 'handleContentChange',
+          metadataKeys: Object.keys(metadata).length,
+        });
         collabClient.setMarksMetadata(metadata);
       }
       getTriggerService().updateDocumentContent(
@@ -6358,6 +6634,11 @@ class ProofEditorImpl implements ProofEditor {
       markdown = this.lastMarkdown;
     }
     if (!markdown) return;
+
+    this.logActiveNativeTextInputRuntimeEvent('[tc.marksSync.handleMarksChange]', view.state.doc, {
+      actionMarks: actionMarks.map((mark) => `${mark.kind}:${mark.id}`),
+      actionMetadataKeys: actionMetadata ? Object.keys(actionMetadata).length : 0,
+    });
 
     this.lastMarkdown = markdown;
     this.sendDocumentSnapshot(view, markdown, actionMarks);
@@ -6388,6 +6669,10 @@ class ProofEditorImpl implements ProofEditor {
       // metadata separately once the dispatch cycle has settled.
       this.scheduleShareMarksFlush();
     } else if (this.collabEnabled && this.collabCanEdit) {
+      this.logActiveNativeTextInputRuntimeEvent('[tc.marksSync.setMarksMetadata]', view.state.doc, {
+        source: 'handleMarksChange',
+        metadataKeys: Object.keys(metadata).length,
+      });
       collabClient.setMarksMetadata(metadata);
     }
 

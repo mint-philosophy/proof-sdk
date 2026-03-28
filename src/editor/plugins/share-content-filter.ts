@@ -45,8 +45,16 @@ export const shareContentFilterPlugin = $prose(() => {
 	    filterTransaction(tr, state) {
 	      const pluginState = shareContentFilterKey.getState(state);
 	      if (!pluginState?.enabled) return true;
+	      const debugTypedInsert = tr.getMeta('proof-native-typed-input') === true || tr.getMeta('suggestions-wrapped');
 	      // Allow explicitly trusted bridge mutations (transaction-scoped only).
-	      if (tr.getMeta(SHARE_CONTENT_FILTER_ALLOW_META) === true) return true;
+	      if (tr.getMeta(SHARE_CONTENT_FILTER_ALLOW_META) === true) {
+	        if (debugTypedInsert) {
+	          console.log('[share-content-filter.filterTransaction.allowTrusted]', {
+	            stepTypes: tr.steps.map((step) => step.constructor.name),
+	          });
+	        }
+	        return true;
+	      }
 	      // Always allow collaborative remote transactions from Yjs.
 	      //
 	      // In some production bundles, y-prosemirror sync transactions are tagged under
@@ -58,20 +66,44 @@ export const shareContentFilterPlugin = $prose(() => {
 	      const rawMeta = (tr as unknown as { meta?: Record<string, unknown> }).meta;
 	      if (rawMeta) {
 	        for (const key of Object.keys(rawMeta)) {
-	          if (key.startsWith('y-sync')) return true;
+	          if (key.startsWith('y-sync')) {
+	            if (debugTypedInsert) {
+	              console.log('[share-content-filter.filterTransaction.allowYSyncRaw]', {
+	                stepTypes: tr.steps.map((step) => step.constructor.name),
+	              });
+	            }
+	            return true;
+	          }
 	        }
 	      }
 	      const ySyncMeta = tr.getMeta(ySyncPluginKey);
-	      if (ySyncMeta !== undefined) return true;
+	      if (ySyncMeta !== undefined) {
+	        if (debugTypedInsert) {
+	          console.log('[share-content-filter.filterTransaction.allowYSyncMeta]', {
+	            stepTypes: tr.steps.map((step) => step.constructor.name),
+	          });
+	        }
+	        return true;
+	      }
 	      // Allow transactions with no steps (selection changes, etc.)
 	      if (tr.steps.length === 0) return true;
 	      // Block transactions that contain any text-modifying steps
 	      for (const step of tr.steps) {
         if (step instanceof ReplaceStep || step instanceof ReplaceAroundStep) {
+          if (debugTypedInsert) {
+            console.log('[share-content-filter.filterTransaction.block]', {
+              stepTypes: tr.steps.map((innerStep) => innerStep.constructor.name),
+            });
+          }
           return false;
         }
       }
       // Allow mark-only transactions (AddMarkStep, RemoveMarkStep)
+      if (debugTypedInsert) {
+        console.log('[share-content-filter.filterTransaction.allowMarkOnly]', {
+          stepTypes: tr.steps.map((step) => step.constructor.name),
+        });
+      }
       return true;
     },
   });

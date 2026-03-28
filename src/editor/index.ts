@@ -6067,6 +6067,22 @@ class ProofEditorImpl implements ProofEditor {
             tr.setMeta('proof-native-typed-input', true);
             tr.setMeta('proof-native-typed-input-match', nativeTextInputMatch);
             dispatchWithRevision(tr);
+            console.log('[tc.dispatch.nativeTextInputResult]', {
+              from: nativeTextInputMatch.from,
+              to: nativeTextInputMatch.to,
+              text: nativeTextInputMatch.text,
+              finalText: view.state.doc.textBetween(
+                nativeTextInputMatch.from,
+                nativeTextInputMatch.to,
+                '\n',
+                '\n',
+              ),
+              finalNodes: summarizeTransactionDocChangeNodes(
+                view.state.doc,
+                nativeTextInputMatch.from,
+                nativeTextInputMatch.to,
+              ),
+            });
             return;
           }
 

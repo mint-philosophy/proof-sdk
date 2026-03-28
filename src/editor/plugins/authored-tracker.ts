@@ -98,6 +98,9 @@ export const authoredTrackerPlugin = $prose(() => {
     },
 
     appendTransaction(transactions, _oldState, newState) {
+      const sawTypedInsertDebugTransaction = transactions.some((tr) =>
+        tr.getMeta('proof-native-typed-input') === true || tr.getMeta('suggestions-wrapped'),
+      );
       if (pendingHumanRanges.length === 0) return null;
 
       const markType = getAuthoredMarkType(newState);
@@ -112,6 +115,20 @@ export const authoredTrackerPlugin = $prose(() => {
         || tr.getMeta('document-load')
         || tr.getMeta('suggestions-wrapped')
       ) || !shouldTrackHumanAuthorship(newState);
+
+      if (sawTypedInsertDebugTransaction) {
+        console.log('[authored-tracker.appendTransaction]', {
+          pendingHumanRanges: pendingHumanRanges.length,
+          docChanged,
+          skipAuthored,
+          shouldTrackHumanAuthorship: shouldTrackHumanAuthorship(newState),
+          transactionMeta: transactions.map((tr) => ({
+            docChanged: tr.docChanged,
+            nativeTypedInput: tr.getMeta('proof-native-typed-input') === true,
+            suggestionsWrapped: Boolean(tr.getMeta('suggestions-wrapped')),
+          })),
+        });
+      }
 
       if (!docChanged || skipAuthored) {
         pendingHumanRanges = [];

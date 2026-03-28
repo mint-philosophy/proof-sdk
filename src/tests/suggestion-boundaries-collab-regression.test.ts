@@ -276,6 +276,92 @@ function run(): void {
     'Expected boundary repair to rehydrate authored gap fragments back into the pending insert suggestion',
   );
 
+  const disappearedInsertOldState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha beta gamma.', [authoredMark]),
+        schema.text('Y', [schema.marks.proofSuggestion.create({
+          id: suggestionId,
+          kind: 'insert',
+          by: 'user:test',
+          status: 'pending',
+        })]),
+      ]),
+    ]),
+    selection: TextSelection.create(
+      schema.node('doc', null, [
+        schema.node('paragraph', null, [
+          schema.text('Alpha beta gamma.', [authoredMark]),
+          schema.text('Y', [schema.marks.proofSuggestion.create({
+            id: suggestionId,
+            kind: 'insert',
+            by: 'user:test',
+            status: 'pending',
+          })]),
+        ]),
+      ]),
+      19,
+      19,
+    ),
+    plugins: [marksStatePlugin],
+  });
+  const disappearedInsertNewState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha beta gamma.', [authoredMark]),
+        schema.text('Y'),
+      ]),
+    ]),
+    selection: TextSelection.create(
+      schema.node('doc', null, [
+        schema.node('paragraph', null, [
+          schema.text('Alpha beta gamma.', [authoredMark]),
+          schema.text('Y'),
+        ]),
+      ]),
+      19,
+      19,
+    ),
+    plugins: [marksStatePlugin],
+  });
+  const disappearedInsertRepair = buildRemoteInsertSuggestionBoundaryRepair(
+    disappearedInsertOldState,
+    disappearedInsertNewState,
+    {
+      [suggestionId]: {
+        kind: 'insert',
+        by: 'user:test',
+        status: 'pending',
+        content: 'Y',
+        quote: 'Y',
+        range: { from: 18, to: 19 },
+      },
+    },
+    {
+      preferLocalInsertGrowthAtSelection: true,
+      localSelectionFrom: 19,
+      localSelectionEmpty: true,
+    },
+  );
+  assert(
+    disappearedInsertRepair,
+    'Expected boundary repair to restore a recent local insert when a remote self-echo drops the live insert marks entirely',
+  );
+  const disappearedInsertRepairedState = disappearedInsertNewState.apply(disappearedInsertRepair!.transaction);
+  const disappearedSegments = collectSuggestionSegments(disappearedInsertRepairedState.doc, suggestionId, 'insert');
+  assert.equal(
+    getSuggestionTextFromSegments(disappearedSegments),
+    'Y',
+    'Expected boundary repair to reapply the missing insert mark onto the existing native text instead of leaving a bare duplicate',
+  );
+  assert.equal(
+    disappearedInsertRepairedState.doc.textContent,
+    'Alpha beta gamma.Y',
+    'Expected disappeared-insert repair to preserve exactly one typed character in the document',
+  );
+
   console.log('suggestion-boundaries-collab-regression.test.ts passed');
 }
 

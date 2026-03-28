@@ -1,17 +1,48 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `2e56d64b45f7d2a385ca7d251aaaea93b1c100fad821497b531afec4c4b1c2f6`
+- Live client bundle on `proof-test.mintresearch.org`: pending next deploy from local `fix50`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
-  - `fix49` pending commit: carry the exact native typed-insert range into the delayed wrap
-  - `fix48` pending commit: defer native typed-input wrapping to a mark-only follow-up transaction
+  - `fix50` pending commit: restore dropped local insert marks after a remote plain-text self-echo replaces them
+  - `fix49` `14e7edc`: carry the exact native typed-insert range into the delayed wrap
+  - `fix48` `bfd049f`: defer native typed-input wrapping to a mark-only follow-up transaction
   - `bdea5d4` `fix47: wrap native typed inserts in place`
   - `ca60b7c` `fix46: passthrough native typed insert before wrapping`
   - `b32f272` `fix45: defer tracked typing to native prosemirror flow`
   - `273b3b6` `fix44: use prosemirror default text input transactions`
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix50 restore dropped local insert marks after a Yjs self-echo
+
+Shared reports:
+- browser QA on fix49 still showed `YY` for a single typed character
+- the new evidence narrowed it further:
+  - `scheduleNativeTextInputWrap` and `followupNativeTextInputWrap` both fired
+  - `appendTransactionFallback` did not fire
+  - the final DOM showed one anchor/widget `Y` plus one bare native `Y`
+  - a `tc.yjsIncoming` followed the local wrap
+- that combination points to a remote self-echo replacing the newly wrapped local insert span with plain/authored text, leaving the pending insert metadata behind
+
+What changed:
+- `src/editor/plugins/suggestion-boundaries.ts`
+  - `buildRemoteInsertSuggestionBoundaryRepair(...)` no longer bails out immediately when a recent local insert id disappears entirely from `newState`
+  - if the old insert text is still present as plain text in the same range, and the insert is still pending, the repair path now reapplies the insert mark onto that existing text instead of leaving a metadata-only anchor
+- `src/tests/suggestion-boundaries-collab-regression.test.ts`
+  - added a regression for the exact self-echo case: old state has a pending insert-marked `Y`, new state has the same `Y` as plain text, and boundary repair must restore the insert mark without duplicating the character
+
+Why this is the right next step:
+- the fix49 local follow-up wrap was already running
+- the remaining duplicate looked like a lost-mark remote echo, not a second local fallback insert
+- the marks plugin only renders the widget-style insert when metadata survives but live insert marks do not
+
+Verified locally:
+- `npx tsx src/tests/suggestion-boundaries-collab-regression.test.ts`
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npm run build`
 
 ## Fix46 passthrough the native typed-insert transaction before wrapping
 

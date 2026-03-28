@@ -364,13 +364,45 @@ export function buildRemoteInsertSuggestionBoundaryRepair(
   for (const id of existingInsertIds) {
     const oldSegments = collectSuggestionSegments(oldState.doc, id, 'insert');
     const newSegments = collectSuggestionSegments(newState.doc, id, 'insert');
-    if (oldSegments.length === 0 || newSegments.length === 0) continue;
+    if (oldSegments.length === 0) continue;
 
+    const stored = metadata?.[id];
     const oldText = getSuggestionTextFromSegments(oldSegments) ?? '';
+    const oldRange = getSuggestionClusterRangeFromSegments(oldSegments);
+
+    if (newSegments.length === 0) {
+      const canRestoreMissingLocalInsert = (
+        stored?.kind === 'insert'
+        && stored.status !== 'accepted'
+        && stored.status !== 'rejected'
+        && options?.preferLocalInsertGrowthAtSelection === true
+        && options.localSelectionEmpty !== false
+      );
+      const fullRangeText = oldRange
+        ? normalizeQuote(newState.doc.textBetween(oldRange.from, oldRange.to, '\n', '\n'))
+        : '';
+      if (canRestoreMissingLocalInsert && oldRange && fullRangeText === normalizeQuote(oldText)) {
+        const restoredRanges = collectNonSuggestionTextRanges(newState.doc, oldRange, id);
+        if (restoredRanges.length > 0) {
+          for (const restoredRange of restoredRanges) {
+            if (authoredMarkType) {
+              tr = tr.removeMark(restoredRange.from, restoredRange.to, authoredMarkType);
+            }
+            tr = tr.addMark(
+              restoredRange.from,
+              restoredRange.to,
+              suggestionMarkType.create({ id, kind: 'insert', by: stored.by ?? 'unknown' }),
+            );
+          }
+          affectedInsertIds.add(id);
+        }
+      }
+      continue;
+    }
+
     const newText = getSuggestionTextFromSegments(newSegments) ?? '';
     if (oldText === newText) continue;
 
-    const stored = metadata?.[id];
     if (stored?.kind === 'insert' && stored.status !== 'accepted' && stored.status !== 'rejected') {
       const normalizedNewText = normalizeQuote(newText);
       const normalizedStoredContent = typeof stored.content === 'string' ? normalizeQuote(stored.content) : '';
@@ -389,7 +421,6 @@ export function buildRemoteInsertSuggestionBoundaryRepair(
         options?.preferLocalInsertGrowthAtSelection === true
         && options.localSelectionEmpty !== false
       ) {
-        const oldRange = getSuggestionClusterRangeFromSegments(oldSegments);
         const fullRangeText = oldRange
           ? normalizeQuote(newState.doc.textBetween(oldRange.from, oldRange.to, '\n', '\n'))
           : '';

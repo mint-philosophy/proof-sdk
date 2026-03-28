@@ -4,6 +4,7 @@
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
+  - `FIX47_PENDING` local only until pushed from this checkout
   - `ca60b7c` `fix46: passthrough native typed insert before wrapping`
   - `b32f272` `fix45: defer tracked typing to native prosemirror flow`
   - `273b3b6` `fix44: use prosemirror default text input transactions`
@@ -42,6 +43,48 @@ Why this is the right next step:
 - fix45 removed direct dispatch from `handleTextInput`, but the interceptor still treated the first native typing transaction like an arbitrary edit and wrapped it immediately
 - the existing plain-insert fallback already knows how to mark already-inserted text
 - the missing piece was letting that one native transaction reach appendTransaction first instead of synthesizing a second marked insertion on top of it
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-disabled-direct-edit.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npm run build`
+
+## Fix47 wrap the matched native typed-insert transaction in place
+
+Shared reports:
+- browser QA on fix46 still showed `YY` for a single typed character
+- the key new evidence was:
+  - the matcher path worked: `nativePassthroughCheck` and `tc.dispatch.passthroughNativeTextInput` both fired
+  - the remaining duplication happened only after that, when `appendTransactionFallback` ran
+- that meant the matched native text-input transaction should not merely pass through; it needed to be converted into a tracked insert before appendTransaction ever saw it
+
+Requested:
+- use the native typed-insert transaction itself as the tracked-insert carrier
+- add/remove marks and sync metadata on that existing transaction, instead of letting appendTransaction create a second tracked representation later
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - added `wrapPendingNativeTextInputTransaction(oldState, tr)` which:
+    - detects the plain inserted range on the native transaction
+    - strips authored marks from that inserted text
+    - adds the insert suggestion mark directly onto the already-inserted text
+    - syncs insert metadata to the live doc
+    - tags the result as `suggestions-wrapped`
+- `src/editor/index.ts`
+  - the matched native text-input branch now calls `wrapPendingNativeTextInputTransaction(beforeState, tr)` and dispatches that wrapped native transaction in place
+  - logging changed from passthrough to `[tc.dispatch.wrapNativeTextInput]`
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - added a direct regression proving the native inserted character can be wrapped in place while preserving exactly one inserted character
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the source guard to require the new in-place native-wrap branch
+
+Why this is the right next step:
+- fix46 proved the transaction matcher was correct
+- the remaining bug was downstream of that matcher, inside the later fallback path
+- using the native transaction itself as the tracked-insert carrier removes that later duplication lane entirely
 
 Verified locally:
 - `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`

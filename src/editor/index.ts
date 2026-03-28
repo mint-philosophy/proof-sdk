@@ -67,6 +67,7 @@ import {
   wrapTransactionForSuggestions,
   shouldSuppressHandledTextInputEcho,
   shouldPassthroughPendingNativeTextInputTransaction,
+  wrapPendingNativeTextInputTransaction,
   isSuggestionsModuleEnabled,
   setSuggestionsDesiredEnabled,
   resetSuggestionsModuleState,
@@ -6026,12 +6027,14 @@ class ProofEditorImpl implements ProofEditor {
 
           if (shouldPassthroughPendingNativeTextInputTransaction(beforeState, tr)) {
             clearPendingDomSuggestionSelection();
-            console.log('[tc.dispatch.passthroughNativeTextInput]', {
+            const wrappedNativeTextInputTr = wrapPendingNativeTextInputTransaction(beforeState, tr);
+            console.log('[tc.dispatch.wrapNativeTextInput]', {
               suggestionsEnabled,
               docChanged: true,
               selFrom: tr.selection?.from,
+              wrapped: Boolean(wrappedNativeTextInputTr),
             });
-            dispatchWithRevision(tr);
+            dispatchWithRevision(wrappedNativeTextInputTr ?? tr);
             return;
           }
 

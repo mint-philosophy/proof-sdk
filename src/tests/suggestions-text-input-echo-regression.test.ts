@@ -9,6 +9,7 @@ import {
   __debugRememberPendingNativeTextInput,
   __debugResetHandledTextInputEcho,
   __debugShouldPassthroughPendingNativeTextInputTransaction,
+  __debugWrapPendingNativeTextInputTransaction,
   __debugShouldSuppressDuplicateHandledTextInputCall,
   __debugShouldSuppressHandledTextInputEcho,
   wrapTransactionForSuggestions,
@@ -207,6 +208,32 @@ function run(): void {
     __debugShouldPassthroughPendingNativeTextInputTransaction(plainInsertBaseState, nativeInsertTr),
     false,
     'Expected native typed-insert passthrough to be one-shot once consumed',
+  );
+
+  const wrappedNativeTextInputTr = __debugWrapPendingNativeTextInputTransaction(
+    plainInsertBaseState,
+    plainInsertBaseState.tr.insertText('a', 18, 18),
+  );
+  assert(
+    wrappedNativeTextInputTr !== null,
+    'Expected the matched native typed-insert transaction to be wrapped in place with suggestion marks',
+  );
+  const wrappedNativeState = plainInsertBaseState.apply(wrappedNativeTextInputTr!);
+  assertEqual(
+    wrappedNativeState.doc.textContent,
+    'Alpha beta gamma.a',
+    'Expected in-place native typed-insert wrapping to preserve a single inserted character',
+  );
+  let wrappedNativeSuggestionCount = 0;
+  wrappedNativeState.doc.descendants((node) => {
+    if (!node.isText) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofSuggestion')) wrappedNativeSuggestionCount += 1;
+    return true;
+  });
+  assertEqual(
+    wrappedNativeSuggestionCount,
+    1,
+    'Expected in-place native typed-insert wrapping to leave exactly one suggestion-marked text span',
   );
 
   console.log('suggestions-text-input-echo-regression.test.ts passed');

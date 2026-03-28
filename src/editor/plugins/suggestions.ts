@@ -1648,6 +1648,116 @@ export function __debugShouldPassthroughPendingNativeTextInputTransaction(
   return shouldPassthroughPendingNativeTextInputTransaction(oldState, tr);
 }
 
+export function wrapPendingNativeTextInputTransaction(
+  oldState: EditorState,
+  tr: Transaction,
+): Transaction | null {
+  const diff = detectPlainTextInsertionBetweenDocs(oldState.doc, tr.doc);
+  if (!diff) return null;
+
+  const suggestionType = oldState.schema.marks.proofSuggestion;
+  if (!suggestionType) return null;
+
+  const actor = getCurrentActor();
+  const now = Date.now();
+  let metadata = getMarkMetadata(oldState);
+  let metadataChanged = false;
+  let nextTr = tr;
+
+  const authoredType = oldState.schema.marks.proofAuthored ?? null;
+  if (authoredType) {
+    nextTr = nextTr.removeMark(diff.from, diff.to, authoredType);
+  }
+
+  const existingInsertIds = collectSuggestionIdsInRange(nextTr.doc, 'insert', diff.from, diff.to);
+  if (existingInsertIds.length > 0) {
+    const syncedMetadata = syncInsertSuggestionMetadataFromDoc(nextTr.doc, metadata, existingInsertIds);
+    metadataChanged = metadataChanged || syncedMetadata !== metadata;
+    metadata = syncedMetadata;
+  } else {
+    let candidate = getCoalescableInsertCandidate(nextTr.doc, metadata, diff.from, actor, now);
+
+    if (!candidate) {
+      const cached = lastInsertByActor.get(actor);
+      if (cached && cached.to === diff.from && (now - cached.updatedAt) <= COALESCE_WINDOW_MS) {
+        const liveRange = resolveLiveInsertSuggestionRange(nextTr.doc, cached.id);
+        if (liveRange && liveRange.to < diff.from) {
+          const gapText = nextTr.doc.textBetween(liveRange.to, diff.from, '');
+          if (gapText.length > 0 && isWhitespaceOnly(gapText)) {
+            nextTr = nextTr.addMark(
+              liveRange.to,
+              diff.from,
+              suggestionType.create({ id: cached.id, kind: 'insert', by: actor }),
+            );
+            candidate = getCoalescableInsertCandidate(nextTr.doc, metadata, diff.from, actor, now);
+          }
+        }
+      }
+    }
+
+    if (candidate) {
+      nextTr = nextTr.addMark(
+        diff.from,
+        diff.to,
+        suggestionType.create({ id: candidate.id, kind: 'insert', by: actor }),
+      );
+      const syncedMetadata = syncInsertSuggestionMetadataFromDoc(nextTr.doc, metadata, [candidate.id]);
+      metadataChanged = metadataChanged || syncedMetadata !== metadata;
+      metadata = syncedMetadata;
+      const updatedRange = resolveLiveInsertSuggestionRange(nextTr.doc, candidate.id) ?? candidate.range;
+      lastInsertByActor.set(actor, {
+        id: candidate.id,
+        from: updatedRange.from,
+        to: updatedRange.to,
+        by: actor,
+        updatedAt: now,
+      });
+    } else {
+      const suggestionId = generateMarkId();
+      const createdAt = new Date().toISOString();
+      nextTr = nextTr.addMark(
+        diff.from,
+        diff.to,
+        suggestionType.create({ id: suggestionId, kind: 'insert', by: actor }),
+      );
+      metadata = {
+        ...metadata,
+        [suggestionId]: {
+          ...buildSuggestionMetadata('insert', actor, diff.insertedText, createdAt),
+          ...buildCollapsedInsertAnchorMetadata(diff.from),
+        },
+      };
+      const syncedMetadata = syncInsertSuggestionMetadataFromDoc(nextTr.doc, metadata, [suggestionId]);
+      metadataChanged = true;
+      metadata = syncedMetadata;
+      const updatedRange = resolveLiveInsertSuggestionRange(nextTr.doc, suggestionId) ?? {
+        from: diff.from,
+        to: diff.to,
+      };
+      lastInsertByActor.set(actor, {
+        id: suggestionId,
+        from: updatedRange.from,
+        to: updatedRange.to,
+        by: actor,
+        updatedAt: now,
+      });
+    }
+  }
+
+  nextTr = stripAuthoredMarksFromPendingInsertRanges(nextTr, authoredType, metadata);
+  if (nextTr.steps.length === 0 && !metadataChanged) return null;
+  const finalTr = metadataChanged ? syncSuggestionMetadataTransaction(oldState, nextTr, metadata) : nextTr;
+  finalTr.setMeta('suggestions-wrapped', true);
+  return finalTr;
+}
+
+export function __debugWrapPendingNativeTextInputTransaction(
+  oldState: EditorState,
+  tr: Transaction,
+): Transaction | null {
+  return wrapPendingNativeTextInputTransaction(oldState, tr);
+}
+
 function buildPlainInsertionSuggestionFallbackTransaction(
   oldState: EditorState,
   newState: EditorState,

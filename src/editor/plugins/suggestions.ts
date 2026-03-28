@@ -3049,7 +3049,7 @@ export const suggestionsPlugin = $prose(() => {
         },
       },
 
-      handleTextInput(view, from, to, text, deflt) {
+      handleTextInput(view, from, to, text) {
         const enabled = isSuggestionsEnabled(view.state);
         console.log('[suggestions.handleTextInput]', {
           enabled,
@@ -3060,45 +3060,13 @@ export const suggestionsPlugin = $prose(() => {
         });
         if (!enabled) return false;
         if (!text) return false;
-        // Let composition-driven text updates use the same tracked-insert path
-        // as ordinary typing. If we opt out here, ProseMirror's DOM observer
-        // emits intermediate composition transactions that get tracked as
-        // separate char-level edits in shared docs.
-
-        // When there's an active coalesce candidate at the cursor, bypass
-        // resolveTrackedTextInputRange. That function skips past adjacent
-        // delete marks, moving the insertion to a distant document position.
-        // While wrapTransactionForSuggestions correctly redirects back to
-        // the coalesce position, the intermediate position confuses the
-        // y-prosemirror binding — the Y.XmlFragment loses mark continuity
-        // at word boundaries, producing interleaved markdown serialization.
-        // Inserting at the actual cursor keeps the character adjacent to
-        // the existing marked text in the Y.XmlFragment.
-        const dispatchHandledTextInput = (insertFrom: number, insertTo: number) => {
-          if (!view.composing && shouldSuppressDuplicateHandledTextInputCall(text, insertFrom, insertTo)) {
-            console.log('[suggestions.handleTextInput.skipDuplicateCall]', {
-              text,
-              from: insertFrom,
-              to: insertTo,
-            });
-            return true;
-          }
-          rememberHandledTextInputCall(text, insertFrom, insertTo);
-          rememberHandledTextInputDispatch(text, insertFrom, insertTo);
-          const textInputTr = (insertFrom === from && insertTo === to)
-            ? deflt().setMeta(HANDLED_TEXT_INPUT_META, { text, from: insertFrom, to: insertTo })
-            : view.state.tr
-                .insertText(text, insertFrom, insertTo)
-                .setMeta(HANDLED_TEXT_INPUT_META, { text, from: insertFrom, to: insertTo });
-          view.dispatch(textInputTr);
-          return true;
-        };
-        if (from === to && hasActiveInsertCoalescingCandidate(view.state, from)) {
-          return dispatchHandledTextInput(from, to);
-        }
-
-        const range = resolveTrackedTextInputRange(view.state, from, to);
-        return dispatchHandledTextInput(range.from, range.to);
+        // Do not dispatch tracked inserts from handleTextInput.
+        // In the live browser/runtime, this hook fires after the native
+        // contenteditable insertion is already in motion, so dispatching here
+        // produces a second character. Let ProseMirror emit its default
+        // transaction and let the suggestions interceptor / appendTransaction
+        // wrap that plain insertion into a tracked insert suggestion.
+        return false;
       },
 
       handleKeyDown(view, event) {

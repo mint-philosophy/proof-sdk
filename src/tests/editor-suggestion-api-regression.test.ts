@@ -277,17 +277,24 @@ function run(): void {
     'Expected live collab mark application to avoid pruning missing pending insert ids when the live doc lags behind remote metadata, while still resyncing the insert ids that are visible in the document',
   );
 
+  const handleTextInputBlock = sliceBetween(
+    suggestionsSource,
+    '      handleTextInput(view, from, to, text) {',
+    '\n\n      handleKeyDown(view, event) {',
+  );
   assert(
     suggestionsSource.includes('export function enableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {')
       && suggestionsSource.includes('export function disableSuggestions(view: { state: EditorState; dispatch: (tr: Transaction) => void }): void {')
       && suggestionsSource.includes('resetSuggestionsInsertCoalescing();')
       && suggestionsSource.includes("const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';")
-      && suggestionsSource.includes('handleTextInput(view, from, to, text, deflt) {')
-      && suggestionsSource.includes('const textInputTr = (insertFrom === from && insertTo === to)')
-      && suggestionsSource.includes("? deflt().setMeta(HANDLED_TEXT_INPUT_META, { text, from: insertFrom, to: insertTo })")
+      && handleTextInputBlock.includes('handleTextInput(view, from, to, text) {')
+      && handleTextInputBlock.includes('return false;')
+      && !handleTextInputBlock.includes('view.dispatch(')
+      && !handleTextInputBlock.includes('rememberHandledTextInputDispatch(')
+      && !handleTextInputBlock.includes("deflt().setMeta(HANDLED_TEXT_INPUT_META")
       && !suggestionsSource.includes("console.log('[suggestions.beforeinput.preventNativeInsertText]', {")
       && !suggestionsSource.includes('rememberPendingBeforeinputNativeInsertBlock(text, insertFrom, insertTo);'),
-    'Expected toggling track changes on or off to clear stale insert coalescing state, define handled text-input suppression keys, and route ordinary typing through ProseMirror default text-input transactions instead of the failed beforeinput blocker path',
+    'Expected toggling track changes on or off to clear stale insert coalescing state, define handled text-input suppression keys, and let ordinary typing flow through ProseMirror native transactions instead of dispatching tracked inserts directly from handleTextInput',
   );
   const suggestionsAppendTransactionBlock = sliceBetween(
     suggestionsSource,

@@ -8,6 +8,41 @@
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
 
+## Fix45 stop dispatching tracked inserts from handleTextInput
+
+Shared reports:
+- browser QA on fix44 still showed `YY` for a single typed `Y`
+- the decisive new finding was that even `deflt()` had the same additive failure mode as a custom `insertText(...)` dispatch
+- in the live runtime, any transaction dispatched directly from `handleTextInput` landed on top of the native contenteditable insertion
+
+Requested:
+- stop dispatching from `handleTextInput` entirely for ordinary typing
+- let ProseMirror's native/default text-input flow produce the single real insertion, then rely on the existing wrapper/fallback path to mark it as a tracked insert
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - `handleTextInput` no longer dispatches tracked inserts at all
+  - for TC-enabled ordinary typing it now logs and returns `false`, allowing ProseMirror's own text-input transaction to proceed
+  - the active tracked-insert wrapping responsibility stays with the editor interceptor / appendTransaction fallback instead of the hook itself
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - added a direct regression for `buildPlainInsertionSuggestionFallbackTransaction(...)`
+  - the regression proves a plain inserted character can be wrapped into exactly one suggestion-marked span without changing the text content
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the source guard to require that `handleTextInput` no longer dispatches or calls the handled-text-input helpers
+
+Why this is the right next step:
+- fix43 and fix44 established that the browser/runtime does not tolerate tracked-insert dispatch from `handleTextInput`
+- the ordinary ProseMirror/native insertion path already exists and the repo already has a plain-insert fallback to mark that insertion after the fact
+- moving responsibility back to the native transaction path is the cleanest way to eliminate additive `XX` / `YY` duplication at the source
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-disabled-direct-edit.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npm run build`
+
 ## Fix44 route ordinary tracked typing through ProseMirror deflt()
 
 Shared reports:

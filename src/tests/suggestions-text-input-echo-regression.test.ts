@@ -3,6 +3,7 @@ import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 
 import { marksPluginKey } from '../editor/plugins/marks.js';
 import {
+  __debugBuildPlainInsertionSuggestionFallbackTransaction,
   __debugRememberHandledTextInputDispatch,
   __debugRememberHandledTextInputCall,
   __debugResetHandledTextInputEcho,
@@ -161,6 +162,36 @@ function run(): void {
     __debugShouldSuppressDuplicateHandledTextInputCall('a', 19, 19),
     false,
     'Expected a different insertion range not to be suppressed as a duplicate callback',
+  );
+
+  const plainInsertBaseState = createState(18, 18);
+  const plainInsertedState = plainInsertBaseState.apply(
+    plainInsertBaseState.tr.insertText('a', 18, 18),
+  );
+  const fallbackTr = __debugBuildPlainInsertionSuggestionFallbackTransaction(
+    plainInsertBaseState,
+    plainInsertedState,
+  );
+  assert(
+    fallbackTr !== null,
+    'Expected the appendTransaction plain-insert fallback to wrap an ordinary native text insertion',
+  );
+  const fallbackWrappedState = plainInsertedState.apply(fallbackTr!);
+  assertEqual(
+    fallbackWrappedState.doc.textContent,
+    'Alpha beta gamma.a',
+    'Expected the plain-insert fallback to preserve the typed text exactly once',
+  );
+  let fallbackSuggestionCount = 0;
+  fallbackWrappedState.doc.descendants((node) => {
+    if (!node.isText) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofSuggestion')) fallbackSuggestionCount += 1;
+    return true;
+  });
+  assertEqual(
+    fallbackSuggestionCount,
+    1,
+    'Expected the plain-insert fallback to add exactly one suggestion-marked text span for the typed character',
   );
 
   console.log('suggestions-text-input-echo-regression.test.ts passed');

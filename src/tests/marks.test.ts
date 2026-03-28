@@ -59,6 +59,7 @@ import {
   setEventCallback,
   rangeCrossesTableCellBoundary,
   applyRemoteMarks,
+  buildCanonicalShareMarkMetadata,
   getMarks,
   getMarkMetadata,
   getMarkMetadataForDisk,
@@ -901,6 +902,123 @@ test('applyRemoteMarks does not collapse healthy live inserts to a canonical sha
     suggestionNodes.join(''),
     fullText,
     'Expected canonical collapsed share metadata to leave an already-healthy live insert span intact',
+  );
+});
+
+test('applyRemoteMarks repairs fragmented live inserts from collapsed share metadata', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'text*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'insert' },
+          by: { default: 'unknown' },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+    },
+  });
+
+  const insertId = 'm-collapsed-fragmented-share-insert';
+  const insertedText = ' brave';
+  const insertMark = schema.marks.proofSuggestion.create({ id: insertId, kind: 'insert', by: 'human:test' });
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({
+        metadata: {
+          [insertId]: {
+            kind: 'insert' as const,
+            by: 'human:test',
+            createdAt: new Date('2026-03-28T00:00:00.000Z').toISOString(),
+            status: 'pending' as const,
+            content: insertedText,
+            range: { from: 6, to: 6 },
+          },
+        },
+        activeMarkId: null,
+      }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('Alpha'),
+        schema.text(' b', [insertMark]),
+        schema.text('rave beta gamma.'),
+      ]),
+    ]),
+    plugins: [marksStatePlugin],
+  });
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  applyRemoteMarks(view, {
+    [insertId]: {
+      kind: 'insert',
+      by: 'human:test',
+      createdAt: new Date('2026-03-28T00:00:00.000Z').toISOString(),
+      status: 'pending',
+      content: insertedText,
+      range: { from: 6, to: 6 },
+    },
+  }, { hydrateAnchors: true });
+
+  const repairedInsert = getMarks(state).find((mark) => mark.id === insertId);
+  assert(repairedInsert, 'Expected fragmented collapsed insert metadata to remain actionable after remote apply');
+  assertDeepEqual(
+    repairedInsert!.range,
+    { from: 6, to: 12 },
+    'Expected collapsed share metadata to repair the full inserted span instead of keeping the first-character fragment',
+  );
+
+  const suggestionNodes: string[] = [];
+  state.doc.descendants((node) => {
+    if (!node.isText) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofSuggestion' && mark.attrs.id === insertId)) {
+      suggestionNodes.push(node.text ?? '');
+    }
+    return true;
+  });
+
+  assertEqual(
+    suggestionNodes.join(''),
+    insertedText,
+    'Expected repaired insert anchors to cover the full tracked insertion after reload repair',
+  );
+
+  const flushed = getMarkMetadataWithQuotes(state);
+  const persisted = buildCanonicalShareMarkMetadata(state, flushed);
+  assertDeepEqual(
+    persisted[insertId]?.range,
+    { from: 6, to: 6 },
+    'Expected canonical share persistence to keep collapsing the repaired insert back to its insertion point',
   );
 });
 

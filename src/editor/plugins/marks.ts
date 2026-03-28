@@ -1885,6 +1885,67 @@ function getExpectedPendingInsertText(
   return normalizeQuote(getTextForRange(doc, range));
 }
 
+function getExpectedPendingInsertRawText(
+  doc: ProseMirrorNode,
+  stored: StoredMark,
+  range: MarkRange,
+): string {
+  if (typeof stored.content === 'string' && stored.content.length > 0) {
+    return stored.content;
+  }
+  if (typeof stored.quote === 'string' && stored.quote.length > 0) {
+    return stored.quote;
+  }
+  return getTextForRange(doc, range);
+}
+
+function resolveMaterializedPendingInsertRange(
+  doc: ProseMirrorNode,
+  expectedRawText: string,
+  anchorCandidates: Array<number | null | undefined>,
+): MarkRange | null {
+  const normalizedExpectedText = normalizeQuote(expectedRawText);
+  if (!normalizedExpectedText) return null;
+
+  const directWidth = expectedRawText.length;
+  const candidateRanges: MarkRange[] = [];
+  const seen = new Set<string>();
+  const pushCandidate = (from: number, to: number): void => {
+    if (from < 0 || to <= from || to > doc.content.size) return;
+    const key = `${from}:${to}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidateRanges.push({ from, to });
+  };
+
+  for (const anchorPos of anchorCandidates) {
+    if (typeof anchorPos !== 'number' || !Number.isFinite(anchorPos)) continue;
+    if (directWidth > 0) {
+      pushCandidate(anchorPos, anchorPos + directWidth);
+      pushCandidate(anchorPos - directWidth, anchorPos);
+    }
+  }
+
+  for (const candidateRange of candidateRanges) {
+    if (normalizeQuote(getTextForRange(doc, candidateRange)) === normalizedExpectedText) {
+      return candidateRange;
+    }
+  }
+
+  const validAnchors = anchorCandidates.filter((value): value is number =>
+    typeof value === 'number' && Number.isFinite(value)
+  );
+  if (validAnchors.length === 0) return null;
+
+  const padding = Math.max(8, Math.min(64, directWidth + 16));
+  const minAnchor = Math.min(...validAnchors);
+  const maxAnchor = Math.max(...validAnchors);
+  return resolveQuoteRange(doc, expectedRawText, {
+    from: Math.max(0, minAnchor - directWidth - padding),
+    to: Math.min(doc.content.size, maxAnchor + directWidth + padding),
+  });
+}
+
 function resolveBrokenPendingInsertAnchorRange(
   doc: ProseMirrorNode,
   id: string,
@@ -1896,7 +1957,6 @@ function resolveBrokenPendingInsertAnchorRange(
 
   const desiredRange = resolveStoredMarkRange(doc, stored);
   if (!desiredRange) return null;
-  if (desiredRange.to <= desiredRange.from) return null;
 
   const liveSegments = collectSuggestionSegments(doc, id, 'insert');
   if (liveSegments.length === 0) return desiredRange;
@@ -1904,6 +1964,7 @@ function resolveBrokenPendingInsertAnchorRange(
   const liveRange = getSuggestionClusterRangeFromSegments(liveSegments);
   const liveText = normalizeQuote(getSuggestionTextFromSegments(liveSegments) ?? '');
   const visibleLiveText = liveRange ? normalizeQuote(getTextForRange(doc, liveRange)) : liveText;
+  const expectedRawText = getExpectedPendingInsertRawText(doc, stored, desiredRange);
   const expectedText = getExpectedPendingInsertText(doc, stored, desiredRange);
   if (
     liveRange
@@ -1918,6 +1979,21 @@ function resolveBrokenPendingInsertAnchorRange(
   }
   const rangeMismatch = !liveRange || liveRange.from !== desiredRange.from || liveRange.to !== desiredRange.to;
   const textMismatch = expectedText.length > 0 && liveText !== expectedText;
+
+  if (rangeMismatch || textMismatch) {
+    const repairedRange = resolveMaterializedPendingInsertRange(doc, expectedRawText, [
+      liveRange?.from,
+      liveRange?.to,
+      desiredRange.from,
+      desiredRange.to,
+    ]);
+    if (
+      repairedRange
+      && (!liveRange || repairedRange.from !== liveRange.from || repairedRange.to !== liveRange.to)
+    ) {
+      return repairedRange;
+    }
+  }
 
   return rangeMismatch || textMismatch ? desiredRange : null;
 }

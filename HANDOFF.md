@@ -1,8 +1,47 @@
 ## Current state
 
-- Live build on `proof-test.mintresearch.org`: `00a23f86440faf369e3fac4b10eceac2bac5c7d8-dirty`
+- Live browser-verified client bundle on `proof-test.mintresearch.org`: `82dc313a0f78813ec403ed03315af6ecb0f2ff5d933d0bbb18429c37281282e5`
+- `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
-- Last commit in this session: `265eb63` `Avoid preflush mark writes before review mutations`
+- Last commits in this session:
+  - `c9615af` `fix25: repair fragmented share insert marks on reload`
+  - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix25 browser QA pass
+
+Shared reports:
+- `/tmp/codex-qa-loop.md`
+- `/tmp/codex-qa-result-1.md`
+
+Requested:
+- fix reload-time mark fragmentation where shared-doc suggestion spans collapsed to the first 1-2 characters after refresh
+
+What changed:
+- `src/editor/plugins/marks.ts`
+  - added repair logic that expands collapsed pending-insert share metadata back to the full nearby materialized text span during remote mark application
+  - preserved canonical share persistence behavior, so repaired live spans still persist back as insertion-point metadata
+- `src/tests/marks.test.ts`
+  - added a regression for a fragmented live insert plus collapsed share metadata
+- `scripts/finalize-web-build.mjs`
+  - switched to `fileURLToPath(import.meta.url)` so local builds work from the `My Shared Files` path with spaces
+
+Verified locally before push:
+- `npm run test:proof-sdk`
+- `npm run test:server-routes-share`
+- `npm run build`
+- `PORT=4010 npm run serve` + `/health` smoke check
+
+Browser QA status on `proof-test.mintresearch.org`:
+- PASS: fresh tracked insertion survives hard refresh with full span intact
+- PASS: popover shows the full inserted sentence instead of the first character only
+- PASS: deletion mark survives reload and popover shows the full deleted text
+- PASS: select-and-replace survives reload with intact delete and insert marks
+- PASS: `Accept & Next` after reload accepts deletion cleanly and advances to the intact insertion
+- PASS: rail badges show one pending change per real mark, not split fragments
+
+Meaning:
+- fix25 resolves the core reload-time mark fragmentation bug for the exercised single-mark and replacement lanes
+- the active QA loop has moved on to novel scenarios and recurring cron-based retests
 
 ## Fix11c full retest
 

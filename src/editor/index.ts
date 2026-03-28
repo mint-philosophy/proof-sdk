@@ -5937,6 +5937,43 @@ class ProofEditorImpl implements ProofEditor {
     });
   }
 
+  private shouldSuppressActiveNativeTextInputMetadataStrip(beforeState: any, transaction: any): boolean {
+    const trace = this.getActiveNativeTextInputRuntimeTrace();
+    if (!trace) return false;
+    if (!transaction?.docChanged) return false;
+
+    const marksMeta = transaction?.getMeta?.(marksPluginKey);
+    const marksMetaType = (marksMeta && typeof marksMeta === 'object' && !Array.isArray(marksMeta))
+      ? (marksMeta as { type?: unknown }).type
+      : undefined;
+    if (marksMetaType !== 'SET_METADATA') return false;
+
+    const stepTypes = summarizeTransactionStepTypes(transaction);
+    if (stepTypes.length === 0 || stepTypes.some((stepType) => stepType !== 'removeMark')) return false;
+
+    const exactBeforeText = beforeState.doc.textBetween(trace.from, trace.to, '\n', '\n');
+    const exactAfterText = transaction.doc.textBetween(trace.from, trace.to, '\n', '\n');
+    if (exactBeforeText !== trace.text || exactAfterText !== trace.text) return false;
+
+    const beforeRange = summarizeRuntimeRangeSnapshot(beforeState.doc, trace.from, trace.to);
+    const afterRange = summarizeRuntimeRangeSnapshot(transaction.doc, trace.from, trace.to);
+    const beforeHasSuggestion = beforeRange.marks.some((mark) => mark.startsWith('proofSuggestion'));
+    const afterHasSuggestion = afterRange.marks.some((mark) => mark.startsWith('proofSuggestion'));
+    if (!beforeHasSuggestion || afterHasSuggestion) return false;
+
+    console.log('[tc.dispatch.suppressNativeTextInputMetadataStrip]', {
+      traceId: trace.id,
+      from: trace.from,
+      to: trace.to,
+      text: trace.text,
+      stepTypes,
+      beforeRange,
+      afterRange,
+      duringUpdateState: this.runtimeUpdateStateDepth > 0,
+    });
+    return true;
+  }
+
   private isYjsChangeOriginTransaction(transaction: any): boolean {
     return isRemoteYjsChangeOriginTransaction(transaction);
   }
@@ -6258,6 +6295,11 @@ class ProofEditorImpl implements ProofEditor {
             remote: isRemoteContentChange,
             yjsOrigin,
           });
+          return;
+        }
+
+        if (this.shouldSuppressActiveNativeTextInputMetadataStrip(beforeState, tr)) {
+          this.pendingDomSuggestionSelection = null;
           return;
         }
 

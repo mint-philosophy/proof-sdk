@@ -384,6 +384,8 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes("(view as any).updateState = (nextState: any) => {")
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.view.dispatch.apply]', {")
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.view.updateState]', {")
+      && setupSuggestionsInterceptorBlock.includes('this.shouldSuppressActiveNativeTextInputMetadataStrip(beforeState, tr)')
+      && editorSource.includes("console.log('[tc.dispatch.suppressNativeTextInputMetadataStrip]', {")
       && setupSuggestionsInterceptorBlock.includes('dispatchWithoutRevision(tr, \'remoteContentPassthrough\');')
       && setupSuggestionsInterceptorBlock.includes('this.repairRemoteSuggestionBoundaryInheritance(')
       && setupSuggestionsInterceptorBlock.includes("(transaction) => dispatchWithRevision(transaction, 'repairRemoteSuggestionBoundaryInheritance')")

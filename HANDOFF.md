@@ -1,9 +1,11 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: pending next deploy from local `fix50`
+- Live client bundle on `proof-test.mintresearch.org`: `b973f5d2373b4371829134d05c92de581ab47c77afd44b0bdfd998d990cabf24`
+- Local `/health` now reports build SHA `a54a0ba87c141558ff1c98b2589673df615f5efc`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
+  - `a54a0ba` `fix62: materialize collapsed inserts onto live text`
   - `fix53` pending commit: route recent raw Yjs plain-text self-echoes through remote repair
   - `fix52` pending commit: preserve exact metadata anchors for materialized pending inserts
   - `fix51` pending commit: move native typed-insert wrapping into appendTransaction on the matched passthrough cycle
@@ -16,6 +18,34 @@
   - `273b3b6` `fix44: use prosemirror default text input transactions`
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix62 materialize collapsed inserts onto live text
+
+Shared reports:
+- `fix61` removed the stale settled-repair loop and preserved the initial typed insert
+- the remaining duplication was now whole-sentence and architectural:
+  - one green `mark-insert` widget copy
+  - one plain underlying text copy
+- QA confirmed the insert was rendering as a `ProseMirror-widget` preview after a later edit elsewhere, which meant the insert had fallen back to a collapsed metadata anchor instead of a live inline range
+
+What changed:
+- `src/editor/plugins/marks.ts`
+  - `resolveStoredMarkRange(...)` now special-cases pending collapsed insert metadata
+  - before accepting a zero-width insert anchor as final, it tries to materialize adjacent plain text that matches the stored insert content
+  - if the inserted text is already present in the document, the resolver now returns that live text span instead of the collapsed insertion point
+- `src/tests/marks.test.ts`
+  - added a regression proving that collapsed insert metadata over already-materialized plain text resolves to the live text span and renders as a single inline insert decoration rather than a preview widget duplicate
+
+Why this is the right next step:
+- the fix59 diagnostics already proved the insert mark itself was surviving the transaction path
+- by `fix61`, per-character duplication and settled-repair recursion were gone
+- the remaining duplicate was renderer-level: collapsed insert metadata was still treated as anchor-only even when the inserted text had already materialized in the document
+- resolving that stored mark range onto the live text span gives simple mode one inline insert to render instead of `widget + bare text`
+
+Verified locally:
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/marks.test.ts` still has 4 pre-existing unrelated failures, and the new `applyRemoteMarks materializes collapsed insert metadata...` regression passes
+- `npm run build`
 
 ## Fix53 route recent raw Yjs plain-text self-echoes through remote repair
 

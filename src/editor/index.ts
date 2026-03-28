@@ -66,6 +66,7 @@ import {
   transactionCarriesInsertedSuggestionMarks,
   wrapTransactionForSuggestions,
   shouldSuppressHandledTextInputEcho,
+  shouldPassthroughPendingNativeTextInputTransaction,
   isSuggestionsModuleEnabled,
   setSuggestionsDesiredEnabled,
   resetSuggestionsModuleState,
@@ -6019,6 +6020,17 @@ class ProofEditorImpl implements ProofEditor {
           // Don't intercept undo/redo transactions (from history plugin)
           if (tr.getMeta('history$') !== undefined) {
             clearPendingDomSuggestionSelection();
+            dispatchWithRevision(tr);
+            return;
+          }
+
+          if (shouldPassthroughPendingNativeTextInputTransaction(beforeState, tr)) {
+            clearPendingDomSuggestionSelection();
+            console.log('[tc.dispatch.passthroughNativeTextInput]', {
+              suggestionsEnabled,
+              docChanged: true,
+              selFrom: tr.selection?.from,
+            });
             dispatchWithRevision(tr);
             return;
           }

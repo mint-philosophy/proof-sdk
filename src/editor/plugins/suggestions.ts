@@ -63,6 +63,7 @@ const COALESCE_WINDOW_MS = 5000;
 const DEBUG_VERBOSE_INSERT_REPAIR = false;
 const HANDLED_TEXT_INPUT_ECHO_TTL_MS = 250;
 const DUPLICATE_HANDLED_TEXT_INPUT_CALL_TTL_MS = 75;
+const PENDING_NATIVE_TEXT_INPUT_TTL_MS = 250;
 const HANDLED_TEXT_INPUT_META = 'proof-handled-text-input';
 
 type InsertCoalesceState = { id: string; from: number; to: number; by: string; updatedAt: number };
@@ -82,12 +83,19 @@ type RecentHandledTextInputCall = {
   to: number;
   at: number;
 };
+type PendingNativeTextInput = {
+  text: string;
+  from: number;
+  to: number;
+  at: number;
+};
 
 const lastInsertByActor = new Map<string, InsertCoalesceState>();
 const pendingModifiedDeleteIntents = new WeakMap<EditorView, PendingTrackedDeleteIntent>();
 const PENDING_DELETE_INTENT_TTL_MS = 1500;
 let pendingHandledTextInputEcho: PendingHandledTextInputEcho | null = null;
 let recentHandledTextInputCall: RecentHandledTextInputCall | null = null;
+let pendingNativeTextInput: PendingNativeTextInput | null = null;
 
 function logVerboseInsertRepair(...args: unknown[]): void {
   if (!DEBUG_VERBOSE_INSERT_REPAIR) return;
@@ -122,6 +130,7 @@ export function resetSuggestionsInsertCoalescing(): void {
   lastInsertByActor.clear();
   pendingHandledTextInputEcho = null;
   recentHandledTextInputCall = null;
+  pendingNativeTextInput = null;
 }
 
 /** Reset all module-level TC state for fresh document loads.
@@ -132,6 +141,7 @@ export function resetSuggestionsModuleState(): void {
   lastInsertByActor.clear();
   pendingHandledTextInputEcho = null;
   recentHandledTextInputCall = null;
+  pendingNativeTextInput = null;
 }
 
 export function hasRecentSuggestionsInsertCoalescingState(): boolean {
@@ -1483,6 +1493,54 @@ function rememberHandledTextInputCall(text: string, from: number, to: number): v
   };
 }
 
+function rememberPendingNativeTextInput(text: string, from: number, to: number): void {
+  pendingNativeTextInput = {
+    text,
+    from,
+    to,
+    at: Date.now(),
+  };
+}
+
+export function shouldPassthroughPendingNativeTextInputTransaction(
+  oldState: EditorState,
+  tr: Transaction,
+): boolean {
+  if (!pendingNativeTextInput) return false;
+  const age = Date.now() - pendingNativeTextInput.at;
+  if (age > PENDING_NATIVE_TEXT_INPUT_TTL_MS) {
+    pendingNativeTextInput = null;
+    return false;
+  }
+
+  const diff = detectPlainTextInsertionBetweenDocs(oldState.doc, tr.doc);
+  if (!diff) return false;
+
+  const matches = (
+    diff.insertedText === pendingNativeTextInput.text
+    && diff.from === pendingNativeTextInput.from
+    && diff.to === pendingNativeTextInput.from + pendingNativeTextInput.text.length
+  );
+
+  console.log('[suggestions.handleTextInput.nativePassthroughCheck]', {
+    pending: pendingNativeTextInput,
+    diff,
+    matches,
+    stepTypes: tr.steps.map((step) => {
+      const stepJson = step.toJSON() as { stepType?: string };
+      return stepJson.stepType ?? step.constructor.name;
+    }),
+  });
+
+  if (matches) {
+    pendingNativeTextInput = null;
+    return true;
+  }
+
+  pendingNativeTextInput = null;
+  return false;
+}
+
 export function shouldSuppressHandledTextInputEcho(
   oldState: EditorState,
   tr: Transaction,
@@ -1564,6 +1622,7 @@ export function __debugRememberHandledTextInputDispatch(text: string, from: numb
 export function __debugResetHandledTextInputEcho(): void {
   pendingHandledTextInputEcho = null;
   recentHandledTextInputCall = null;
+  pendingNativeTextInput = null;
 }
 
 export function __debugShouldSuppressHandledTextInputEcho(oldState: EditorState, tr: Transaction): boolean {
@@ -1576,6 +1635,17 @@ export function __debugRememberHandledTextInputCall(text: string, from: number, 
 
 export function __debugShouldSuppressDuplicateHandledTextInputCall(text: string, from: number, to: number): boolean {
   return shouldSuppressDuplicateHandledTextInputCall(text, from, to);
+}
+
+export function __debugRememberPendingNativeTextInput(text: string, from: number, to: number): void {
+  rememberPendingNativeTextInput(text, from, to);
+}
+
+export function __debugShouldPassthroughPendingNativeTextInputTransaction(
+  oldState: EditorState,
+  tr: Transaction,
+): boolean {
+  return shouldPassthroughPendingNativeTextInputTransaction(oldState, tr);
 }
 
 function buildPlainInsertionSuggestionFallbackTransaction(
@@ -3060,6 +3130,7 @@ export const suggestionsPlugin = $prose(() => {
         });
         if (!enabled) return false;
         if (!text) return false;
+        rememberPendingNativeTextInput(text, from, to);
         // Do not dispatch tracked inserts from handleTextInput.
         // In the live browser/runtime, this hook fires after the native
         // contenteditable insertion is already in motion, so dispatching here

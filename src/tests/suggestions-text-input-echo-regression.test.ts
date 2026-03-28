@@ -6,7 +6,9 @@ import {
   __debugBuildPlainInsertionSuggestionFallbackTransaction,
   __debugRememberHandledTextInputDispatch,
   __debugRememberHandledTextInputCall,
+  __debugRememberPendingNativeTextInput,
   __debugResetHandledTextInputEcho,
+  __debugShouldPassthroughPendingNativeTextInputTransaction,
   __debugShouldSuppressDuplicateHandledTextInputCall,
   __debugShouldSuppressHandledTextInputEcho,
   wrapTransactionForSuggestions,
@@ -192,6 +194,19 @@ function run(): void {
     fallbackSuggestionCount,
     1,
     'Expected the plain-insert fallback to add exactly one suggestion-marked text span for the typed character',
+  );
+
+  __debugResetHandledTextInputEcho();
+  __debugRememberPendingNativeTextInput('a', 18, 18);
+  const nativeInsertTr = plainInsertBaseState.tr.insertText('a', 18, 18);
+  assert(
+    __debugShouldPassthroughPendingNativeTextInputTransaction(plainInsertBaseState, nativeInsertTr),
+    'Expected the pending native typed insertion transaction to bypass immediate TC wrapping in the dispatch interceptor',
+  );
+  assertEqual(
+    __debugShouldPassthroughPendingNativeTextInputTransaction(plainInsertBaseState, nativeInsertTr),
+    false,
+    'Expected native typed-insert passthrough to be one-shot once consumed',
   );
 
   console.log('suggestions-text-input-echo-regression.test.ts passed');

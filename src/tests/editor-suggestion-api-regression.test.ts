@@ -322,6 +322,13 @@ function run(): void {
   );
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');
+  assert(
+    editorSource.includes('shouldPassthroughPendingNativeTextInputTransaction,')
+      && setupSuggestionsInterceptorBlock.includes('if (shouldPassthroughPendingNativeTextInputTransaction(beforeState, tr)) {')
+      && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.passthroughNativeTextInput]', {")
+      && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
+    'Expected the suggestions interceptor to let the one native typed-insert transaction pass through unwrapped so appendTransaction can mark the already-inserted text instead of synthesizing a second character',
+  );
   const preserveInsertCoalescingBlock = sliceBetween(
     editorSource,
     '  private shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(',

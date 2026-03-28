@@ -4,10 +4,52 @@
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
+  - `FIX46_PENDING` local only until pushed from this checkout
   - `b32f272` `fix45: defer tracked typing to native prosemirror flow`
   - `273b3b6` `fix44: use prosemirror default text input transactions`
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix46 passthrough the native typed-insert transaction before wrapping
+
+Shared reports:
+- browser QA on fix45 still showed `YY` for a single typed character
+- the key new evidence was:
+  - `handleTextInput` no longer dispatched anything
+  - the only remaining TC log was `appendTransactionPersistenceFallback`
+  - DOM inspection showed one plain native character plus one marked character
+- that means the native insert was correct, but the interceptor was still wrapping a transaction too early and synthesizing an extra marked character before the plain-insert fallback could do its job
+
+Requested:
+- keep `handleTextInput` as metadata only
+- allow the exact native typed-insert transaction to pass through the interceptor unwrapped
+- let appendTransaction / plain-insert fallback add marks to the already-inserted native text
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - added a short-lived pending native text-input record from `handleTextInput`
+  - added `shouldPassthroughPendingNativeTextInputTransaction(oldState, tr)` to match the next plain inserted text transaction by text and range
+  - reset paths now clear that pending record
+- `src/editor/index.ts`
+  - the suggestions interceptor now checks `shouldPassthroughPendingNativeTextInputTransaction(beforeState, tr)` before `wrapTransactionForSuggestions(...)`
+  - when it matches, it logs `[tc.dispatch.passthroughNativeTextInput]` and dispatches the original native transaction unchanged
+- `src/tests/suggestions-text-input-echo-regression.test.ts`
+  - added a one-shot regression proving the matched native plain-insert transaction is passed through
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - updated the source guard to require the new interceptor passthrough branch
+
+Why this is the right next step:
+- fix45 removed direct dispatch from `handleTextInput`, but the interceptor still treated the first native typing transaction like an arbitrary edit and wrapped it immediately
+- the existing plain-insert fallback already knows how to mark already-inserted text
+- the missing piece was letting that one native transaction reach appendTransaction first instead of synthesizing a second marked insertion on top of it
+
+Verified locally:
+- `npx tsx src/tests/suggestions-text-input-echo-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-disabled-direct-edit.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npm run build`
 
 ## Fix45 stop dispatching tracked inserts from handleTextInput
 

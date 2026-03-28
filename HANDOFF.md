@@ -1,9 +1,10 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `2a4eb6591de8a4ce06751443ad89f1816373e8bdca45cba53229951f9f2d2836`
+- Live client bundle on `proof-test.mintresearch.org`: `5a99c454e44fcc6dcfdcf8baf5bf0833075754008b4dab53d56b705aeb57932f`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
+  - `273b3b6` `fix44: use prosemirror default text input transactions`
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
 

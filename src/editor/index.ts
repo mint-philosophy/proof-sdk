@@ -5887,12 +5887,20 @@ class ProofEditorImpl implements ProofEditor {
         const beforeSelectionFrom = beforeState.selection.from;
         const beforeSelectionEmpty = beforeState.selection.empty;
         const yjsOrigin = getYjsTransactionOriginInfo(tr);
+        const marksMeta = tr?.getMeta?.(marksPluginKey);
+        const marksMetaType = (marksMeta && typeof marksMeta === 'object' && !Array.isArray(marksMeta))
+          ? (marksMeta as { type?: unknown }).type
+          : undefined;
+        const hasReplaceStep = Boolean(tr?.steps?.some((step: any) => {
+          const stepType = (step?.toJSON?.() as { stepType?: string } | undefined)?.stepType;
+          return stepType === 'replace' || stepType === 'replaceAround';
+        }));
         const carriesIncomingSuggestionMarks = Boolean(tr?.docChanged) && transactionCarriesInsertedSuggestionMarks(tr);
         const isRemoteContentChange = Boolean(tr?.docChanged) && (
           isExplicitYjsChangeOriginTransaction(tr)
           || (yjsOrigin.isYjsOrigin && carriesIncomingSuggestionMarks)
         );
-        const isMarksOnlyChange = tr?.getMeta?.(marksPluginKey) !== undefined;
+        const isMarksOnlyChange = marksMeta !== undefined && !hasReplaceStep;
         const isDocumentLoad = tr?.getMeta?.('document-load') !== undefined;
         const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (
           this.suppressTrackChangesSystemTransactionsDepth > 0
@@ -5949,7 +5957,7 @@ class ProofEditorImpl implements ProofEditor {
 
           // Don't intercept marks operations (accept/reject suggestions)
           // These are internal operations that should not be converted to suggestions
-          if (tr.getMeta(marksPluginKey) !== undefined) {
+          if (marksMeta !== undefined && (marksMetaType !== 'INTERNAL' || !hasReplaceStep)) {
             clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr);
             return;

@@ -434,6 +434,21 @@ function collectSliceText(nodes?: SliceNode[]): { text: string; hasNonText: bool
   return { text, hasNonText };
 }
 
+function sliceNodeIsWrappedPlainText(node: SliceNode | undefined): boolean {
+  if (!node) return false;
+  if (node.type === 'text') return true;
+  if (typeof node.text === 'string') return true;
+  if (node.type === 'paragraph') {
+    return Array.isArray(node.content) && node.content.length > 0 && node.content.every((child) => sliceNodeIsWrappedPlainText(child));
+  }
+  return false;
+}
+
+function sliceRepresentsWrappedPlainText(nodes?: SliceNode[]): boolean {
+  if (!nodes || nodes.length !== 1) return false;
+  return sliceNodeIsWrappedPlainText(nodes[0]);
+}
+
 function sliceContainsSuggestionMarks(nodes?: SliceNode[]): boolean {
   if (!nodes) return false;
 
@@ -1637,7 +1652,7 @@ export function wrapTransactionForSuggestions(
     const stepJson = step.toJSON() as { stepType?: string; slice?: { content?: SliceNode[] } };
     if (stepJson.stepType === 'replace' && stepJson.slice?.content) {
       const { hasNonText } = collectSliceText(stepJson.slice.content);
-      if (hasNonText) {
+      if (hasNonText && !sliceRepresentsWrappedPlainText(stepJson.slice.content)) {
         console.log('[suggestions.wrapForSuggestions.structuralPassthrough]', {
           stepType: stepJson.stepType,
           sliceContentTypes: stepJson.slice.content.map((n: SliceNode) => n.type),
@@ -2485,6 +2500,7 @@ export const suggestionsPlugin = $prose(() => {
       // reads return stale data in the dispatch interceptor
       const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled;
       if (effectivelyDisabled) {
+        const hasHistoryChange = trs.some((tr) => tr.getMeta('history$') !== undefined);
         // When TC is off, strip any suggestion marks that leaked onto new content.
         // We check ALL doc-changing transactions, including those marked as
         // 'suggestions-wrapped' — if TC is off, wrapped marks are leaks too.
@@ -2502,6 +2518,20 @@ export const suggestionsPlugin = $prose(() => {
                   return !hasLeakedMark;
                 });
                 if (hasLeakedMark) {
+                  if (hasHistoryChange) {
+                    console.log('[suggestions.appendTransaction.historyRestoreEnable]', {
+                      diff,
+                      diffEndB: diffEnd.b,
+                      isEnabled,
+                      suggestionsModuleEnabled,
+                    });
+                    suggestionsModuleEnabled = true;
+                    const tr = newState.tr
+                      .setMeta(suggestionsPluginKey, { enabled: true })
+                      .setMeta('addToHistory', false);
+                    tr.setMeta('suggestions-wrapped', true);
+                    return tr;
+                  }
                   console.log('[suggestions.appendTransaction.tcOffStrip]', {
                     diff,
                     diffEndB: diffEnd.b,

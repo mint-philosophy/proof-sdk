@@ -254,6 +254,11 @@ function run(): void {
       && suggestionsAppendTransactionBlock.includes("const hasWrappedSuggestionTransaction = trs.some((tr) => tr.getMeta('suggestions-wrapped'));")
       && suggestionsAppendTransactionBlock.includes("if (metaType === 'INTERNAL') return false;")
       && suggestionsAppendTransactionBlock.includes("if (metaType === 'SET_METADATA' && tr.getMeta('suggestions-wrapped')) return false;")
+      && suggestionsAppendTransactionBlock.includes("const hasHistoryChange = trs.some((tr) => tr.getMeta('history$') !== undefined);")
+      && suggestionsAppendTransactionBlock.includes("console.log('[suggestions.appendTransaction.historyRestoreEnable]', {")
+      && suggestionsAppendTransactionBlock.includes('suggestionsModuleEnabled = true;')
+      && suggestionsAppendTransactionBlock.includes(".setMeta(suggestionsPluginKey, { enabled: true })")
+      && suggestionsAppendTransactionBlock.includes(".setMeta('addToHistory', false);")
       && suggestionsAppendTransactionBlock.includes('const hasRemoteSuggestionInsert = trs.some((tr) =>')
       && suggestionsAppendTransactionBlock.includes('transactionCarriesInsertedSuggestionMarks(tr)')
       && suggestionsAppendTransactionBlock.includes('const splitMergeTr = buildAdjacentSplitInsertMergeTransaction(oldState, newState);')
@@ -273,15 +278,20 @@ function run(): void {
     setupSuggestionsInterceptorBlock.includes('const isSystemTrackChangesSuppressed = Boolean(tr?.docChanged) && (')
       && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesSystemTransactionsDepth > 0')
       && setupSuggestionsInterceptorBlock.includes('this.suppressTrackChangesDuringCollabReconnect')
+      && setupSuggestionsInterceptorBlock.includes('const marksMeta = tr?.getMeta?.(marksPluginKey);')
+      && setupSuggestionsInterceptorBlock.includes('const marksMetaType = (marksMeta && typeof marksMeta === \'object\' && !Array.isArray(marksMeta))')
+      && setupSuggestionsInterceptorBlock.includes('const hasReplaceStep = Boolean(tr?.steps?.some((step: any) => {')
       && setupSuggestionsInterceptorBlock.includes('const carriesIncomingSuggestionMarks = Boolean(tr?.docChanged) && transactionCarriesInsertedSuggestionMarks(tr);')
       && setupSuggestionsInterceptorBlock.includes("const isRemoteContentChange = Boolean(tr?.docChanged) && (")
       && setupSuggestionsInterceptorBlock.includes('|| (yjsOrigin.isYjsOrigin && carriesIncomingSuggestionMarks)')
       && setupSuggestionsInterceptorBlock.includes('const suggestionsEnabled = isSuggestionsEnabledPlugin(view.state);')
       && !setupSuggestionsInterceptorBlock.includes('const suggestionsEnabled = pluginEnabled && isSuggestionsModuleEnabled();')
+      && setupSuggestionsInterceptorBlock.includes('const isMarksOnlyChange = marksMeta !== undefined && !hasReplaceStep;')
       && setupSuggestionsInterceptorBlock.includes('if (isRemoteContentChange) {')
       && setupSuggestionsInterceptorBlock.includes('const preserveInsertCoalescing = this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(')
       && setupSuggestionsInterceptorBlock.includes('if (!preserveInsertCoalescing) {')
       && setupSuggestionsInterceptorBlock.includes('resetSuggestionsInsertCoalescing();')
+      && setupSuggestionsInterceptorBlock.includes("if (marksMeta !== undefined && (marksMetaType !== 'INTERNAL' || !hasReplaceStep)) {")
       && setupSuggestionsInterceptorBlock.includes('if (!carriesIncomingSuggestionMarks) {')
       && setupSuggestionsInterceptorBlock.includes('this.repairRemoteSuggestionBoundaryInheritance(view, beforeState, dispatchWithRevision);')
       && setupSuggestionsInterceptorBlock.includes("const isHistoryChange = tr?.getMeta?.('history$') !== undefined;")
@@ -289,6 +299,11 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes('dispatchWithRevision(tr);'),
     'Expected the suggestions interceptor to pass through collab/template system transactions, while deriving TC enabled state from the canonical plugin/module helper so tracked typing cannot diverge from tracked deletes',
+  );
+  assert(
+    suggestionsSource.includes('function sliceRepresentsWrappedPlainText(nodes?: SliceNode[]): boolean {')
+      && suggestionsSource.includes("if (hasNonText && !sliceRepresentsWrappedPlainText(stepJson.slice.content)) {"),
+    'Expected wrapped plain-text paste slices to stay on the tracked insertion path instead of being misclassified as structural passthroughs',
   );
   assert(
     preserveInsertCoalescingBlock.includes('if (!this.collabEnabled) return false;')

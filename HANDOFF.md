@@ -1,6 +1,6 @@
 ## Current state
 
-- Live browser-verified client bundle on `proof-test.mintresearch.org`: `9d2bf1764dfc313e8a5515a09ffd87f804e5bcd3f9550e60bab73cde09472b60`
+- Live browser-verified client bundle on `proof-test.mintresearch.org`: `b7e29754845c6c9dc477c96281a55d146c30f2295b95581e8b1677e94f4ceace`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
@@ -44,6 +44,44 @@ Verified locally:
 Scope note:
 - this fix is aimed at the collab hydration / late mark reapply race
 - the broader paragraph-structure TC gaps from the v4 report (Enter / empty-paragraph Backspace / formatting tracking) still need separate work
+
+## Fix28 paste and undo follow-up
+
+Shared reports:
+- `/tmp/codex-qa-stress-test-v4.md`
+
+Requested:
+- address two new QA-confirmed lanes:
+  - plain-text paste in TC mode creates no insertion suggestion
+  - `Cmd+Z` after share-mode `Accept All` restores text without restoring the tracked deletion state
+
+What changed:
+- `src/editor/index.ts`
+  - the suggestions interceptor now distinguishes mark-only internal transactions from authored-tracker paste transactions
+  - `marksPluginKey: { type: 'INTERNAL' }` no longer auto-bypasses TC wrapping when the transaction also carries a real replace step
+- `src/editor/plugins/suggestions.ts`
+  - paragraph-wrapped plain-text slices are no longer misclassified as structural passthroughs, so ordinary paste can flow through the tracked-insert path
+  - when TC is currently off and a history undo restores suggestion-marked content, appendTransaction now re-enables suggestions instead of stripping the restored marks as "leaks"
+- `src/tests/track-changes-paste-regression.test.ts`
+  - added a regression proving that a paragraph-shaped plain-text paste becomes one insert suggestion
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - extended source guards for the new internal-paste interceptor path and the history-restore re-enable logic
+
+Why this likely addresses the new report:
+- authored-tracker paste was dispatching an INTERNAL marks transaction that the interceptor skipped wholesale, so the paste never reached `wrapTransactionForSuggestions()`
+- share-mode `Accept All` leaves TC off because there are no pending suggestions; undo was then restoring suggestion-marked content through the history plugin while the TC-off cleanup branch treated those restored marks as accidental leakage and removed them
+
+Verified locally:
+- `npx tsx src/tests/track-changes-paste-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/track-changes-yjs-origin-regression.test.ts`
+- `npx tsx src/tests/authored-tracker-suggestions-mode.test.ts`
+- `npx tsx src/tests/share-collab-hydration.test.ts`
+- `npm run build`
+
+Scope note:
+- this fix targets plain-text paste and undo-after-accept-all
+- cold-reload mark persistence and paragraph-structure TC remain separate lanes
 
 ## Fix26 stress-report follow-up
 

@@ -1,11 +1,49 @@
 ## Current state
 
-- Live browser-verified client bundle on `proof-test.mintresearch.org`: `82dc313a0f78813ec403ed03315af6ecb0f2ff5d933d0bbb18429c37281282e5`
+- Live browser-verified client bundle on `proof-test.mintresearch.org`: `9d2bf1764dfc313e8a5515a09ffd87f804e5bcd3f9550e60bab73cde09472b60`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Last commits in this session:
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix27 hydration follow-up
+
+Shared reports:
+- `/tmp/codex-qa-stress-test-v4.md`
+
+Requested:
+- address the reload-time browser failures where shared docs could come back with zero visible suggestion marks, plain-text edits while TC looked enabled, and delayed or skipped mark rehydration after the collab doc reconnected
+
+What changed:
+- `src/editor/index.ts`
+  - stopped treating an empty Yjs fragment as "hydrated" when the shared Y.Text cache still contains content
+  - kept non-empty incoming `collab.onMarks` payloads in `pendingHydrationMarks` when the editor is still empty, so early marks snapshots are not dropped on the floor
+  - added a late-arrival fallback on editor doc updates so pending hydration marks are re-applied as soon as the ProseMirror doc actually fills in
+- `src/editor/share-collab-hydration.ts`
+  - extracted the share-collab hydration gate into a pure helper
+- `src/tests/share-collab-hydration.test.ts`
+  - added a regression for the key race:
+    - empty editor + empty fragment + non-empty Y.Text must stay "not hydrated"
+    - truly empty docs can still hydrate immediately
+
+Why this likely addresses the stress cluster:
+- the previous gate could mark collab hydration complete while the editor was still empty
+- once that happened, `rehydrateServerMarksAfterCollabHydration()` returned early and never re-ran, so:
+  - pending suggestion marks were not re-applied
+  - track changes was not re-enabled from pending server suggestions
+  - reloads could look like raw text-only docs until some later marks event happened to arrive in a good order
+
+Verified locally:
+- `npx tsx src/tests/share-collab-hydration.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npx tsx src/tests/share-open-context-canonical-fallback.test.ts`
+- `npx tsx src/tests/share-marks-refresh.test.ts`
+- `npm run build`
+
+Scope note:
+- this fix is aimed at the collab hydration / late mark reapply race
+- the broader paragraph-structure TC gaps from the v4 report (Enter / empty-paragraph Backspace / formatting tracking) still need separate work
 
 ## Fix26 stress-report follow-up
 

@@ -99,6 +99,10 @@ import { arrowCommentPlugin } from './plugins/arrow-comment';
 import { markdownLinkClickPlugin } from './plugins/markdown-link-click';
 import { mermaidDiagramsPlugin } from './plugins/mermaid-diagrams';
 import { taskCheckboxesPlugin } from './plugins/task-checkboxes';
+import {
+  normalizeShareCollabHydrationText,
+  shouldTreatShareCollabAsHydrated,
+} from './share-collab-hydration';
 import type { Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { TextSelection } from '@milkdown/kit/prose/state';
@@ -1390,6 +1394,18 @@ class ProofEditorImpl implements ProofEditor {
         ctx.get(listenerCtx).updated((_ctx, doc, prevDoc) => {
           if (prevDoc && doc.eq(prevDoc)) return;
           this.scheduleContentSync();
+          if (
+            this.isShareMode
+            && this.collabEnabled
+            && this.pendingHydrationMarks
+            && !this.isEditorDocStructurallyEmpty()
+          ) {
+            queueMicrotask(() => {
+              if (!this.pendingHydrationMarks) return;
+              if (this.isEditorDocStructurallyEmpty()) return;
+              this.rehydrateServerMarksAfterCollabHydration();
+            });
+          }
         });
 
         // Initialize heatmap context
@@ -1670,6 +1686,8 @@ class ProofEditorImpl implements ProofEditor {
           this.initialMarksSynced = true;
           if (!this.isEditorDocStructurallyEmpty()) {
             this.applyLatestCollabMarksToEditor();
+          } else if (Object.keys(mergedIncomingMarks).length > 0) {
+            this.pendingHydrationMarks = { ...mergedIncomingMarks };
           }
         });
         collabClient.onPresence((count) => {
@@ -2135,16 +2153,12 @@ class ProofEditorImpl implements ProofEditor {
     return false;
   }
 
-  private normalizeCollabHydrationText(text: string): string {
-    return text.replace(/\s+/g, ' ').trim();
-  }
-
   private getEditorHydrationText(): string | null {
     if (!this.editor) return null;
     let text: string | null = null;
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      text = this.normalizeCollabHydrationText(
+      text = normalizeShareCollabHydrationText(
         view.state.doc.textBetween(0, view.state.doc.content.size, '\n', '\n'),
       );
     });
@@ -2161,7 +2175,7 @@ class ProofEditorImpl implements ProofEditor {
           fragment as any,
           view.state.schema as any,
         ) as ProseMirrorNode;
-        text = this.normalizeCollabHydrationText(
+        text = normalizeShareCollabHydrationText(
           root.textBetween(0, root.content.size, '\n', '\n'),
         );
       } catch {
@@ -2181,14 +2195,24 @@ class ProofEditorImpl implements ProofEditor {
     } catch {
       return true;
     }
-    if (this.isYjsFragmentStructurallyEmpty(fragment)) return true;
+    const fragmentIsStructurallyEmpty = this.isYjsFragmentStructurallyEmpty(fragment);
     const fragmentText = this.getYjsFragmentHydrationText(fragment);
-    if (fragmentText === null) {
-      return !this.isEditorDocStructurallyEmpty();
-    }
     const editorText = this.getEditorHydrationText();
-    if (editorText === null) return false;
-    return editorText === fragmentText;
+    let yTextMarkdown: string | null = null;
+    try {
+      yTextMarkdown = normalizeShareCollabHydrationText(
+        String(ydoc.getText('markdown')?.toString?.() ?? ''),
+      );
+    } catch {
+      yTextMarkdown = null;
+    }
+    return shouldTreatShareCollabAsHydrated({
+      fragmentIsStructurallyEmpty,
+      editorIsStructurallyEmpty: this.isEditorDocStructurallyEmpty(),
+      fragmentText,
+      editorText,
+      yTextMarkdown,
+    });
   }
 
   private kickCollabHydration(): void {

@@ -17,10 +17,15 @@
   - `appendTransaction(...)` was referencing `hasHistoryChange` outside the scope where it was declared
   - the result was `ReferenceError: hasHistoryChange is not defined` on every TC keystroke
   - the fix simply hoists that declaration to the top of `appendTransaction(...)` so both the TC-off history lane and the later history metadata reconciliation lane can use it safely
+- `fix67` is the next browser candidate for the remaining review blocker on insertions:
+  - browser QA on `fix66` showed `Accept & Next` worked for deletions and `Reject & Next` worked for insertions, but `Accept & Next` on insertions could advance the popover while leaving the insert pending
+  - the new guard in `markAcceptPersisted(...)` verifies that the resolved insert ids are actually gone from the local pending-suggestion set after the persisted mutation
+  - if they are still present, the editor now force-applies the canonical share mutation result instead of silently treating that lane as success
 - Remaining known follow-ups after fix64:
   - warm reload can still revert some overwrite-created inserts from inline to widget
   - formatting changes still bypass TC
 - Last commits in this session:
+  - `fix67` pending commit: verify persisted insert accepts are actually cleared locally
   - `fix66` pending commit: hoist `hasHistoryChange` so TC appendTransaction no longer crashes
   - `fce6f1f` `fix65: reconcile stale delete metadata after undo`
   - `9af1d9c` `docs: record fix64 rollout`

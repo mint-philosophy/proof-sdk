@@ -152,16 +152,19 @@ function run(): void {
   );
   assert(
     acceptPersistedBlock.includes("const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);")
-      && acceptPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
-      && acceptPersistedBlock.indexOf("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
-        < acceptPersistedBlock.indexOf("const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
+      && editorSource.includes('private async ensureShareReviewMutationAppliedLocally(')
+      && acceptPersistedBlock.includes('const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));')
+      && acceptPersistedBlock.includes("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
+      && acceptPersistedBlock.indexOf("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
+        < acceptPersistedBlock.indexOf("let success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
       && acceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
-      && acceptPersistedBlock.includes("const success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
-      && acceptPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(result);')
+      && acceptPersistedBlock.includes("let success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
+      && acceptPersistedBlock.includes('success = await this.applyShareMutationDocumentResult(result);')
+      && acceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds);')
       && acceptPersistedBlock.includes('if (this.hasActiveRemoteCollabPeer()) {')
       && acceptPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to remap stale UI ids to the authoritative pending mark, tombstone both local and remote ids, reconcile the mutation, and only block on collab settle when a remote peer is actually connected',
+    'Expected markAcceptPersisted to remap stale UI ids to the authoritative pending mark, tombstone both local and remote ids, verify that the accepted mark is actually gone locally, reconcile the mutation, and only block on collab settle when a remote peer is actually connected',
   );
 
   const rejectPersistedBlock = sliceBetween(

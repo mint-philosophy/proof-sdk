@@ -10351,7 +10351,8 @@ class ProofEditorImpl implements ProofEditor {
           : null,
       });
 
-      tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });
+      const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));
+      tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });
       let success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result);
       if (!success) {
         // Local resolution failed (markdown comparison mismatch). Collab was already
@@ -10384,6 +10385,9 @@ class ProofEditorImpl implements ProofEditor {
         } else {
           success = await this.applyShareMutationDocumentResult(result);
         }
+      }
+      if (success) {
+        success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds);
       }
       if (success && this.editor) {
         if (this.hasActiveRemoteCollabPeer()) {
@@ -10647,6 +10651,50 @@ class ProofEditorImpl implements ProofEditor {
 
     if (!bestCandidateId || bestScore < 180) return markId;
     return bestCandidateId;
+  }
+
+  private hasPendingShareReviewMarks(markIds: string[]): boolean {
+    if (!this.editor || markIds.length === 0) return false;
+
+    let hasPending = false;
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const pendingIds = new Set(getPendingSuggestions(getMarks(view.state)).map((mark) => mark.id));
+      hasPending = markIds.some((markId) => pendingIds.has(markId));
+    });
+
+    return hasPending;
+  }
+
+  private async ensureShareReviewMutationAppliedLocally(
+    result: {
+      markdown?: string;
+      marks?: Record<string, unknown> | null;
+      collab?: { status?: string; reason?: string };
+    },
+    resolvedMarkIds: string[],
+  ): Promise<boolean> {
+    if (resolvedMarkIds.length === 0) return true;
+    if (!this.hasPendingShareReviewMarks(resolvedMarkIds)) return true;
+
+    this.traceShareReview('mutation.local-verify-failed', {
+      resolvedMarkIds,
+      collabStatus: typeof result?.collab?.status === 'string' ? result.collab.status : null,
+      markdown: this.summarizeTraceMarkdown(typeof result?.markdown === 'string' ? result.markdown : null),
+    }, 'warn');
+
+    const applied = await this.applyShareMutationDocumentResult(result, {
+      skipReconnectTemplateSeed: true,
+      preserveEditorStateDuringReconnect: true,
+    });
+    if (!applied) return false;
+
+    const stillPending = this.hasPendingShareReviewMarks(resolvedMarkIds);
+    this.traceShareReview('mutation.local-verify-result', {
+      resolvedMarkIds,
+      stillPending,
+    }, stillPending ? 'warn' : 'info');
+    return !stillPending;
   }
 
   private buildShareBatchSuggestionSnapshot(): { markdown: string; marks: Record<string, unknown> } | null {

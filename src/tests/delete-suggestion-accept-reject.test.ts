@@ -101,6 +101,72 @@ async function run(): Promise<void> {
     const rejectedMarks = rejectedDoc?.marks ? JSON.parse(rejectedDoc.marks) as Record<string, StoredMark> : {};
     assert(!(rejectMarkId in rejectedMarks), 'Expected rejecting a normal delete suggestion to remove stored mark metadata');
 
+    const acceptAllSlug = `delete-accept-all-${Math.random().toString(36).slice(2, 10)}`;
+    const acceptAllMarks: Record<string, StoredMark> = {
+      'delete-accept-all-1': {
+        kind: 'delete',
+        by: 'human:test',
+        createdAt,
+        quote: 'obsolete',
+        status: 'pending',
+      },
+      'delete-accept-all-2': {
+        kind: 'delete',
+        by: 'human:test',
+        createdAt,
+        quote: 'extra',
+        status: 'pending',
+      },
+      'delete-accept-all-3': {
+        kind: 'delete',
+        by: 'human:test',
+        createdAt,
+        quote: 'draft',
+        status: 'pending',
+      },
+      'delete-accept-all-4': {
+        kind: 'delete',
+        by: 'human:test',
+        createdAt,
+        quote: 'today',
+        status: 'pending',
+      },
+    };
+    db.createDocument(
+      acceptAllSlug,
+      [
+        'The ',
+        '<span data-proof="suggestion" data-id="delete-accept-all-1" data-by="human:test" data-kind="delete">obsolete</span>',
+        ' important and ',
+        '<span data-proof="suggestion" data-id="delete-accept-all-2" data-by="human:test" data-kind="delete">extra</span>',
+        ' critical ',
+        '<span data-proof="suggestion" data-id="delete-accept-all-3" data-by="human:test" data-kind="delete">draft</span>',
+        ' analysis ',
+        '<span data-proof="suggestion" data-id="delete-accept-all-4" data-by="human:test" data-kind="delete">today</span>',
+        '.',
+      ].join(''),
+      canonicalizeStoredMarks(acceptAllMarks),
+      'Delete suggestion accept-all whitespace regression',
+    );
+
+    const acceptAllResult = await executeDocumentOperationAsync(acceptAllSlug, 'POST', '/marks/accept-all', {
+      by: 'human:reviewer',
+      markIds: Object.keys(acceptAllMarks),
+    });
+    assertEqual(acceptAllResult.status, 200, `Expected delete accept-all to succeed, got ${acceptAllResult.status}`);
+    const acceptAllDoc = db.getDocumentBySlug(acceptAllSlug);
+    assertEqual(
+      stripAllProofSpanTags(acceptAllDoc?.markdown ?? '').trim(),
+      'The important and critical analysis.',
+      'Expected accepting multiple delete suggestions to collapse doubled word gaps and remove the leftover space before punctuation',
+    );
+    const acceptAllStoredMarks = acceptAllDoc?.marks ? JSON.parse(acceptAllDoc.marks) as Record<string, StoredMark> : {};
+    assertEqual(
+      Object.keys(acceptAllStoredMarks).length,
+      0,
+      'Expected accepting all delete suggestions to remove their stored mark metadata',
+    );
+
     console.log('delete-suggestion-accept-reject.test.ts passed');
   } finally {
     try {

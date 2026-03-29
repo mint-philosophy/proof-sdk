@@ -50,6 +50,38 @@ function run(): void {
     'Expected materialized tracked inserts to accept in-place without duplicating their content',
   );
 
+  const interiorDeleteMarkId = 'delete-interior-gap-regression-1234567890abcdef';
+  const interiorMarkdown = `Research questions <span data-proof="suggestion" data-id="${interiorDeleteMarkId}" data-by="ai:browser-qa" data-kind="delete">about</span> methodology.`;
+  const interiorMark: StoredMark = {
+    kind: 'delete',
+    by: 'ai:browser-qa',
+    createdAt: '2026-03-29T00:00:00.000Z',
+    quote: 'about',
+    status: 'pending',
+  };
+  const acceptedInterior = __buildAcceptedSuggestionMarkdownForTests(interiorMarkdown, interiorMark);
+  assertEqual(
+    acceptedInterior,
+    'Research questions methodology.',
+    'Expected accepting a middle delete to collapse the surviving double-space gap to one space',
+  );
+
+  const punctuationDeleteMarkId = 'delete-punctuation-gap-regression-1234567890abcdef';
+  const punctuationMarkdown = `Critical analysis <span data-proof="suggestion" data-id="${punctuationDeleteMarkId}" data-by="ai:browser-qa" data-kind="delete">today</span>.`;
+  const punctuationMark: StoredMark = {
+    kind: 'delete',
+    by: 'ai:browser-qa',
+    createdAt: '2026-03-29T00:00:00.000Z',
+    quote: 'today',
+    status: 'pending',
+  };
+  const acceptedPunctuation = __buildAcceptedSuggestionMarkdownForTests(punctuationMarkdown, punctuationMark);
+  assertEqual(
+    acceptedPunctuation,
+    'Critical analysis.',
+    'Expected accepting a trailing delete to remove the leftover space before punctuation',
+  );
+
   console.log('✓ accept helper preserves materialized inserts and removes wrapped deletes correctly');
 }
 

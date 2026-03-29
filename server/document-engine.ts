@@ -1805,18 +1805,54 @@ function buildStoredSelectionMetadata(
   return { quote: normalizedFallback };
 }
 
-function collapseAcceptedDeleteWhitespaceAtOffset(markdown: string, offset: number): string {
+function findAcceptedDeleteWhitespaceRun(
+  markdown: string,
+  offset: number,
+): { start: number; end: number } | null {
   const clampedOffset = Math.max(0, Math.min(markdown.length, Math.trunc(offset)));
-  let start = clampedOffset;
-  while (start > 0 && markdown[start - 1] === ' ') start -= 1;
-  let end = clampedOffset;
-  while (end < markdown.length && markdown[end] === ' ') end += 1;
+  const candidates = [
+    clampedOffset,
+    clampedOffset - 1,
+    clampedOffset + 1,
+    clampedOffset - 2,
+    clampedOffset + 2,
+  ];
 
-  if ((end - start) < 2) return markdown;
-  if (start === 0 || end >= markdown.length) return markdown;
-  if (markdown[start - 1] === '\n' || markdown[end] === '\n') return markdown;
+  for (const candidate of candidates) {
+    if (candidate < 0 || candidate > markdown.length) continue;
 
-  return `${markdown.slice(0, start)} ${markdown.slice(end)}`;
+    let probe = candidate;
+    if (probe === markdown.length || markdown[probe] !== ' ') {
+      probe -= 1;
+    }
+    if (probe < 0 || markdown[probe] !== ' ') continue;
+
+    let start = probe;
+    while (start > 0 && markdown[start - 1] === ' ') start -= 1;
+    let end = probe + 1;
+    while (end < markdown.length && markdown[end] === ' ') end += 1;
+    return { start, end };
+  }
+
+  return null;
+}
+
+function shouldRemoveAcceptedDeleteGap(leftChar: string, rightChar: string): boolean {
+  return /[.,;:!?)]/.test(rightChar) || /[(\[]/.test(leftChar);
+}
+
+function collapseAcceptedDeleteWhitespaceAtOffset(markdown: string, offset: number): string {
+  const run = findAcceptedDeleteWhitespaceRun(markdown, offset);
+  if (!run) return markdown;
+
+  const leftChar = run.start > 0 ? markdown[run.start - 1] : '';
+  const rightChar = run.end < markdown.length ? markdown[run.end] : '';
+  if (leftChar === '\n' || rightChar === '\n') return markdown;
+
+  const replacement = shouldRemoveAcceptedDeleteGap(leftChar, rightChar) ? '' : ' ';
+  if (replacement === ' ' && (run.end - run.start) < 2) return markdown;
+
+  return `${markdown.slice(0, run.start)}${replacement}${markdown.slice(run.end)}`;
 }
 
 function collapseAcceptedDeleteWhitespace(markdown: string, cleanupOffsets: number[]): string {
@@ -3407,10 +3443,18 @@ async function acceptAllSuggestionsAsync(
   let nextMarkdown = baseMarkdown;
   let nextMarks = marks;
   const acceptedIds: string[] = [];
+  const acceptedDeleteCleanupOffsets: number[] = [];
   while (true) {
     const currentPendingIds = getPendingIds(nextMarkdown, nextMarks);
     const markId = currentPendingIds[0];
     if (!markId) break;
+    const currentMark = nextMarks[markId];
+    const currentDeleteCleanupOffsets = currentMark?.kind === 'delete'
+      ? getDeleteSuggestionCleanupOffsets(nextMarkdown, currentMark)
+      : [];
+    const currentDeleteAnchor = currentDeleteCleanupOffsets[0]
+      ?? (currentMark?.kind === 'delete' ? getPendingSuggestionSortPosition(nextMarkdown, currentMark) : -1);
+    const beforeStepMarkdown = nextMarkdown;
     const originalMark = marks[markId];
     const stabilizedOriginalMark = originalMark
       ? stabilizeCollapsedMaterializedInsertMark(baseMarkdown, originalMark)
@@ -3432,8 +3476,22 @@ async function acceptAllSuggestionsAsync(
     });
     if (!computed.ok) return computed.result;
     nextMarkdown = stripAllProofSpanTags(computed.nextMarkdown);
+    if (currentDeleteCleanupOffsets.length > 0) {
+      const lengthDelta = Math.max(0, beforeStepMarkdown.length - nextMarkdown.length);
+      for (let index = 0; index < acceptedDeleteCleanupOffsets.length; index += 1) {
+        const existingOffset = acceptedDeleteCleanupOffsets[index]!;
+        if (existingOffset > currentDeleteAnchor && lengthDelta > 0) {
+          acceptedDeleteCleanupOffsets[index] = Math.max(currentDeleteAnchor, existingOffset - lengthDelta);
+        }
+      }
+      acceptedDeleteCleanupOffsets.push(...currentDeleteCleanupOffsets);
+    }
     nextMarks = computed.nextMarks;
     acceptedIds.push(markId);
+  }
+
+  if (acceptedDeleteCleanupOffsets.length > 0) {
+    nextMarkdown = applyMutationCleanup('POST /marks/accept', nextMarkdown, acceptedDeleteCleanupOffsets);
   }
 
   const mutation = await mutateCanonicalDocument({

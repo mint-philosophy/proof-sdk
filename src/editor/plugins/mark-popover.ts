@@ -104,7 +104,6 @@ type InlineTextAccessor = {
 };
 
 type TouchSafeButtonOptions = {
-  debugLabel?: string;
   preventTouchPointerDown?: boolean;
   preventMousePointerDown?: boolean;
   preventMouseDown?: boolean;
@@ -172,7 +171,6 @@ function installTouchSafeButton(
   options: TouchSafeButtonOptions = {}
 ): void {
   const {
-    debugLabel,
     preventTouchPointerDown = true,
     preventMousePointerDown = false,
     preventMouseDown = false,
@@ -185,14 +183,6 @@ function installTouchSafeButton(
   let skipSyntheticClick = false;
 
   button.addEventListener('pointerdown', event => {
-    if (debugLabel) {
-      console.log('[mark-popover.touchSafeButton.pointerdown]', {
-        debugLabel,
-        pointerType: event.pointerType,
-        disabled: button.disabled,
-        skipSyntheticClick,
-      });
-    }
     if (
       (preventTouchPointerDown && event.pointerType === 'touch')
       || (preventMousePointerDown && event.pointerType === 'mouse')
@@ -213,13 +203,6 @@ function installTouchSafeButton(
   });
 
   button.addEventListener('mousedown', event => {
-    if (debugLabel) {
-      console.log('[mark-popover.touchSafeButton.mousedown]', {
-        debugLabel,
-        disabled: button.disabled,
-        skipSyntheticClick,
-      });
-    }
     if (preventMouseDown) {
       event.preventDefault();
     }
@@ -230,13 +213,6 @@ function installTouchSafeButton(
   });
 
   button.addEventListener('click', event => {
-    if (debugLabel) {
-      console.log('[mark-popover.touchSafeButton.click]', {
-        debugLabel,
-        disabled: button.disabled,
-        skipSyntheticClick,
-      });
-    }
     event.preventDefault();
     if (stopClickPropagation) {
       event.stopPropagation();
@@ -1427,43 +1403,13 @@ class MarkPopoverController {
       }
     }
 
-    if (!activeMark || (activeMark.kind !== 'insert' && activeMark.kind !== 'delete' && activeMark.kind !== 'replace')) {
-      console.log('[mark-popover.reviewTarget.resolve]', {
-        resolved: false,
-        fallbackMarkId: fallbackMarkId ?? null,
-        stateActiveMarkId,
-        controllerActiveMarkId: this.activeMarkId,
-        preferredMarkIds,
-        firstPendingSuggestionMarkId: this.getFirstPendingSuggestionMarkId(),
-        pendingReviewItems: this.getPendingSuggestionReviewItems().map((item) => ({
-          primaryMarkId: item.primaryMarkId,
-          memberMarkIds: item.memberMarkIds,
-          kind: item.kind,
-        })),
-      });
-      return null;
-    }
+    if (!activeMark || (activeMark.kind !== 'insert' && activeMark.kind !== 'delete' && activeMark.kind !== 'replace')) return null;
 
-    const target = {
+    return {
       markId: activeMark.id,
       nextMarkId: this.getAdjacentSuggestionMarkId(activeMark.id, 'next'),
       kind: activeMark.kind,
     };
-    console.log('[mark-popover.reviewTarget.resolve]', {
-      resolved: true,
-      fallbackMarkId: fallbackMarkId ?? null,
-      stateActiveMarkId,
-      controllerActiveMarkId: this.activeMarkId,
-      preferredMarkIds,
-      target,
-      firstPendingSuggestionMarkId: this.getFirstPendingSuggestionMarkId(),
-      pendingReviewItems: this.getPendingSuggestionReviewItems().map((item) => ({
-        primaryMarkId: item.primaryMarkId,
-        memberMarkIds: item.memberMarkIds,
-        kind: item.kind,
-      })),
-    });
-    return target;
   }
 
   private getSortedPendingReviewActionIds(markIds: string[]): string[] {
@@ -1480,19 +1426,6 @@ class MarkPopoverController {
     suggestionKind: 'insert' | 'delete' | 'replace',
     options?: { followupMode?: 'advance' | 'close' },
   ): void {
-    console.log('[mark-popover.reviewAction.start]', {
-      requestedMarkId: markId,
-      action,
-      requestedNextMarkId: nextMarkId,
-      suggestionKind,
-      followupMode: options?.followupMode ?? 'advance',
-      transitionPending: this.suggestionReviewTransitionPending,
-      reviewActionInFlight: this.reviewActionInFlight,
-      controllerActiveMarkId: this.activeMarkId,
-      stateActiveMarkId: getActiveMarkId(this.view.state),
-      mode: this.mode,
-      popoverVisible: this.popover.style.display !== 'none',
-    });
     if (this.reviewActionInFlight) {
       return;
     }
@@ -1500,14 +1433,6 @@ class MarkPopoverController {
       const followupTarget = this.mode === 'suggestion' && this.popover.style.display !== 'none'
         ? this.getLiveSuggestionActionTarget(markId)
         : null;
-      console.log('[mark-popover.reviewAction.followupTransition]', {
-        requestedMarkId: markId,
-        followupTarget,
-        controllerActiveMarkId: this.activeMarkId,
-        stateActiveMarkId: getActiveMarkId(this.view.state),
-        mode: this.mode,
-        popoverVisible: this.popover.style.display !== 'none',
-      });
       if (!followupTarget) {
         return;
       }
@@ -1526,14 +1451,6 @@ class MarkPopoverController {
       nextMarkId = liveTarget.nextMarkId;
       suggestionKind = liveTarget.kind;
     }
-    console.log('[mark-popover.reviewAction.boundTarget]', {
-      action,
-      boundMarkId: markId,
-      boundNextMarkId: nextMarkId,
-      suggestionKind,
-      controllerActiveMarkId: this.activeMarkId,
-      stateActiveMarkId: getActiveMarkId(this.view.state),
-    });
     this.clearReviewActionRetryTimer();
     this.hideReviewContextMenu();
     this.clearReviewActionError(markId);
@@ -1543,20 +1460,6 @@ class MarkPopoverController {
       ? [...reviewItem.memberMarkIds]
       : [markId];
     const shouldAdvanceToNextSuggestion = options?.followupMode !== 'close';
-    console.log('[mark-popover.reviewAction.reviewItem]', {
-      action,
-      markId,
-      reviewActionSequence,
-      reviewItem: reviewItem
-        ? {
-            primaryMarkId: reviewItem.primaryMarkId,
-            memberMarkIds: reviewItem.memberMarkIds,
-            kind: reviewItem.kind,
-          }
-        : null,
-      reviewedMarkIds,
-      shouldAdvanceToNextSuggestion,
-    });
 
     const setReviewButtonsBusy = (busy: boolean): void => {
       const buttons = Array.from(this.popover.querySelectorAll('.mark-popover-actions button')) as HTMLButtonElement[];
@@ -1632,34 +1535,12 @@ class MarkPopoverController {
       }
       const runPersistedSequence = async (): Promise<boolean> => {
         const orderedIds = this.getSortedPendingReviewActionIds(reviewedMarkIds);
-        console.log('[mark-popover.reviewAction.persistedSequence.start]', {
-          action,
-          markId,
-          reviewActionSequence,
-          orderedIds,
-          reviewedMarkIds,
-        });
         if (orderedIds.length === 0) return true;
 
         for (const pendingId of orderedIds) {
           const stillPending = this.getSortedPendingReviewActionIds([pendingId]).length > 0;
-          console.log('[mark-popover.reviewAction.persistedSequence.step]', {
-            action,
-            markId,
-            reviewActionSequence,
-            pendingId,
-            stillPending,
-          });
           if (!stillPending) continue;
           const success = await persistedActionForMark(pendingId);
-          console.log('[mark-popover.reviewAction.persistedSequence.result]', {
-            action,
-            markId,
-            reviewActionSequence,
-            pendingId,
-            success,
-            stillPendingAfter: this.getSortedPendingReviewActionIds([pendingId]).length > 0,
-          });
           if (!success) {
             return this.getSortedPendingReviewActionIds([pendingId]).length === 0;
           }
@@ -1667,14 +1548,6 @@ class MarkPopoverController {
         return true;
       };
       void runPersistedSequence().then((success) => {
-        console.log('[mark-popover.reviewAction.persistedSequence.done]', {
-          action,
-          markId,
-          reviewActionSequence,
-          success,
-          activeMarkId: this.activeMarkId,
-          stateActiveMarkId: getActiveMarkId(this.view.state),
-        });
         if (this.reviewActionSequence !== reviewActionSequence) {
           this.reviewActionInFlight = false;
           return;
@@ -1817,33 +1690,39 @@ class MarkPopoverController {
     this.scheduleSuggestionHoverClose();
   };
 
+  private isEventWithinInteractivePopoverChrome(event: PointerEvent | MouseEvent): boolean {
+    const target = event.target;
+    const composedPath = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    const isWithinElement = (element: HTMLElement): boolean => {
+      if (target instanceof Node && element.contains(target)) return true;
+      if (composedPath.includes(element)) return true;
+      if (element.style.display === 'none') return false;
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      return (
+        event.clientX >= rect.left
+        && event.clientX <= rect.right
+        && event.clientY >= rect.top
+        && event.clientY <= rect.bottom
+      );
+    };
+
+    return (
+      isWithinElement(this.popover)
+      || isWithinElement(this.strip)
+      || isWithinElement(this.reviewContextMenu)
+    );
+  }
+
   private handleOutsidePointerDown = (event: PointerEvent) => {
-    const target = event.target as Node;
-    if (this.popover.contains(target)) return;
-    if (this.strip.contains(target)) return;
-    if (this.reviewContextMenu.contains(target)) return;
-    console.log('[mark-popover.outsidePointerDown.close]', {
-      mode: this.mode,
-      activeMarkId: this.activeMarkId,
-      transitionPending: this.suggestionReviewTransitionPending,
-      reviewActionInFlight: this.reviewActionInFlight,
-    });
+    if (this.isEventWithinInteractivePopoverChrome(event)) return;
     this.hideReviewContextMenu();
     this.close();
   };
 
   private handleOutsideClick = (event: MouseEvent) => {
     if ((Date.now() - this.lastHandledPointerDownAt) < 450) return;
-    const target = event.target as Node;
-    if (this.popover.contains(target)) return;
-    if (this.strip.contains(target)) return;
-    if (this.reviewContextMenu.contains(target)) return;
-    console.log('[mark-popover.outsideClick.close]', {
-      mode: this.mode,
-      activeMarkId: this.activeMarkId,
-      transitionPending: this.suggestionReviewTransitionPending,
-      reviewActionInFlight: this.reviewActionInFlight,
-    });
+    if (this.isEventWithinInteractivePopoverChrome(event)) return;
     this.hideReviewContextMenu();
     this.close();
   };
@@ -2370,12 +2249,6 @@ class MarkPopoverController {
   }
 
   close(): void {
-    console.log('[mark-popover.close]', {
-      mode: this.mode,
-      activeMarkId: this.activeMarkId,
-      transitionPending: this.suggestionReviewTransitionPending,
-      reviewActionInFlight: this.reviewActionInFlight,
-    });
     if (this.suggestionReviewFollowupTimer !== null) {
       window.clearTimeout(this.suggestionReviewFollowupTimer);
       this.suggestionReviewFollowupTimer = null;
@@ -2970,27 +2843,13 @@ class MarkPopoverController {
     applyButton.textContent = 'Accept & Next';
     applyButton.title = 'Accept change and move to the next one (Shift+click to stay here, Cmd/Ctrl+Alt+A)';
     installTouchSafeButton(applyButton, (event) => {
-      console.log('[mark-popover.acceptButton.handler]', {
-        canEdit,
-        shiftKey: event.shiftKey,
-        controllerActiveMarkId: this.activeMarkId,
-        stateActiveMarkId: getActiveMarkId(this.view.state),
-        transitionPending: this.suggestionReviewTransitionPending,
-        reviewActionInFlight: this.reviewActionInFlight,
-      });
       if (!canEdit) return;
       const target = getActiveSuggestionActionTarget();
-      console.log('[mark-popover.acceptButton.target]', {
-        target,
-        controllerActiveMarkId: this.activeMarkId,
-        stateActiveMarkId: getActiveMarkId(this.view.state),
-      });
       if (!target) return;
       this.runSuggestionReviewAction(target.markId, 'accept', target.nextMarkId, target.kind, {
         followupMode: event.shiftKey ? 'close' : 'advance',
       });
     }, {
-      debugLabel: 'suggestion-accept-next',
       // Keep touch-safe behavior, but let desktop mouse actions fire on click.
       // Otherwise one physical click can accept the current suggestion on
       // pointerdown, then land a trailing synthetic click on the next
@@ -3004,27 +2863,13 @@ class MarkPopoverController {
     rejectButton.textContent = 'Reject & Next';
     rejectButton.title = 'Reject change and move to the next one (Shift+click to stay here, Cmd/Ctrl+Alt+R)';
     installTouchSafeButton(rejectButton, (event) => {
-      console.log('[mark-popover.rejectButton.handler]', {
-        canEdit,
-        shiftKey: event.shiftKey,
-        controllerActiveMarkId: this.activeMarkId,
-        stateActiveMarkId: getActiveMarkId(this.view.state),
-        transitionPending: this.suggestionReviewTransitionPending,
-        reviewActionInFlight: this.reviewActionInFlight,
-      });
       if (!canEdit) return;
       const target = getActiveSuggestionActionTarget();
-      console.log('[mark-popover.rejectButton.target]', {
-        target,
-        controllerActiveMarkId: this.activeMarkId,
-        stateActiveMarkId: getActiveMarkId(this.view.state),
-      });
       if (!target) return;
       this.runSuggestionReviewAction(target.markId, 'reject', target.nextMarkId, target.kind, {
         followupMode: event.shiftKey ? 'close' : 'advance',
       });
     }, {
-      debugLabel: 'suggestion-reject-next',
       preventMousePointerDown: false,
       preventMouseDown: false,
     });

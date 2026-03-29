@@ -19,7 +19,8 @@ function run(): void {
   assert(
     source.includes('const getActiveSuggestionActionTarget = (): {')
       && source.includes('private getLiveSuggestionActionTarget(')
-      && source.includes('getActiveMarkId(this.view.state),')
+      && source.includes('const stateActiveMarkId = getActiveMarkId(this.view.state);')
+      && source.includes('stateActiveMarkId,')
       && source.includes('this.activeMarkId,')
       && source.includes('fallbackMarkId ?? null,')
       && source.includes('const fallbackPendingMarkId = this.getFirstPendingSuggestionMarkId();')
@@ -80,6 +81,16 @@ function run(): void {
       && source.includes("preserveReviewTransition?: boolean;")
       && !source.includes("if (nextMarkId) {\n        this.navigateToSuggestion(nextMarkId);\n      }\n      this.openSuggestionAfterReview(nextMarkId, reviewedMarkIds);"),
     'Expected openForMark to keep the follow-up timer and transition guard intact during review-driven navigation, and expected review finish to avoid the stale pre-navigation that bound auto-advanced popovers to the wrong mark',
+  );
+
+  assert(
+    source.includes('private isEventWithinInteractivePopoverChrome(')
+      && source.includes('const composedPath = typeof event.composedPath === \'function\' ? event.composedPath() : [];')
+      && source.includes('if (composedPath.includes(element)) return true;')
+      && source.includes('const rect = element.getBoundingClientRect();')
+      && source.includes('event.clientX >= rect.left')
+      && source.includes('if (this.isEventWithinInteractivePopoverChrome(event)) return;'),
+    'Expected outside-click handling to treat pointer events inside the visible popover chrome as internal interactions even if the DOM target is stale during auto-advance rerenders',
   );
 
   assert(

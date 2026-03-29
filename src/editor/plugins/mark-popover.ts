@@ -75,6 +75,7 @@ const REVIEW_FOLLOWUP_MAX_RETRIES = 12;
 const REVIEW_FOLLOWUP_MAX_RETRIES_WITH_TARGET = 32;
 const TRACK_CHANGES_EDITOR_CLICK_SUPPRESSION_MS = 500;
 const DESKTOP_REVIEW_GUTTER_WIDTH_PX = 360;
+const REPLACEMENT_PAIR_MAX_TIMESTAMP_DRIFT_MS = 2_000;
 
 type VisibleComment = {
   mark: Mark;
@@ -88,7 +89,7 @@ type MobileCommentData = {
   totalCount: number;
 };
 
-type SuggestionReviewItem = {
+export type SuggestionReviewItem = {
   id: string;
   primaryMarkId: string;
   memberMarkIds: string[];
@@ -483,7 +484,13 @@ function rangesTouch(left: MarkRange | undefined, right: MarkRange | undefined):
 function isReplacementPair(insertMark: Mark, deleteMark: Mark): boolean {
   if (insertMark.kind !== 'insert' || deleteMark.kind !== 'delete') return false;
   if (insertMark.by !== deleteMark.by) return false;
-  if (!insertMark.at || !deleteMark.at || insertMark.at !== deleteMark.at) return false;
+  if (!insertMark.at || !deleteMark.at) return false;
+  if (insertMark.at !== deleteMark.at) {
+    const insertAt = parseMarkTimestamp(insertMark);
+    const deleteAt = parseMarkTimestamp(deleteMark);
+    if (insertAt === null || deleteAt === null) return false;
+    if (Math.abs(insertAt - deleteAt) > REPLACEMENT_PAIR_MAX_TIMESTAMP_DRIFT_MS) return false;
+  }
   const insertedText = (insertMark.data as InsertData | undefined)?.content ?? '';
   const deletedText = deleteMark.quote ?? '';
   if (!insertedText || !deletedText) return false;
@@ -541,7 +548,24 @@ function buildMergedInsertReviewMark(fragments: Mark[], doc: InlineTextAccessor)
   };
 }
 
-function buildSuggestionReviewItems(suggestions: Mark[], doc: InlineTextAccessor | null = null): SuggestionReviewItem[] {
+function getAdjacentReplacementPair(
+  mark: Mark,
+  nextMark: Mark | null,
+): { insertMark: Mark; deleteMark: Mark } | null {
+  if (!nextMark) return null;
+  if (mark.kind === 'insert' && nextMark.kind === 'delete' && isReplacementPair(mark, nextMark)) {
+    return { insertMark: mark, deleteMark: nextMark };
+  }
+  if (mark.kind === 'delete' && nextMark.kind === 'insert' && isReplacementPair(nextMark, mark)) {
+    return { insertMark: nextMark, deleteMark: mark };
+  }
+  return null;
+}
+
+export function buildSuggestionReviewItems(
+  suggestions: Mark[],
+  doc: InlineTextAccessor | null = null,
+): SuggestionReviewItem[] {
   const sorted = [...suggestions]
     .filter((mark) => isSuggestionKind(mark.kind))
     .sort((a, b) => {
@@ -555,17 +579,18 @@ function buildSuggestionReviewItems(suggestions: Mark[], doc: InlineTextAccessor
   for (let index = 0; index < sorted.length; index += 1) {
     const mark = sorted[index];
     const nextMark = sorted[index + 1] ?? null;
+    const replacementPair = getAdjacentReplacementPair(mark, nextMark);
 
-    if (mark.kind === 'insert' && nextMark && isReplacementPair(mark, nextMark)) {
+    if (replacementPair) {
       items.push({
         id: mark.id,
         primaryMarkId: mark.id,
         memberMarkIds: [mark.id, nextMark.id],
         kind: 'replace',
-        by: mark.by,
-        at: mark.at,
-        insertMark: mark,
-        deleteMark: nextMark,
+        by: replacementPair.insertMark.by,
+        at: replacementPair.insertMark.at,
+        insertMark: replacementPair.insertMark,
+        deleteMark: replacementPair.deleteMark,
       });
       index += 1;
       continue;

@@ -46,7 +46,9 @@ function run(): void {
       && applyResultBlock.includes('this.skipNextCollabTemplateSeed = skipReconnectTemplateSeed;')
       && applyResultBlock.includes('this.preserveEditorStateOnNextCollabReconnect = preserveEditorStateDuringReconnect;')
       && applyResultBlock.includes("this.collabConnectionStatus = 'connecting';")
-      && applyResultBlock.includes('this.collabIsSynced = false;'),
+      && applyResultBlock.includes('this.collabIsSynced = false;')
+      && applyResultBlock.includes('this.updateShareEditGate();')
+      && applyResultBlock.indexOf('this.updateShareEditGate();') > applyResultBlock.indexOf("this.collabConnectionStatus = 'connecting';"),
     'Expected share review mutation results with pending collab status to clear tracked-insert coalescing, mark collab as unstable, and optionally skip reconnect template replay when the canonical result is already loaded in the editor',
   );
 
@@ -164,6 +166,35 @@ function run(): void {
       && !applyLatestCollabMarksBlock.includes("this.applyExternalMarks(this.lastReceivedServerMarks, { pruneMissingSuggestions: true });")
       && applyLatestCollabMarksBlock.includes('this.resyncPendingInsertMetadataAfterRemoteApply(this.lastReceivedServerMarks);'),
     'Expected live collab mark application to avoid pruning missing pending suggestions while still resyncing pending insert metadata from the current document',
+  );
+
+  const rehydrateMarksBlock = sliceBetween(
+    editorSource,
+    '  private rehydrateServerMarksAfterCollabHydration(): void {',
+    '\n  private runWithTrackChangesSystemTransactionsSuppressed<T>(run: () => T): T {',
+  );
+  assert(
+    rehydrateMarksBlock.includes('const shouldRestoreTrackChanges = hasPendingSuggestions || this.desiredSuggestionsEnabled;')
+      && rehydrateMarksBlock.includes('this.suppressTrackChangesDuringCollabReconnect = false;')
+      && rehydrateMarksBlock.includes('this.updateShareEditGate();')
+      && rehydrateMarksBlock.indexOf('this.suppressTrackChangesDuringCollabReconnect = false;')
+        < rehydrateMarksBlock.indexOf('const shouldRestoreTrackChanges = hasPendingSuggestions || this.desiredSuggestionsEnabled;')
+      && rehydrateMarksBlock.includes("this.setSuggestionsEnabled(true, { updateDesiredState: hasPendingSuggestions });")
+      && !rehydrateMarksBlock.includes("this.setSuggestionsEnabled(true, { updateDesiredState: hasPendingSuggestions });\n      this.suppressTrackChangesDuringCollabReconnect = false;"),
+    'Expected collab rehydration to restore track changes after the final persisted reject removes every pending mark, so the next edit still creates fresh suggestions when TC was already enabled',
+  );
+
+  const localResolveEditGateBlock = sliceBetween(
+    editorSource,
+    '  private tryResolveShareReviewMutationLocally(',
+    '\n  private async runSerializedShareReviewMutation<T>(run: () => Promise<T>): Promise<T> {',
+  );
+  assert(
+    localResolveEditGateBlock.includes('this.suppressTrackChangesDuringCollabReconnect = true;')
+      && localResolveEditGateBlock.includes("this.collabConnectionStatus = 'connecting';")
+      && localResolveEditGateBlock.includes('this.collabIsSynced = false;')
+      && localResolveEditGateBlock.includes('this.updateShareEditGate();'),
+    'Expected the local accept/reject fast path to lock local editing immediately while the post-mutation collab reconnect is still suppressing track changes',
   );
 
   const acceptPersistedBlock = sliceBetween(

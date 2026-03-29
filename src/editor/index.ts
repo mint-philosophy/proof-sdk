@@ -5403,13 +5403,15 @@ class ProofEditorImpl implements ProofEditor {
     // Update lastReceivedServerMarks with the rehydrated marks
     this.lastReceivedServerMarks = { ...this.lastReceivedServerMarks, ...serverMarks };
 
-    // Re-enable track changes so suggestion marks render as rails.
-    // loadDocument disables suggestions as a stale-state guard; nothing
-    // in the normal collab reconnect path re-enables them.
-    if (hasPendingSuggestions) {
-      this.setSuggestionsEnabled(true);
-      this.suppressTrackChangesDuringCollabReconnect = false;
-      this.updateShareEditGate();
+    this.suppressTrackChangesDuringCollabReconnect = false;
+    this.updateShareEditGate();
+
+    // Re-enable track changes after the hydration doc reload when either
+    // authoritative pending suggestions still exist or the user explicitly
+    // left track changes on before the reconnect completed.
+    const shouldRestoreTrackChanges = hasPendingSuggestions || this.desiredSuggestionsEnabled;
+    if (shouldRestoreTrackChanges) {
+      this.setSuggestionsEnabled(true, { updateDesiredState: hasPendingSuggestions });
     }
   }
 
@@ -9966,6 +9968,7 @@ class ProofEditorImpl implements ProofEditor {
       if (this.collabEnabled) {
         this.collabConnectionStatus = 'connecting';
         this.collabIsSynced = false;
+        this.updateShareEditGate();
         this.disconnectCollabService();
         collabClient.disconnect();
       }
@@ -9974,6 +9977,7 @@ class ProofEditorImpl implements ProofEditor {
       this.skipNextCollabTemplateSeed = false;
       this.preserveEditorStateOnNextCollabReconnect = false;
       this.suppressTrackChangesDuringCollabReconnect = false;
+      this.updateShareEditGate();
     }
     if (markdown === null) {
       return this.reloadCanonicalShareDocument();
@@ -10034,6 +10038,7 @@ class ProofEditorImpl implements ProofEditor {
     if (this.collabEnabled) {
       this.collabConnectionStatus = 'connecting';
       this.collabIsSynced = false;
+      this.updateShareEditGate();
       this.disconnectCollabService();
       collabClient.disconnect();
     }

@@ -67,6 +67,7 @@ import {
   wrapTransactionForSuggestions,
   buildNativeTextInputFollowupWrapTransaction,
   buildTextPreservingInsertPersistenceTransaction,
+  buildHistorySuggestionMetadataReconciliationTransaction,
   shouldSuppressHandledTextInputEcho,
   consumePendingNativeTextInputTransactionMatch,
   isSuggestionsModuleEnabled,
@@ -6389,6 +6390,13 @@ class ProofEditorImpl implements ProofEditor {
           if (tr.getMeta('history$') !== undefined) {
             clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr, 'historyPassthrough');
+            const historyReconcileTr = buildHistorySuggestionMetadataReconciliationTransaction(
+              beforeState,
+              view.state,
+            );
+            if (historyReconcileTr) {
+              dispatchWithRevision(historyReconcileTr, 'historySuggestionMetadataReconcile');
+            }
             return;
           }
 

@@ -1,11 +1,15 @@
 import { history, undo } from 'prosemirror-history';
-import { EditorState, Plugin } from '@milkdown/kit/prose/state';
+import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 import { Schema } from '@milkdown/kit/prose/model';
 
 import {
   marksPluginKey,
+  getMarks,
 } from '../editor/plugins/marks';
-import { __buildHistorySuggestionMetadataReconciliationTransactionForTests } from '../editor/plugins/suggestions';
+import {
+  __buildHistorySuggestionMetadataReconciliationTransactionForTests,
+  wrapTransactionForSuggestions,
+} from '../editor/plugins/suggestions';
 import type { StoredMark } from '../formats/marks';
 
 function assert(condition: boolean, message: string): void {
@@ -130,6 +134,95 @@ function run(): void {
 
   const pluginMetadataAfterReconcile = (marksPluginKey.getState(state) as { metadata?: Record<string, StoredMark> } | undefined)?.metadata ?? {};
   assert(!pluginMetadataAfterReconcile[deleteId], 'Expected history reconciliation to remove stale delete metadata after undo');
+
+  state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text('Alpha seasonal beta')]),
+    ]),
+    selection: TextSelection.create(
+      schema.node('doc', null, [
+        schema.node('paragraph', null, [schema.text('Alpha seasonal beta')]),
+      ]),
+      7,
+      15,
+    ),
+    plugins: [history(), marksStatePlugin],
+  });
+
+  state = state.apply(wrapTransactionForSuggestions(state.tr.delete(7, 15), state, true));
+  state = state.apply(wrapTransactionForSuggestions(state.tr.insertText('annual', 15, 15), state, true));
+
+  const overwritePreUndoState = state;
+  const overwriteInsertCount = getMarks(state).filter((mark) => mark.kind === 'insert').length;
+  const overwriteDeleteCount = getMarks(state).filter((mark) => mark.kind === 'delete').length;
+  assert(overwriteInsertCount === 1, 'Expected overwrite fixture to produce one insert mark before undo');
+  assert(overwriteDeleteCount === 1, 'Expected overwrite fixture to produce one delete mark before undo');
+
+  let overwriteUndoHandled = false;
+  const overwriteUndoResult = undo(state, (tr) => {
+    overwriteUndoHandled = true;
+    state = state.apply(tr);
+  });
+  assert(overwriteUndoResult, 'Expected undo to dispatch for a tracked overwrite fixture');
+  assert(overwriteUndoHandled, 'Expected tracked overwrite undo transaction to apply');
+
+  const overwriteRawMarks = getMarks(state);
+  assert(
+    overwriteRawMarks.some((mark) => mark.kind === 'delete'),
+    'Expected raw overwrite undo to leave the paired delete mark behind before reconciliation',
+  );
+
+  const overwriteReconcileTr = __buildHistorySuggestionMetadataReconciliationTransactionForTests(
+    overwritePreUndoState,
+    state,
+  );
+  assert(overwriteReconcileTr, 'Expected overwrite undo reconciliation transaction');
+  state = state.apply(overwriteReconcileTr);
+
+  assert(state.doc.textContent === 'Alpha seasonal beta', 'Expected overwrite undo reconciliation to restore the original text');
+  assert(getMarks(state).length === 0, 'Expected overwrite undo reconciliation to remove the paired delete + insert marks');
+
+  state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text('Alpha seasonal beta')]),
+    ]),
+    selection: TextSelection.create(
+      schema.node('doc', null, [
+        schema.node('paragraph', null, [schema.text('Alpha seasonal beta')]),
+      ]),
+      7,
+      15,
+    ),
+    plugins: [history(), marksStatePlugin],
+  });
+
+  state = state.apply(wrapTransactionForSuggestions(state.tr.delete(7, 15), state, true));
+  state = state.apply(wrapTransactionForSuggestions(state.tr.insertText('annual', 15, 15), state, true));
+  const overwritePreUndoStateWithMetadataDrop = state;
+  undo(state, (tr) => {
+    state = state.apply(tr);
+  });
+  const deleteOnlyMetadata = Object.fromEntries(
+    Object.entries((marksPluginKey.getState(state) as { metadata?: Record<string, StoredMark> } | undefined)?.metadata ?? {})
+      .filter(([, mark]) => mark.kind === 'delete'),
+  );
+  state = state.apply(state.tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: deleteOnlyMetadata,
+  }));
+
+  const droppedInsertMetadataReconcileTr = __buildHistorySuggestionMetadataReconciliationTransactionForTests(
+    overwritePreUndoStateWithMetadataDrop,
+    state,
+  );
+  assert(
+    droppedInsertMetadataReconcileTr,
+    'Expected overwrite undo reconciliation even when the history runtime has already dropped the insert metadata id',
+  );
+  state = state.apply(droppedInsertMetadataReconcileTr);
+  assert(getMarks(state).length === 0, 'Expected overwrite undo reconciliation to still remove the paired delete when insert metadata is already missing');
 
   console.log('track-changes-undo-delete-regression.test.ts passed');
 }

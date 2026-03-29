@@ -262,34 +262,133 @@ function collectActualSuggestionIdsInDoc(doc: ProseMirrorNode): Set<string> {
   return ids;
 }
 
-function buildHistorySuggestionMetadataReconciliationTransaction(
+export function buildHistorySuggestionMetadataReconciliationTransaction(
   oldState: EditorState,
   newState: EditorState,
 ): Transaction | null {
   const pluginState = marksPluginKey.getState(newState) as { metadata?: Record<string, StoredMark> } | undefined;
   const currentMetadata = pluginState?.metadata;
-  if (!currentMetadata || Object.keys(currentMetadata).length === 0) return null;
+  const oldPluginState = marksPluginKey.getState(oldState) as { metadata?: Record<string, StoredMark> } | undefined;
+  const oldMetadata = oldPluginState?.metadata ?? {};
+  if (Object.keys(oldMetadata).length === 0 && (!currentMetadata || Object.keys(currentMetadata).length === 0)) return null;
 
   const oldIds = collectActualSuggestionIdsInDoc(oldState.doc);
   if (oldIds.size === 0) return null;
   const newIds = collectActualSuggestionIdsInDoc(newState.doc);
-  const removedIds = [...oldIds].filter((id) => !newIds.has(id) && currentMetadata[id]);
-  if (removedIds.length === 0) return null;
+  const removedIds = [...oldIds].filter((id) => !newIds.has(id) && oldMetadata[id]);
+  const overwriteDeleteIds = collectOverwriteDeleteIdsForHistoryUndo(
+    oldState,
+    newState,
+    oldMetadata,
+    currentMetadata,
+    removedIds,
+    newIds,
+  );
+  const reconciledIds = [...new Set([...removedIds, ...overwriteDeleteIds])];
+  if (reconciledIds.length === 0) return null;
 
-  const nextMetadata: Record<string, StoredMark> = { ...currentMetadata };
-  for (const id of removedIds) {
+  const nextMetadata: Record<string, StoredMark> = { ...(currentMetadata ?? {}) };
+  for (const id of reconciledIds) {
     delete nextMetadata[id];
   }
 
-  const tr = syncSuggestionMetadataTransaction(newState, newState.tr, nextMetadata)
+  let tr = newState.tr;
+  if (overwriteDeleteIds.length > 0) {
+    const suggestionType = newState.schema.marks.proofSuggestion;
+    if (suggestionType) {
+      for (const deleteId of overwriteDeleteIds) {
+        const deleteRange = resolveLiveDeleteSuggestionRange(newState.doc, deleteId);
+        if (!deleteRange || deleteRange.to <= deleteRange.from) continue;
+        tr = removeSuggestionIdsFromRange(
+          tr,
+          newState.doc,
+          deleteRange.from,
+          deleteRange.to,
+          suggestionType,
+          [deleteId],
+        );
+      }
+    }
+  }
+
+  tr = syncSuggestionMetadataTransaction(newState, tr, nextMetadata)
     .setMeta('addToHistory', false);
   tr.setMeta('suggestions-wrapped', true);
   console.log('[suggestions.appendTransaction.historyMetadataReconcile]', {
     removedIds,
+    overwriteDeleteIds,
+    reconciledIds,
     oldAnchoredIds: [...oldIds].sort(),
     newAnchoredIds: [...newIds].sort(),
   });
   return tr;
+}
+
+function collectOverwriteDeleteIdsForHistoryUndo(
+  oldState: EditorState,
+  newState: EditorState,
+  oldMetadata: Record<string, StoredMark>,
+  currentMetadata: Record<string, StoredMark>,
+  removedIds: string[],
+  newIds: Set<string>,
+): string[] {
+  if (removedIds.length === 0) return [];
+
+  const pairedDeleteIds = new Set<string>();
+
+  for (const insertId of removedIds) {
+    const insertMeta = oldMetadata[insertId] ?? currentMetadata[insertId];
+    if (!insertMeta || insertMeta.kind !== 'insert') continue;
+    if (insertMeta.status === 'accepted' || insertMeta.status === 'rejected') continue;
+
+    const insertRange = resolveLiveInsertSuggestionRange(oldState.doc, insertId);
+    if (!insertRange || insertRange.to <= insertRange.from) continue;
+
+    const adjacentDeleteIds = collectSuggestionIdsInRange(
+      oldState.doc,
+      'delete',
+      Math.max(0, insertRange.from - 1),
+      insertRange.from,
+    );
+    if (adjacentDeleteIds.length === 0) continue;
+
+    const insertCreatedAt = parseStoredMarkTimestamp(insertMeta.createdAt);
+    const insertBy = typeof insertMeta.by === 'string' ? insertMeta.by : null;
+
+    for (const deleteId of adjacentDeleteIds) {
+      if (pairedDeleteIds.has(deleteId)) continue;
+      if (!newIds.has(deleteId)) continue;
+
+      const deleteMeta = currentMetadata[deleteId] ?? oldMetadata[deleteId];
+      if (!deleteMeta || deleteMeta.kind !== 'delete') continue;
+      if (deleteMeta.status === 'accepted' || deleteMeta.status === 'rejected') continue;
+
+      const deleteRange = resolveLiveDeleteSuggestionRange(oldState.doc, deleteId);
+      if (!deleteRange || deleteRange.to !== insertRange.from) continue;
+
+      const deleteBy = typeof deleteMeta.by === 'string' ? deleteMeta.by : null;
+      if (insertBy && deleteBy && insertBy !== deleteBy) continue;
+
+      const deleteCreatedAt = parseStoredMarkTimestamp(deleteMeta.createdAt);
+      if (
+        insertCreatedAt !== null
+        && deleteCreatedAt !== null
+        && Math.abs(insertCreatedAt - deleteCreatedAt) > COALESCE_WINDOW_MS
+      ) {
+        continue;
+      }
+
+      const expectedDeletedText = typeof deleteMeta.quote === 'string' && deleteMeta.quote.length > 0
+        ? deleteMeta.quote
+        : oldState.doc.textBetween(deleteRange.from, deleteRange.to, '\n', '\n');
+      const restoredText = newState.doc.textBetween(deleteRange.from, deleteRange.to, '\n', '\n');
+      if (expectedDeletedText.length > 0 && restoredText !== expectedDeletedText) continue;
+
+      pairedDeleteIds.add(deleteId);
+    }
+  }
+
+  return [...pairedDeleteIds];
 }
 
 export function __buildHistorySuggestionMetadataReconciliationTransactionForTests(

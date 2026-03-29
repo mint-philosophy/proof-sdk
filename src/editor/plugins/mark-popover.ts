@@ -1381,8 +1381,21 @@ class MarkPopoverController {
     _suggestionKind: 'insert' | 'delete' | 'replace',
     options?: { followupMode?: 'advance' | 'close' },
   ): void {
-    if (this.reviewActionInFlight || this.suggestionReviewTransitionPending) {
+    if (this.reviewActionInFlight) {
       return;
+    }
+    if (this.suggestionReviewTransitionPending) {
+      const followupReady = this.mode === 'suggestion'
+        && this.activeMarkId === markId
+        && this.popover.style.display !== 'none';
+      if (!followupReady) {
+        return;
+      }
+      this.suggestionReviewTransitionPending = false;
+      if (this.suggestionReviewFollowupTimer !== null) {
+        window.clearTimeout(this.suggestionReviewFollowupTimer);
+        this.suggestionReviewFollowupTimer = null;
+      }
     }
     this.clearReviewActionRetryTimer();
     this.hideReviewContextMenu();

@@ -58,10 +58,13 @@ function run(): void {
 
   assert(
     source.includes('private reviewActionInFlight: boolean = false;')
-      && source.includes('if (this.reviewActionInFlight || this.suggestionReviewTransitionPending) {')
+      && source.includes('if (this.reviewActionInFlight) {')
+      && source.includes('const followupReady = this.mode === \'suggestion\'')
+      && source.includes('this.activeMarkId === markId')
+      && source.includes('this.suggestionReviewTransitionPending = false;')
       && source.includes('this.reviewActionInFlight = true;')
       && source.includes('this.reviewActionInFlight = false;'),
-    'Expected review actions to guard against duplicate dispatch while a persisted accept/reject is already in flight or the next review target is still reopening',
+    'Expected review actions to block duplicate dispatch while a persisted accept/reject is in flight, but to let a visible auto-advanced follow-up mark cancel the stale transition guard and accept the next click',
   );
 
   assert(

@@ -10344,7 +10344,11 @@ class ProofEditorImpl implements ProofEditor {
       if (!ready) return false;
       const actor = getCurrentActor();
       const snapshot = this.buildShareBatchSuggestionSnapshot();
-      const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);
+      const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);
+      const resolvedSourceMark = this.lastReceivedServerMarks[effectiveMarkId] ?? sourceMark;
+      const pendingCountBefore = this.hasActiveRemoteCollabPeer()
+        ? null
+        : this.getLocalPendingShareReviewMarkCount();
       this.beginShareReviewTrace('accept', markId);
       const result = await shareClient.acceptSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);
       if (!result || 'error' in result || result.success !== true) {
@@ -10368,7 +10372,9 @@ class ProofEditorImpl implements ProofEditor {
 
       const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));
       tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });
-      let success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result);
+      const shouldPreferCanonicalDeleteResult = resolvedSourceMark?.kind === 'delete';
+      let success = !shouldPreferCanonicalDeleteResult
+        && this.tryResolveShareReviewMutationLocally(markId, 'accept', result);
       if (!success) {
         // Local resolution failed (markdown comparison mismatch). Collab was already
         // disconnected by tryResolveShareReviewMutationLocally. Load the canonical
@@ -10402,13 +10408,23 @@ class ProofEditorImpl implements ProofEditor {
         }
       }
       if (success) {
-        success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds, sourceMark);
+        success = await this.ensureShareReviewMutationAppliedLocally(
+          result,
+          resolvedMarkIds,
+          resolvedSourceMark,
+          pendingCountBefore,
+        );
       }
       if (success && this.editor) {
         const shouldAwaitStableState = this.shouldAwaitShareReviewMutationSettle();
         if (shouldAwaitStableState) {
           await this.waitForStableShareReviewMutationState();
-          success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds, sourceMark);
+          success = await this.ensureShareReviewMutationAppliedLocally(
+            result,
+            resolvedMarkIds,
+            resolvedSourceMark,
+            pendingCountBefore,
+          );
         }
         if (!success) {
           return false;
@@ -10485,7 +10501,8 @@ class ProofEditorImpl implements ProofEditor {
       if (!ready) return false;
       const actor = getCurrentActor();
       const snapshot = this.buildShareBatchSuggestionSnapshot();
-      const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);
+      const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);
+      const resolvedSourceMark = this.lastReceivedServerMarks[effectiveMarkId] ?? sourceMark;
       this.beginShareReviewTrace('reject', markId);
       const result = await shareClient.rejectSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);
       if (!result || 'error' in result || result.success !== true) {
@@ -10509,7 +10526,11 @@ class ProofEditorImpl implements ProofEditor {
 
       tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });
       const preserveRejectResultAcrossReconnect = this.hasActiveRemoteCollabPeer();
-      const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)
+      const shouldPreferCanonicalDeleteResult = resolvedSourceMark?.kind === 'delete';
+      const success = (
+        !shouldPreferCanonicalDeleteResult
+        && this.tryResolveShareReviewMutationLocally(markId, 'reject', result)
+      )
         || await this.applyShareMutationDocumentResult(
           result,
           preserveRejectResultAcrossReconnect
@@ -10673,6 +10694,11 @@ class ProofEditorImpl implements ProofEditor {
     return bestCandidateId;
   }
 
+  private resolveShareReviewMutationRequestMarkId(markId: string, sourceMark: StoredMark | null): string {
+    if (sourceMark?.status === 'pending') return markId;
+    return this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);
+  }
+
   private hasPendingShareReviewMarks(markIds: string[]): boolean {
     if (!this.editor || markIds.length === 0) return false;
 
@@ -10707,6 +10733,17 @@ class ProofEditorImpl implements ProofEditor {
     return equivalentIds;
   }
 
+  private getLocalPendingShareReviewMarkCount(): number {
+    if (!this.editor) return 0;
+
+    let pendingCount = 0;
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      pendingCount = getPendingSuggestions(getMarks(view.state)).length;
+    });
+    return pendingCount;
+  }
+
   private async ensureShareReviewMutationAppliedLocally(
     result: {
       markdown?: string;
@@ -10715,14 +10752,22 @@ class ProofEditorImpl implements ProofEditor {
     },
     resolvedMarkIds: string[],
     sourceMark: StoredMark | null,
+    pendingCountBefore: number | null = null,
   ): Promise<boolean> {
     const equivalentPendingIds = this.getEquivalentPendingShareReviewMarkIds(sourceMark);
-    const needsRepair = this.hasPendingShareReviewMarks(resolvedMarkIds) || equivalentPendingIds.length > 0;
+    const pendingCountDidNotDrop = pendingCountBefore !== null
+      && pendingCountBefore > 0
+      && this.getLocalPendingShareReviewMarkCount() >= pendingCountBefore;
+    const needsRepair = this.hasPendingShareReviewMarks(resolvedMarkIds)
+      || equivalentPendingIds.length > 0
+      || pendingCountDidNotDrop;
     if (!needsRepair) return true;
 
     this.traceShareReview('mutation.local-verify-failed', {
       resolvedMarkIds,
       equivalentPendingIds,
+      pendingCountBefore,
+      pendingCountDidNotDrop,
       collabStatus: typeof result?.collab?.status === 'string' ? result.collab.status : null,
       markdown: this.summarizeTraceMarkdown(typeof result?.markdown === 'string' ? result.markdown : null),
     }, 'warn');
@@ -10734,10 +10779,16 @@ class ProofEditorImpl implements ProofEditor {
     if (!applied) return false;
 
     const stillPending = this.hasPendingShareReviewMarks(resolvedMarkIds)
-      || this.getEquivalentPendingShareReviewMarkIds(sourceMark).length > 0;
+      || this.getEquivalentPendingShareReviewMarkIds(sourceMark).length > 0
+      || (
+        pendingCountBefore !== null
+        && pendingCountBefore > 0
+        && this.getLocalPendingShareReviewMarkCount() >= pendingCountBefore
+      );
     this.traceShareReview('mutation.local-verify-result', {
       resolvedMarkIds,
       equivalentPendingIds,
+      pendingCountBefore,
       stillPending,
     }, stillPending ? 'warn' : 'info');
     return !stillPending;

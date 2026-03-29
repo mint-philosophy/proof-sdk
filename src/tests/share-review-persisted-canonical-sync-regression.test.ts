@@ -151,23 +151,26 @@ function run(): void {
     '\n  /**\n   * Reject a suggestion without changing the document\n   */',
   );
   assert(
-    acceptPersistedBlock.includes("const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);")
+    acceptPersistedBlock.includes("const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);")
+      && editorSource.includes('private resolveShareReviewMutationRequestMarkId(markId: string, sourceMark: StoredMark | null): string {')
+      && editorSource.includes("if (sourceMark?.status === 'pending') return markId;")
       && editorSource.includes('private async ensureShareReviewMutationAppliedLocally(')
       && editorSource.includes('private shouldAwaitShareReviewMutationSettle(): boolean {')
       && editorSource.includes('private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {')
       && acceptPersistedBlock.includes('const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));')
       && acceptPersistedBlock.includes("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
       && acceptPersistedBlock.indexOf("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
-        < acceptPersistedBlock.indexOf("let success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
+        < acceptPersistedBlock.indexOf("let success = !shouldPreferCanonicalDeleteResult")
       && acceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
-      && acceptPersistedBlock.includes("let success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
+      && acceptPersistedBlock.includes('const resolvedSourceMark = this.lastReceivedServerMarks[effectiveMarkId] ?? sourceMark;')
+      && acceptPersistedBlock.includes("let success = !shouldPreferCanonicalDeleteResult")
       && acceptPersistedBlock.includes('success = await this.applyShareMutationDocumentResult(result);')
-      && acceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds, sourceMark);')
+      && acceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(')
       && acceptPersistedBlock.includes('const shouldAwaitStableState = this.shouldAwaitShareReviewMutationSettle();')
       && acceptPersistedBlock.includes('if (shouldAwaitStableState) {')
       && acceptPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to remap stale UI ids to the authoritative pending mark, tombstone both local and remote ids, verify that the accepted mark or any equivalent pending suggestion is actually gone locally, reconcile the mutation, and re-verify after any pending collab reconnect before treating the persisted accept as settled',
+    'Expected markAcceptPersisted to preserve the current local pending mark id when it is still valid, remap only stale UI ids to the authoritative pending mark, tombstone both local and remote ids, verify that the accepted mark or any equivalent pending suggestion is actually gone locally, reconcile the mutation, and re-verify after any pending collab reconnect before treating the persisted accept as settled',
   );
 
   const rejectPersistedBlock = sliceBetween(
@@ -177,12 +180,14 @@ function run(): void {
   );
   assert(
     rejectPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
-      && rejectPersistedBlock.includes("const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);")
+      && rejectPersistedBlock.includes("const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);")
       && rejectPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
       && rejectPersistedBlock.indexOf("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
-        < rejectPersistedBlock.indexOf("const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")
+        < rejectPersistedBlock.indexOf("const success = (")
       && rejectPersistedBlock.includes('const preserveRejectResultAcrossReconnect = this.hasActiveRemoteCollabPeer();')
-      && rejectPersistedBlock.includes("const success = this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")
+      && rejectPersistedBlock.includes('const resolvedSourceMark = this.lastReceivedServerMarks[effectiveMarkId] ?? sourceMark;')
+      && rejectPersistedBlock.includes("const success = (")
+      && rejectPersistedBlock.includes("!shouldPreferCanonicalDeleteResult")
       && rejectPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(')
       && rejectPersistedBlock.includes('preserveRejectResultAcrossReconnect')
       && rejectPersistedBlock.includes('preserveRejectResultAcrossReconnect')
@@ -191,7 +196,7 @@ function run(): void {
       && rejectPersistedBlock.includes('if (this.hasActiveRemoteCollabPeer()) {')
       && rejectPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !rejectPersistedBlock.includes('rejectMark(view, markId);'),
-    'Expected markRejectPersisted to tombstone the resolved suggestion, preserve the authoritative reject result through collab reconnect only when a remote peer is present, and only block on collab settle when a remote peer is actually connected',
+    'Expected markRejectPersisted to preserve the current local pending mark id when it is still valid, tombstone the resolved suggestion, preserve the authoritative reject result through collab reconnect only when a remote peer is present, and only block on collab settle when a remote peer is actually connected',
   );
 
   const settleBlock = sliceBetween(

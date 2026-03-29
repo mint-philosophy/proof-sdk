@@ -131,22 +131,25 @@ function run(): void {
   const markAcceptPersistedBlock = sliceBetween(editorSource, '  async markAcceptPersisted(markId: string): Promise<boolean> {', '\n  /**\n   * Reject a suggestion without changing the document\n   */');
   assert(
     markAcceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
-      && markAcceptPersistedBlock.includes('const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);')
+      && editorSource.includes('private resolveShareReviewMutationRequestMarkId(markId: string, sourceMark: StoredMark | null): string {')
+      && editorSource.includes("if (sourceMark?.status === 'pending') return markId;")
+      && markAcceptPersistedBlock.includes('const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);')
       && markAcceptPersistedBlock.includes('const result = await shareClient.acceptSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);')
       && markAcceptPersistedBlock.includes('const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));')
       && markAcceptPersistedBlock.includes("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
       && editorSource.includes('private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {')
-      && markAcceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds, sourceMark);'),
-    'Expected persisted single-mark accept to remap stale UI ids onto the latest authoritative mark id, tombstone the resolved ids, and verify that neither the original ids nor an equivalent pending suggestion survives locally before treating the share mutation as success',
+      && markAcceptPersistedBlock.includes('const resolvedSourceMark = this.lastReceivedServerMarks[effectiveMarkId] ?? sourceMark;')
+      && markAcceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally('),
+    'Expected persisted single-mark accept to keep the live local mark id when it is still pending, only remap stale UI ids onto the latest authoritative mark id when needed, tombstone the resolved ids, and verify that neither the original ids nor an equivalent pending suggestion survives locally before treating the share mutation as success',
   );
 
   const markRejectPersistedBlock = sliceBetween(editorSource, '  async markRejectPersisted(markId: string): Promise<boolean> {', '\n  private getSortedPendingSuggestionIdsForShareReview(): string[] {');
   assert(
     markRejectPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
-      && markRejectPersistedBlock.includes('const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);')
+      && markRejectPersistedBlock.includes('const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);')
       && markRejectPersistedBlock.includes('const result = await shareClient.rejectSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);')
       && markRejectPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });"),
-    'Expected persisted single-mark reject to remap stale UI ids onto the latest authoritative mark id before calling the share mutation route',
+    'Expected persisted single-mark reject to keep the live local mark id when it is still pending and only remap stale UI ids before calling the share mutation route',
   );
 
   const handleMarksChangeBlock = sliceBetween(editorSource, '  private handleMarksChange(', '\n  private serializeMarkdown(');

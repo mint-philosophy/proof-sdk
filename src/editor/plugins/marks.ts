@@ -1808,6 +1808,33 @@ function mergeStoredMarkWithFallback(
   return merged;
 }
 
+function getPendingSuggestionAnchorRichness(mark: StoredMark | undefined): number {
+  if (!mark || (mark.kind !== 'insert' && mark.kind !== 'replace')) return -1;
+
+  let score = 0;
+  if (typeof mark.content === 'string' && mark.content.length > 0) score += 1;
+  if (typeof mark.quote === 'string' && mark.quote.length > 0) score += 2;
+  if (
+    mark.range
+    && typeof mark.range.from === 'number'
+    && typeof mark.range.to === 'number'
+    && Number.isFinite(mark.range.from)
+    && Number.isFinite(mark.range.to)
+    && mark.range.to > mark.range.from
+  ) {
+    score += 4;
+  }
+  if (
+    typeof mark.startRel === 'string'
+    && mark.startRel.length > 0
+    && typeof mark.endRel === 'string'
+    && mark.endRel.length > 0
+  ) {
+    score += 8;
+  }
+  return score;
+}
+
 export function mergePendingServerMarks(
   localMetadata: Record<string, StoredMark>,
   serverMarks: Record<string, StoredMark>,
@@ -1855,8 +1882,12 @@ export function mergePendingServerMarks(
           && localMark.status === 'pending'
           && serverMark.status === 'pending'
         );
+        const shouldPreferIncomingPendingSuggestion = (
+          shouldPreferLocalPendingSuggestion
+          && getPendingSuggestionAnchorRichness(serverMark) > getPendingSuggestionAnchorRichness(localMark)
+        );
         const mergedMark = mergeStoredMarkWithFallback(localMark, serverMark);
-        if (shouldPreferLocalPendingSuggestion && localMark) {
+        if (shouldPreferLocalPendingSuggestion && localMark && !shouldPreferIncomingPendingSuggestion) {
           if (typeof localMark.content === 'string' && localMark.content.length > 0) {
             mergedMark.content = localMark.content;
           }

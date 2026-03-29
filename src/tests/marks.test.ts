@@ -2469,6 +2469,50 @@ test('mergePendingServerMarks keeps critical local fields when server metadata i
   assertEqual(Boolean(merged.c1.resolved), true, 'Server-provided resolved flag should still apply');
 });
 
+test('mergePendingServerMarks prefers richer incoming pending insert anchors over a collapsed local cache', () => {
+  const localMetadata = {
+    s1: {
+      kind: 'insert' as const,
+      by: 'human:test',
+      createdAt: '2026-03-28T00:00:00.000Z',
+      content: ' The target date was set for mid-April.',
+      status: 'pending' as const,
+      range: { from: 42, to: 42 },
+    },
+  };
+
+  const serverMetadata = {
+    s1: {
+      kind: 'insert' as const,
+      by: 'human:test',
+      createdAt: '2026-03-28T00:00:00.000Z',
+      content: ' The target date was set for mid-April.',
+      quote: 'The target date was set for mid-April.',
+      status: 'pending' as const,
+      range: { from: 42, to: 79 },
+      startRel: 'char:41',
+      endRel: 'char:78',
+    },
+  };
+
+  const merged = mergePendingServerMarks(localMetadata, serverMetadata);
+  assertDeepEqual(
+    merged.s1.range,
+    { from: 42, to: 79 },
+    'Richer incoming pending insert metadata should replace a collapsed local cache range',
+  );
+  assertEqual(
+    merged.s1.startRel,
+    'char:41',
+    'Richer incoming pending insert metadata should preserve relative anchors instead of keeping the collapsed local cache',
+  );
+  assertEqual(
+    merged.s1.quote,
+    'The target date was set for mid-April.',
+    'Richer incoming pending insert metadata should preserve the incoming quote for live re-anchoring',
+  );
+});
+
 test('canonicalizeStoredMarks collapses equivalent authored duplicates to one canonical id', () => {
   const metadata: Record<string, StoredMark> = {
     'authored:human:Dan:3253-3298': {

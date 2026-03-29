@@ -5512,7 +5512,13 @@ class ProofEditorImpl implements ProofEditor {
         const localMetadata = getMarkMetadataWithQuotes(view.state);
         const liveMetadata = mergePendingServerMarks(localMetadata, this.lastReceivedServerMarks);
         const persistedMetadata = buildCanonicalShareMarkMetadata(view.state, liveMetadata);
-        this.lastReceivedServerMarks = { ...persistedMetadata };
+        this.lastReceivedServerMarks = {
+          ...(
+            this.collabEnabled && this.collabCanEdit
+              ? liveMetadata
+              : persistedMetadata
+          ),
+        };
         this.initialMarksSynced = true;
         const serializer = ctx.get(serializerCtx);
         const markdown = this.normalizeMarkdownForRuntime(serializer(view.state.doc));
@@ -6750,7 +6756,13 @@ class ProofEditorImpl implements ProofEditor {
     const persistedMetadata = this.isShareMode
       ? buildCanonicalShareMarkMetadata(view.state, metadata)
       : metadata;
-    this.lastReceivedServerMarks = { ...persistedMetadata };
+    this.lastReceivedServerMarks = {
+      ...(
+        this.isShareMode && this.collabEnabled && this.collabCanEdit
+          ? metadata
+          : persistedMetadata
+      ),
+    };
     this.initialMarksSynced = true;
 
     if (this.isShareMode) {

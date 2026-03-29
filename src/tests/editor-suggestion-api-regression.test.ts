@@ -313,6 +313,8 @@ function run(): void {
       && suggestionsAppendTransactionBlock.includes('const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled && !suggestionsDesiredEnabled;')
       && suggestionsAppendTransactionBlock.includes("const hasHistoryChange = trs.some((tr) => tr.getMeta('history$') !== undefined);")
       && suggestionsAppendTransactionBlock.includes("console.log('[suggestions.appendTransaction.historyRestoreEnable]', {")
+      && suggestionsSource.includes('function buildHistorySuggestionMetadataReconciliationTransaction(')
+      && suggestionsSource.includes("console.log('[suggestions.appendTransaction.historyMetadataReconcile]', {")
       && suggestionsAppendTransactionBlock.includes('suggestionsModuleEnabled = true;')
       && suggestionsAppendTransactionBlock.includes(".setMeta(suggestionsPluginKey, { enabled: true })")
       && suggestionsAppendTransactionBlock.includes(".setMeta('addToHistory', false);")
@@ -320,12 +322,14 @@ function run(): void {
       && suggestionsAppendTransactionBlock.includes('transactionCarriesInsertedSuggestionMarks(tr)')
       && suggestionsAppendTransactionBlock.includes('const nativeWrapTr = buildNativeTextInputFollowupWrapTransaction(')
       && suggestionsAppendTransactionBlock.includes("console.log('[suggestions.appendTransactionNativeTextInputWrap]', {")
+      && suggestionsAppendTransactionBlock.includes('const historyMetadataReconcileTr = buildHistorySuggestionMetadataReconciliationTransaction(')
       && suggestionsAppendTransactionBlock.includes('const splitMergeTr = buildAdjacentSplitInsertMergeTransaction(oldState, newState);')
       && suggestionsAppendTransactionBlock.includes('if (hasWrappedSuggestionTransaction || hasRemoteSuggestionInsert) {')
       && suggestionsAppendTransactionBlock.includes('if (hasNativeTypedInputPassthrough) {')
+      && suggestionsAppendTransactionBlock.includes('if (hasHistoryChange) {')
       && suggestionsAppendTransactionBlock.includes('|| isExplicitYjsChangeOriginTransaction(tr)')
       && !suggestionsAppendTransactionBlock.includes("|| tr.getMeta(marksPluginKey) !== undefined"),
-    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions, convert matched native typed-input passthroughs into immediate mark-only wrap transactions, still allow split-insert healing after wrapped local typing, and skip explicit Yjs change-origin echoes plus raw y-sync transactions that already carry incoming suggestion marks',
+    'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions, reconcile stale suggestion metadata after history undo, convert matched native typed-input passthroughs into immediate mark-only wrap transactions, still allow split-insert healing after wrapped local typing, and skip explicit Yjs change-origin echoes plus raw y-sync transactions that already carry incoming suggestion marks',
   );
 
   const setupSuggestionsInterceptorBlock = sliceBetween(editorSource, '  private setupSuggestionsInterceptor(): void {', '\n  private getDomSelectionRange(');

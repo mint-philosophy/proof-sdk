@@ -246,6 +246,59 @@ function collectSuggestionIdsInRange(
   return [...ids];
 }
 
+function collectActualSuggestionIdsInDoc(doc: ProseMirrorNode): Set<string> {
+  const ids = new Set<string>();
+
+  doc.descendants((node) => {
+    if (!node.isText) return true;
+    for (const mark of node.marks) {
+      if (mark.type.name !== 'proofSuggestion') continue;
+      const id = typeof mark.attrs.id === 'string' ? mark.attrs.id : '';
+      if (id) ids.add(id);
+    }
+    return true;
+  });
+
+  return ids;
+}
+
+function buildHistorySuggestionMetadataReconciliationTransaction(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  const pluginState = marksPluginKey.getState(newState) as { metadata?: Record<string, StoredMark> } | undefined;
+  const currentMetadata = pluginState?.metadata;
+  if (!currentMetadata || Object.keys(currentMetadata).length === 0) return null;
+
+  const oldIds = collectActualSuggestionIdsInDoc(oldState.doc);
+  if (oldIds.size === 0) return null;
+  const newIds = collectActualSuggestionIdsInDoc(newState.doc);
+  const removedIds = [...oldIds].filter((id) => !newIds.has(id) && currentMetadata[id]);
+  if (removedIds.length === 0) return null;
+
+  const nextMetadata: Record<string, StoredMark> = { ...currentMetadata };
+  for (const id of removedIds) {
+    delete nextMetadata[id];
+  }
+
+  const tr = syncSuggestionMetadataTransaction(newState, newState.tr, nextMetadata)
+    .setMeta('addToHistory', false);
+  tr.setMeta('suggestions-wrapped', true);
+  console.log('[suggestions.appendTransaction.historyMetadataReconcile]', {
+    removedIds,
+    oldAnchoredIds: [...oldIds].sort(),
+    newAnchoredIds: [...newIds].sort(),
+  });
+  return tr;
+}
+
+export function __buildHistorySuggestionMetadataReconciliationTransactionForTests(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  return buildHistorySuggestionMetadataReconciliationTransaction(oldState, newState);
+}
+
 function summarizeTextMarksInRange(
   doc: ProseMirrorNode,
   from: number,
@@ -3253,6 +3306,15 @@ export const suggestionsPlugin = $prose(() => {
           }
         }
         return null;
+      }
+      if (hasHistoryChange) {
+        const historyMetadataReconcileTr = buildHistorySuggestionMetadataReconciliationTransaction(
+          oldState,
+          newState,
+        );
+        if (historyMetadataReconcileTr) {
+          return historyMetadataReconcileTr;
+        }
       }
       if (trs.some((tr) =>
         tr.getMeta('document-load') !== undefined

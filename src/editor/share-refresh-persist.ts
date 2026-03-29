@@ -65,6 +65,40 @@ export function shouldAllowShareLocalEditsDuringTransientCollabRecovery(options:
   return options.collabUnsyncedChanges > 0 || options.collabPendingLocalUpdates > 0;
 }
 
+export function buildShareReviewBatchMutationMarkIds(options: {
+  localPendingIds: string[];
+  authoritativePendingIds: string[];
+}): string[] {
+  const requestedIds: string[] = [];
+  const seen = new Set<string>();
+
+  for (const markId of options.localPendingIds) {
+    if (typeof markId !== 'string' || markId.trim().length === 0) continue;
+    if (seen.has(markId)) continue;
+    seen.add(markId);
+    requestedIds.push(markId);
+  }
+
+  for (const markId of options.authoritativePendingIds) {
+    if (typeof markId !== 'string' || markId.trim().length === 0) continue;
+    if (seen.has(markId)) continue;
+    seen.add(markId);
+    requestedIds.push(markId);
+  }
+
+  return requestedIds;
+}
+
+export function shouldSkipShareDocumentRefreshDuringReviewCooldown(options: {
+  cooldownUntilMs: number;
+  nowMs?: number;
+  hasActiveRemotePeer: boolean;
+}): boolean {
+  if (options.hasActiveRemotePeer) return false;
+  const nowMs = options.nowMs ?? Date.now();
+  return nowMs < options.cooldownUntilMs;
+}
+
 export function shouldKeepalivePersistShareMarks(options: {
   keepalive: boolean;
   collabEnabled: boolean;

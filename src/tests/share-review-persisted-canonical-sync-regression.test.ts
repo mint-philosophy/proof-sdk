@@ -43,6 +43,7 @@ function run(): void {
       && applyResultBlock.includes("const preserveEditorStateDuringReconnect = options?.preserveEditorStateDuringReconnect === true;")
       && applyResultBlock.includes("const resetEditorDocOnReconnect = options?.resetEditorDocOnReconnect === true;")
       && applyResultBlock.includes("if (markdown !== null && collabStatus === 'pending' && preserveEditorStateDuringReconnect) {")
+      && applyResultBlock.includes('this.armShareReviewRefreshCooldown();')
       && applyResultBlock.includes('this.pendingCollabReconnectTemplateOverride = null;')
       && applyResultBlock.includes('this.skipNextCollabTemplateSeed = true;')
       && applyResultBlock.includes('this.preserveEditorStateOnNextCollabReconnect = true;')

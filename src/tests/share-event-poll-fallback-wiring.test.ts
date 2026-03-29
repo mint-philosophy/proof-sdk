@@ -27,9 +27,11 @@ assert(
   editorSource.includes("event.type === 'agent.edit.v2'")
     && editorSource.includes('private shouldSkipForcedCollabRefreshFromPendingEvent(): boolean')
     && editorSource.includes("this.collabConnectionStatus !== 'disconnected'")
+    && editorSource.includes('private isShareDocumentRefreshReviewCooldownActive(): boolean {')
+    && editorSource.includes("action: 'skip-review-refresh-cooldown'")
     && editorSource.includes("action: 'skip-forced-refresh'")
     && editorSource.includes('this.scheduleShareDocumentUpdatedRefresh(true);'),
-  'Expected pending event handler to skip forced collab refresh whenever the live room is still connected or reconnecting, so local edits cannot trigger a self-refresh fallback mid-sync',
+  'Expected pending event handler to skip forced collab refresh whenever the live room is still connected or reconnecting, and to suppress redundant post-review self-refreshes during the short local cooldown window',
 );
 
 assert(

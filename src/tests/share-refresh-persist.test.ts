@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 
 import {
+  buildShareReviewBatchMutationMarkIds,
   shouldAllowShareLocalEditsDuringTransientCollabRecovery,
   shouldKeepalivePersistShareMarks,
   shouldKeepalivePersistShareContent,
+  shouldSkipShareDocumentRefreshDuringReviewCooldown,
   shouldPreserveLocalContentEditMarkerOnRemoteChange,
   shouldUseLocalKeepaliveBaseToken,
 } from '../editor/share-refresh-persist.js';
@@ -198,6 +200,35 @@ assert.equal(
   }),
   false,
   'Expected transient recovery edits to remain blocked until the preserved local document is hydrated for editing',
+);
+
+assert.deepEqual(
+  buildShareReviewBatchMutationMarkIds({
+    localPendingIds: ['delete-banana', 'insert-bravo'],
+    authoritativePendingIds: ['insert-bravo', 'insert-charlie'],
+  }),
+  ['delete-banana', 'insert-bravo', 'insert-charlie'],
+  'Expected batch review requests to preserve local-only pending IDs while appending any authoritative extras once',
+);
+
+assert.equal(
+  shouldSkipShareDocumentRefreshDuringReviewCooldown({
+    cooldownUntilMs: 5_000,
+    nowMs: 4_999,
+    hasActiveRemotePeer: false,
+  }),
+  true,
+  'Expected share document refreshes to be suppressed during the local post-review cooldown when no remote peer is active',
+);
+
+assert.equal(
+  shouldSkipShareDocumentRefreshDuringReviewCooldown({
+    cooldownUntilMs: 5_000,
+    nowMs: 4_999,
+    hasActiveRemotePeer: true,
+  }),
+  false,
+  'Expected active remote peers to bypass the local post-review refresh cooldown',
 );
 
 assert.equal(

@@ -216,9 +216,11 @@ import { proofMarkHandler } from '../formats/remark-proof-marks';
 import { remarkProofMarksPlugin } from './schema/remark-proof-marks-plugin';
 import { getCurrentActor, setCurrentActor as setCurrentActorValue, normalizeActor } from './actor';
 import {
+  buildShareReviewBatchMutationMarkIds,
   shouldAllowShareLocalEditsDuringTransientCollabRecovery,
   shouldKeepalivePersistShareContent,
   shouldKeepalivePersistShareMarks,
+  shouldSkipShareDocumentRefreshDuringReviewCooldown,
   shouldUseLocalKeepaliveBaseToken,
 } from './share-refresh-persist';
 import { keybindingsPlugin, setShowAgentInputCallback, type AgentInputContext } from './plugins/keybindings';
@@ -1343,6 +1345,7 @@ class ProofEditorImpl implements ProofEditor {
   private shareEventCursor: number = 0;
   private shareLastForcedCollabEventId: number = 0;
   private shareDocumentUpdatedTimer: ReturnType<typeof setTimeout> | null = null;
+  private shareReviewRefreshCooldownUntilMs: number = 0;
   private shareMarksRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shareMarksFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private deferredShareMarksFlush: boolean = false;
@@ -1401,6 +1404,7 @@ class ProofEditorImpl implements ProofEditor {
   private readonly collabTypingRecoveryGraceMs: number = 3_000;
   private readonly shareEventPollMs: number = 1500;
   private readonly shareDocumentUpdatedDebounceMs: number = 600;
+  private readonly shareReviewRefreshCooldownMs: number = 5_000;
   private readonly commentPopoverDraftRestoreDelayMs: number = 120;
   private readonly commentPopoverDraftRestoreMaxAttempts: number = 10;
   private readonly remoteCursorStabilityWindowMs: number = 500;
@@ -1890,6 +1894,13 @@ class ProofEditorImpl implements ProofEditor {
         collabClient.onDocumentUpdated(() => {
           this.traceShareReview('collab.document-updated');
           if (!this.collabEnabled) return;
+          if (this.isShareDocumentRefreshReviewCooldownActive()) {
+            this.recordTrackChangesDebugEvent('pending-share-event', {
+              action: 'skip-review-refresh-cooldown',
+              source: 'collab.document-updated',
+            });
+            return;
+          }
           if (this.collabUnsyncedChanges > 0) return;
           if (this.collabConnectionStatus === 'connected' && this.collabIsSynced) return;
           void this.refreshCollabSessionAfterDocumentUpdated();
@@ -2940,6 +2951,21 @@ class ProofEditorImpl implements ProofEditor {
     }
   }
 
+  private armShareReviewRefreshCooldown(): void {
+    this.shareReviewRefreshCooldownUntilMs = Date.now() + this.shareReviewRefreshCooldownMs;
+    if (!this.hasActiveRemoteCollabPeer() && this.shareDocumentUpdatedTimer) {
+      clearTimeout(this.shareDocumentUpdatedTimer);
+      this.shareDocumentUpdatedTimer = null;
+    }
+  }
+
+  private isShareDocumentRefreshReviewCooldownActive(): boolean {
+    return shouldSkipShareDocumentRefreshDuringReviewCooldown({
+      cooldownUntilMs: this.shareReviewRefreshCooldownUntilMs,
+      hasActiveRemotePeer: this.hasActiveRemoteCollabPeer(),
+    });
+  }
+
   private async refreshCollabSessionAndReconnect(preserveLocalState: boolean): Promise<void> {
     if (!this.collabEnabled || !this.activeCollabSession) return;
     if (this.collabSessionRefreshInFlight) return;
@@ -3285,6 +3311,15 @@ class ProofEditorImpl implements ProofEditor {
       return;
     }
     this.shareLastForcedCollabEventId = event.id;
+    if (this.isShareDocumentRefreshReviewCooldownActive()) {
+      this.recordTrackChangesDebugEvent('pending-share-event', {
+        eventId: event.id,
+        eventType: event.type,
+        action: 'skip-review-refresh-cooldown',
+        actor: event.actor,
+      });
+      return;
+    }
     if (this.shouldSkipForcedCollabRefreshFromPendingEvent()) {
       this.recordTrackChangesDebugEvent('pending-share-event', {
         eventId: event.id,
@@ -3357,6 +3392,14 @@ class ProofEditorImpl implements ProofEditor {
     this.shareDocumentUpdatedTimer = setTimeout(() => {
       this.shareDocumentUpdatedTimer = null;
       if (!this.isShareMode) return;
+      if (this.isShareDocumentRefreshReviewCooldownActive()) {
+        this.recordTrackChangesDebugEvent('pending-share-event', {
+          action: 'skip-review-refresh-cooldown',
+          source: 'scheduleShareDocumentUpdatedRefresh',
+          forceCollabRefresh,
+        });
+        return;
+      }
       if (this.collabEnabled) {
         if (this.collabUnsyncedChanges > 0) return;
         if (!forceCollabRefresh && this.collabConnectionStatus === 'connected' && this.collabIsSynced) return;
@@ -10310,6 +10353,7 @@ class ProofEditorImpl implements ProofEditor {
     });
     resetSuggestionsInsertCoalescing();
     if (markdown !== null && collabStatus === 'pending' && preserveEditorStateDuringReconnect) {
+      this.armShareReviewRefreshCooldown();
       this.pendingCollabReconnectTemplateOverride = null;
       this.skipNextCollabTemplateSeed = true;
       this.preserveEditorStateOnNextCollabReconnect = true;
@@ -10330,6 +10374,7 @@ class ProofEditorImpl implements ProofEditor {
       return true;
     }
     if (markdown !== null && collabStatus === 'pending') {
+      this.armShareReviewRefreshCooldown();
       this.pendingCollabReconnectTemplateOverride = skipReconnectTemplateSeed
         ? null
         : this.normalizeMarkdownForCollab(markdown);
@@ -11094,6 +11139,13 @@ class ProofEditorImpl implements ProofEditor {
     return this.getSortedPendingSuggestionIdsForShareReview();
   }
 
+  private getRequestedShareReviewBatchMarkIds(localPendingIds: string[], authoritativePendingIds: string[]): string[] {
+    return buildShareReviewBatchMutationMarkIds({
+      localPendingIds,
+      authoritativePendingIds,
+    });
+  }
+
   private parseShareReviewRelativeCharOffset(value: unknown): number | null {
     if (typeof value !== 'string') return null;
     const match = /^char:(-?\d+)$/.exec(value.trim());
@@ -11347,7 +11399,7 @@ class ProofEditorImpl implements ProofEditor {
         const actor = getCurrentActor();
         const snapshot = this.buildShareBatchSuggestionSnapshot();
         const authoritativeIds = this.getAuthoritativePendingSuggestionIdsForShareReview();
-        const requestedIds = authoritativeIds.length > 0 ? authoritativeIds : initialIds;
+        const requestedIds = this.getRequestedShareReviewBatchMarkIds(initialIds, authoritativeIds);
         const result = await shareClient.acceptSuggestions(requestedIds, actor, undefined, snapshot ?? undefined);
         if (!result || 'error' in result || result.success !== true) {
           console.error('[markAcceptAll] Failed to persist suggestion acceptance via share mutation:', result);

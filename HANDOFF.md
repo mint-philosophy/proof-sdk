@@ -1,5 +1,26 @@
 ## Current state
 
+- `fix74` (`990c433`) is the current local browser-verified build for the review popover auto-advance lane:
+  - browser QA confirmed **Bug 28 / Bug 29 are fully fixed**
+  - auto-advanced `Accept & Next` and `Reject & Next` now work across mixed mark chains, not just pure deletion chains
+  - two successful local chains were reported:
+    - 4-mark accept chain on `g9gb52il`: all 4 auto-advanced review actions succeeded
+    - 6-mark mixed accept/reject chain on `8kkxjffw`: all 6 operations succeeded, including 5 from auto-advanced popovers
+  - hard reload persistence also passed on that build
+- `fix74` works by preserving review state across plugin-view teardown:
+  - `MarkPopoverController.destroy()` no longer calls the normal `close()` path during view recreation
+  - that prevents `setActiveMark(null)` from clearing the just-reopened follow-up card after `followup.settled`
+  - this specifically addressed the QA trace where `destroyPluginViews/updatePluginViews` closed the auto-advanced popover after it had visibly reopened
+- Local built client bundle: `58b584a0ad360c91decfd18e751780fa679ab81eb2311729a7af2777bca6da7d`
+- Local `/health` now reports build SHA `990c433446646e823612d4a61687fc673ebf5283`
+- Highest-priority remaining browser bug is now `Bug 17`, which still reproduces in QA on current-era builds:
+  - on `fix72`, deleting one word in TC mode and then pressing `Cmd+Z` repeatedly could still erase the full document in the browser
+  - `document-load-history-regression.test.ts` still passes locally, so the live wipe appears to be a different runtime/history path from the original `fix33` bug
+- Other remaining open lanes after the review fixes:
+  - `Bug 6`: undo still has zero or partial effect on many TC marks
+  - `Bug 10`: formatting changes still bypass TC
+  - `Bug 12` / structural-edit coverage still needs more work
+  - `Bug 25`: toolbar toggle disappearing during review remains cosmetic
 - `fix73` (`2d9a180`) is the next browser candidate for Bug 28, the mixed-mark auto-advance failure:
   - browser QA on `fix72` showed the popover could visibly advance to the next mark, but the second click still acted on a stale review target and silently closed
   - the popover controller now resolves the live action target from editor state at click time, rebinding from `getActiveMarkId(this.view.state)` before it runs any persisted accept/reject mutation

@@ -916,6 +916,13 @@ export function __buildAcceptedSuggestionMarkdownForTests(markdown: string, sugg
   return buildAcceptedSuggestionMarkdown(markdown, suggestion);
 }
 
+export function __getStoredSuggestionSourceSelectionForTests(
+  markdown: string,
+  suggestion: StoredMark,
+): { sourceStart: number; sourceEnd: number } | null {
+  return getStoredSuggestionSourceSelection(markdown, suggestion);
+}
+
 function getStoredSuggestionSourceSelection(
   markdown: string,
   suggestion: StoredMark,
@@ -930,6 +937,36 @@ function getStoredSuggestionSourceSelection(
   return mapVisibleSelectionToSourceRange(markdown, canonical.map, startOffset, endOffset);
 }
 
+function expandAdjacentNewlineRun(
+  markdown: string,
+  start: number,
+  end: number,
+): { start: number; end: number } | null {
+  const searchStart = Math.max(0, start - 16);
+  let newlineIndex = -1;
+  for (let index = Math.min(markdown.length - 1, end - 1); index >= searchStart; index -= 1) {
+    const ch = markdown[index];
+    if (ch === '\n' || ch === '\r') {
+      newlineIndex = index;
+      break;
+    }
+  }
+  if (newlineIndex === -1) {
+    return null;
+  }
+
+  let expandedStart = newlineIndex;
+  let expandedEnd = newlineIndex + 1;
+  while (expandedStart > 0 && (markdown[expandedStart - 1] === '\n' || markdown[expandedStart - 1] === '\r')) {
+    expandedStart -= 1;
+  }
+  while (expandedEnd < markdown.length && (markdown[expandedEnd] === '\n' || markdown[expandedEnd] === '\r')) {
+    expandedEnd += 1;
+  }
+
+  return { start: expandedStart, end: expandedEnd };
+}
+
 function buildRejectedSuggestionMarkdown(markdown: string, suggestion: StoredMark): string | null {
   if (suggestion.kind === 'delete') return markdown;
 
@@ -938,6 +975,21 @@ function buildRejectedSuggestionMarkdown(markdown: string, suggestion: StoredMar
     const normalizedContent = normalizeQuote(content);
     const sourceSelection = getStoredSuggestionSourceSelection(markdown, suggestion);
     if (sourceSelection) {
+      const leadingNewlines = content.match(/^\n+/)?.[0] ?? '';
+      const trailingText = content.slice(leadingNewlines.length);
+      const newlineRun = leadingNewlines.length > 0
+        ? expandAdjacentNewlineRun(markdown, sourceSelection.sourceStart, sourceSelection.sourceEnd)
+        : null;
+      const sourceSpanLength = sourceSelection.sourceEnd - sourceSelection.sourceStart;
+      if (newlineRun) {
+        if (trailingText.length === 0) {
+          return `${markdown.slice(0, newlineRun.start)}${markdown.slice(newlineRun.end)}`;
+        }
+        if (sourceSpanLength < trailingText.length && markdown.slice(newlineRun.end).startsWith(trailingText)) {
+          return `${markdown.slice(0, newlineRun.start)}${markdown.slice(newlineRun.end)}`;
+        }
+      }
+
       const span = expandMarkdownSpan(markdown, sourceSelection.sourceStart, sourceSelection.sourceEnd);
       const spanText = normalizeQuote(stripAllProofSpanTags(markdown.slice(span.start, span.end)));
       if (

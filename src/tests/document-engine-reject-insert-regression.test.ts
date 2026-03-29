@@ -50,6 +50,46 @@ function run(): void {
     'Rejecting an inline inserted suffix should remove the inserted content while preserving the anchor quote',
   );
 
+  const paragraphBreakInsert: StoredMark = {
+    kind: 'insert',
+    by: 'human:test',
+    createdAt: new Date().toISOString(),
+    status: 'pending',
+    quote: 'March.',
+    content: '\n',
+    startRel: 'char:6',
+    endRel: 'char:7',
+    range: { from: 6, to: 7 },
+  };
+  const paragraphBreakMarkdown = 'March.\n\nthe';
+  const rejectedParagraphBreak = __buildRejectedSuggestionMarkdownForTests(paragraphBreakMarkdown, paragraphBreakInsert);
+  assertEqual(
+    rejectedParagraphBreak,
+    'March.the',
+    'Rejecting a paragraph-break insertion should remove the full markdown paragraph separator instead of leaving the paragraphs split',
+  );
+
+  const paragraphBreakWithTrailingTextInsert: StoredMark = {
+    kind: 'insert',
+    by: 'human:test',
+    createdAt: new Date().toISOString(),
+    status: 'pending',
+    quote: 'March.',
+    content: '\nthe',
+    startRel: 'char:8',
+    endRel: 'char:10',
+    range: { from: 8, to: 10 },
+  };
+  const rejectedParagraphBreakWithTrailingText = __buildRejectedSuggestionMarkdownForTests(
+    paragraphBreakMarkdown,
+    paragraphBreakWithTrailingTextInsert,
+  );
+  assertEqual(
+    rejectedParagraphBreakWithTrailingText,
+    'March.the',
+    'Rejecting a structural paragraph-break insert should preserve the first character of the following paragraph text',
+  );
+
   const deleteSuggestion: StoredMark = {
     kind: 'delete',
     by: 'human:test',

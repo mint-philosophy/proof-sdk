@@ -13,10 +13,15 @@
 - `fix65` (`fce6f1f`) is the next browser candidate:
   - it targets the remaining undo blocker where `Cmd+Z` after a tracked deletion appears to do nothing
   - the fix reconciles stale suggestion metadata after history undo so a removed delete mark cannot be reconstructed from metadata on the next pass
+- `fix66` is the immediate follow-up for a browser-blocking regression in `fix65`:
+  - `appendTransaction(...)` was referencing `hasHistoryChange` outside the scope where it was declared
+  - the result was `ReferenceError: hasHistoryChange is not defined` on every TC keystroke
+  - the fix simply hoists that declaration to the top of `appendTransaction(...)` so both the TC-off history lane and the later history metadata reconciliation lane can use it safely
 - Remaining known follow-ups after fix64:
   - warm reload can still revert some overwrite-created inserts from inline to widget
   - formatting changes still bypass TC
 - Last commits in this session:
+  - `fix66` pending commit: hoist `hasHistoryChange` so TC appendTransaction no longer crashes
   - `fce6f1f` `fix65: reconcile stale delete metadata after undo`
   - `9af1d9c` `docs: record fix64 rollout`
   - `857ec77` `fix64: stabilize review actions and insert reject fallback`

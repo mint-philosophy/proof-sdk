@@ -3120,6 +3120,7 @@ export const suggestionsPlugin = $prose(() => {
     appendTransaction(trs, oldState, newState) {
       const wasEnabled = suggestionsPluginKey.getState(oldState)?.enabled ?? false;
       const isEnabled = suggestionsPluginKey.getState(newState)?.enabled ?? false;
+      const hasHistoryChange = trs.some((tr) => tr.getMeta('history$') !== undefined);
       if (wasEnabled !== isEnabled) {
         // Emit bridge message on next microtask to avoid dispatch-in-dispatch
         queueMicrotask(() => {
@@ -3131,7 +3132,6 @@ export const suggestionsPlugin = $prose(() => {
       // reads return stale data in the dispatch interceptor
       const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled && !suggestionsDesiredEnabled;
       if (effectivelyDisabled) {
-        const hasHistoryChange = trs.some((tr) => tr.getMeta('history$') !== undefined);
         const hasExplicitDisable = trs.some((tr) => {
           const meta = tr.getMeta(suggestionsPluginKey) as { enabled?: unknown } | undefined;
           return Boolean(meta && typeof meta === 'object' && !Array.isArray(meta) && meta.enabled === false);

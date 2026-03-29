@@ -4,6 +4,12 @@
 - Local `/health` now reports build SHA `a54a0ba87c141558ff1c98b2589673df615f5efc`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
+- Browser QA on `fix62` (`a54a0ba`) now passes the primary insertion lane:
+  - typed insert renders as one inline green span with `widgetCount=0`
+  - deleting elsewhere no longer duplicates the insert
+  - overwrite now produces one delete + one insert as expected
+  - warm reload preserves the pending inserts/deletes
+- Remaining browser-known lane after `fix62`: clicking inline insert text / rail badge still does not open the review popover, so insertion accept/reject remains blocked behind the popover target path
 - Last commits in this session:
   - `a54a0ba` `fix62: materialize collapsed inserts onto live text`
   - `fix53` pending commit: route recent raw Yjs plain-text self-echoes through remote repair

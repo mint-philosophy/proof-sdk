@@ -50,9 +50,10 @@ function run(): void {
   assert(
     source.includes('if (this.reopenFirstPendingSuggestion({')
       && source.includes('preserveReviewTransition: this.suggestionReviewTransitionPending,')
+      && source.includes('if (this.suggestionReviewTransitionPending) {')
       && source.includes('if (!activeMark && this.reopenFirstPendingSuggestion()) {')
       && source.includes('const reboundMarkId = this.activeMarkId;'),
-    'Expected stale suggestion popovers to rebind to the first remaining pending suggestion after collab reseeds, both during editor updates and at click time',
+    'Expected stale suggestion popovers to rebind to the first remaining pending suggestion after collab reseeds, and to keep the review transition alive instead of closing during transient mixed-mark gaps',
   );
 
   assert(

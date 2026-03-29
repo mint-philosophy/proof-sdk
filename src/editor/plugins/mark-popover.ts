@@ -2053,6 +2053,9 @@ class MarkPopoverController {
           })) {
             return;
           }
+          if (this.suggestionReviewTransitionPending) {
+            return;
+          }
           this.close();
           return;
         }

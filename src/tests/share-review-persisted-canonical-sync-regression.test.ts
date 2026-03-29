@@ -75,12 +75,12 @@ function run(): void {
     loadCanonicalShareDocumentBlock.includes('this.loadDocument(embedMarks(markdown, marks), {')
       && loadCanonicalShareDocumentBlock.includes("allowShareContentMutation: true,")
       && loadCanonicalShareDocumentBlock.includes('preserveHistory: true,')
-      && loadCanonicalShareDocumentBlock.includes("if (!this.editor || Object.keys(marks).length === 0 || this.isEditorDocStructurallyEmpty()) {")
+      && loadCanonicalShareDocumentBlock.includes("if (!this.editor || this.isEditorDocStructurallyEmpty()) {")
       && loadCanonicalShareDocumentBlock.includes('this.applyingCollabRemote = true;')
       && loadCanonicalShareDocumentBlock.includes('this.suppressMarksSync = true;')
       && loadCanonicalShareDocumentBlock.includes('this.applyExternalMarks(marks, { pruneMissingSuggestions: true });')
       && loadCanonicalShareDocumentBlock.includes('this.resyncPendingInsertMetadataAfterRemoteApply(marks);'),
-    'Expected canonical share review reloads to immediately re-anchor authoritative pending marks after loadDocument so surviving suggestions do not disappear until the next collab sync pulse',
+    'Expected canonical share review reloads to immediately re-anchor authoritative pending marks after loadDocument and to prune stale local suggestion anchors even when the authoritative result has no remaining marks',
   );
 
   const reconnectBlock = sliceBetween(
@@ -259,7 +259,10 @@ function run(): void {
       && acceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
       && acceptPersistedBlock.includes('const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;')
       && acceptPersistedBlock.includes("let success = !shouldPreferCanonicalDeleteResult")
-      && acceptPersistedBlock.includes('success = await this.applyShareMutationDocumentResult(result);')
+      && acceptPersistedBlock.includes('success = await this.applyShareMutationDocumentResult(result, {')
+      && acceptPersistedBlock.includes('skipReconnectTemplateSeed: true,')
+      && acceptPersistedBlock.includes('preserveEditorStateDuringReconnect: true,')
+      && acceptPersistedBlock.includes('resetEditorDocOnReconnect: true,')
       && acceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(')
       && acceptPersistedBlock.includes('const shouldAwaitStableState = this.shouldAwaitShareReviewMutationSettle();')
       && acceptPersistedBlock.includes('if (shouldAwaitStableState) {')

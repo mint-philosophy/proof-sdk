@@ -10308,7 +10308,7 @@ class ProofEditorImpl implements ProofEditor {
       allowShareContentMutation: true,
       preserveHistory: true,
     });
-    if (!this.editor || Object.keys(marks).length === 0 || this.isEditorDocStructurallyEmpty()) {
+    if (!this.editor || this.isEditorDocStructurallyEmpty()) {
       return;
     }
 
@@ -10907,39 +10907,11 @@ class ProofEditorImpl implements ProofEditor {
       let success = !shouldPreferCanonicalDeleteResult
         && this.tryResolveShareReviewMutationLocally(markId, 'accept', result);
       if (!success) {
-        // Local resolution failed (or we intentionally preferred the canonical
-        // delete result). The preserved reconnect path may already have paused the
-        // Milkdown<->Yjs binding; load the canonical server state directly with
-        // marks embedded, re-enable TC (loadDocument resets it), then reconnect
-        // collab with preserve flags so the live provider/Y.Doc can be refreshed
-        // without tearing down editor-local position mappings.
-        const markdown = typeof result?.markdown === 'string' ? result.markdown : null;
-        const marks = (result?.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
-          ? result.marks as Record<string, StoredMark>
-          : {};
-        if (markdown !== null) {
-          this.pendingCollabReconnectTemplateOverride = null;
-          this.skipNextCollabTemplateSeed = true;
-          this.preserveEditorStateOnNextCollabReconnect = true;
-          this.resetEditorDocOnNextCollabReconnect = true;
-          this.loadCanonicalShareDocument(markdown, marks);
-          // loadDocument resets the suggestions plugin and module state to disabled
-          // (stale-state guard). Re-enable TC so remaining marks render as rails.
-          this.setSuggestionsEnabled(true);
-          this.suppressTrackChangesDuringCollabReconnect = false;
-          this.updateShareEditGate();
-          this.releaseDeferredShareMarksFlush();
-          // Reconnect collab so save/sync keeps working. The preserve flags above
-          // force the next bind to reset from the freshly synced Y.Doc, and the
-          // sync handler's applyLatestCollabMarksToEditor will re-anchor any marks
-          // that Y.js binding doesn't preserve.
-          if (this.collabEnabled && this.activeCollabSession) {
-            void this.refreshCollabSessionAndReconnect(false);
-          }
-          success = true;
-        } else {
-          success = await this.applyShareMutationDocumentResult(result);
-        }
+        success = await this.applyShareMutationDocumentResult(result, {
+          skipReconnectTemplateSeed: true,
+          preserveEditorStateDuringReconnect: true,
+          resetEditorDocOnReconnect: true,
+        });
       }
       if (success) {
         success = await this.ensureShareReviewMutationAppliedLocally(

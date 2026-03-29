@@ -1,4 +1,4 @@
-import { history, undo } from 'prosemirror-history';
+import { history, redo, undo } from 'prosemirror-history';
 import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 import { Schema } from '@milkdown/kit/prose/model';
 
@@ -8,6 +8,7 @@ import {
 } from '../editor/plugins/marks';
 import {
   __buildHistorySuggestionMetadataReconciliationTransactionForTests,
+  isUndoHistoryTransaction,
   wrapTransactionForSuggestions,
 } from '../editor/plugins/suggestions';
 import type { StoredMark } from '../formats/marks';
@@ -119,6 +120,7 @@ function run(): void {
   const preUndoState = state;
   let undoDispatchApplied = false;
   const undoHandled = undo(state, (tr) => {
+    assert(isUndoHistoryTransaction(tr), 'Expected undo transactions to be eligible for history metadata reconciliation');
     state = state.apply(tr);
     undoDispatchApplied = true;
   });
@@ -161,6 +163,7 @@ function run(): void {
 
   let overwriteUndoHandled = false;
   const overwriteUndoResult = undo(state, (tr) => {
+    assert(isUndoHistoryTransaction(tr), 'Expected overwrite undo transactions to be eligible for history metadata reconciliation');
     overwriteUndoHandled = true;
     state = state.apply(tr);
   });
@@ -202,6 +205,7 @@ function run(): void {
   state = state.apply(wrapTransactionForSuggestions(state.tr.insertText('annual', 15, 15), state, true));
   const overwritePreUndoStateWithMetadataDrop = state;
   undo(state, (tr) => {
+    assert(isUndoHistoryTransaction(tr), 'Expected dropped-metadata undo transactions to be eligible for history metadata reconciliation');
     state = state.apply(tr);
   });
   const deleteOnlyMetadata = Object.fromEntries(
@@ -223,6 +227,16 @@ function run(): void {
   );
   state = state.apply(droppedInsertMetadataReconcileTr);
   assert(getMarks(state).length === 0, 'Expected overwrite undo reconciliation to still remove the paired delete when insert metadata is already missing');
+
+  let redoDispatchApplied = false;
+  const redoHandled = redo(state, (tr) => {
+    assert(!isUndoHistoryTransaction(tr), 'Expected redo transactions not to trigger undo-only history metadata reconciliation');
+    state = state.apply(tr);
+    redoDispatchApplied = true;
+  });
+  assert(redoHandled, 'Expected redo to dispatch for the tracked overwrite fixture');
+  assert(redoDispatchApplied, 'Expected redo to apply a history transaction');
+  assert(!isUndoHistoryTransaction(state.tr), 'Expected ordinary transactions not to be treated as undo history transactions');
 
   console.log('track-changes-undo-delete-regression.test.ts passed');
 }

@@ -68,6 +68,7 @@ import {
   buildNativeTextInputFollowupWrapTransaction,
   buildTextPreservingInsertPersistenceTransaction,
   buildHistorySuggestionMetadataReconciliationTransaction,
+  isUndoHistoryTransaction,
   shouldSuppressHandledTextInputEcho,
   consumePendingNativeTextInputTransactionMatch,
   isSuggestionsModuleEnabled,
@@ -6390,12 +6391,14 @@ class ProofEditorImpl implements ProofEditor {
           if (tr.getMeta('history$') !== undefined) {
             clearPendingDomSuggestionSelection();
             dispatchWithRevision(tr, 'historyPassthrough');
-            const historyReconcileTr = buildHistorySuggestionMetadataReconciliationTransaction(
-              beforeState,
-              view.state,
-            );
-            if (historyReconcileTr) {
-              dispatchWithRevision(historyReconcileTr, 'historySuggestionMetadataReconcile');
+            if (isUndoHistoryTransaction(tr)) {
+              const historyReconcileTr = buildHistorySuggestionMetadataReconciliationTransaction(
+                beforeState,
+                view.state,
+              );
+              if (historyReconcileTr) {
+                dispatchWithRevision(historyReconcileTr, 'historySuggestionMetadataReconcile');
+              }
             }
             return;
           }
@@ -9911,6 +9914,19 @@ class ProofEditorImpl implements ProofEditor {
       allowShareContentMutation: true,
       preserveHistory: true,
     });
+    if (!this.editor || Object.keys(marks).length === 0 || this.isEditorDocStructurallyEmpty()) {
+      return;
+    }
+
+    this.applyingCollabRemote = true;
+    this.suppressMarksSync = true;
+    try {
+      this.applyExternalMarks(marks, { pruneMissingSuggestions: true });
+      this.resyncPendingInsertMetadataAfterRemoteApply(marks);
+    } finally {
+      this.suppressMarksSync = false;
+      this.applyingCollabRemote = false;
+    }
   }
 
   private async applyShareMutationDocumentResult(

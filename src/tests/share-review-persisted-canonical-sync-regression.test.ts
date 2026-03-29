@@ -46,6 +46,23 @@ function run(): void {
     'Expected share review mutation results with pending collab status to clear tracked-insert coalescing, mark collab as unstable, and optionally skip reconnect template replay when the canonical result is already loaded in the editor',
   );
 
+  const loadCanonicalShareDocumentBlock = sliceBetween(
+    editorSource,
+    '  private loadCanonicalShareDocument(markdown: string, marks: Record<string, StoredMark>): void {',
+    '\n  private async applyShareMutationDocumentResult(',
+  );
+  assert(
+    loadCanonicalShareDocumentBlock.includes('this.loadDocument(embedMarks(markdown, marks), {')
+      && loadCanonicalShareDocumentBlock.includes("allowShareContentMutation: true,")
+      && loadCanonicalShareDocumentBlock.includes('preserveHistory: true,')
+      && loadCanonicalShareDocumentBlock.includes("if (!this.editor || Object.keys(marks).length === 0 || this.isEditorDocStructurallyEmpty()) {")
+      && loadCanonicalShareDocumentBlock.includes('this.applyingCollabRemote = true;')
+      && loadCanonicalShareDocumentBlock.includes('this.suppressMarksSync = true;')
+      && loadCanonicalShareDocumentBlock.includes('this.applyExternalMarks(marks, { pruneMissingSuggestions: true });')
+      && loadCanonicalShareDocumentBlock.includes('this.resyncPendingInsertMetadataAfterRemoteApply(marks);'),
+    'Expected canonical share review reloads to immediately re-anchor authoritative pending marks after loadDocument so surviving suggestions do not disappear until the next collab sync pulse',
+  );
+
   const reconnectBlock = sliceBetween(
     editorSource,
     '  private async refreshCollabSessionAndReconnect(preserveLocalState: boolean): Promise<void> {',

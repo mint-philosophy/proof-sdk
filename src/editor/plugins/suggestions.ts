@@ -262,6 +262,15 @@ function collectActualSuggestionIdsInDoc(doc: ProseMirrorNode): Set<string> {
   return ids;
 }
 
+type HistoryTransactionMeta = {
+  redo?: boolean;
+};
+
+export function isUndoHistoryTransaction(tr: Transaction): boolean {
+  const historyMeta = tr.getMeta('history$') as HistoryTransactionMeta | undefined;
+  return Boolean(historyMeta && historyMeta.redo === false);
+}
+
 export function buildHistorySuggestionMetadataReconciliationTransaction(
   oldState: EditorState,
   newState: EditorState,
@@ -3220,6 +3229,7 @@ export const suggestionsPlugin = $prose(() => {
       const wasEnabled = suggestionsPluginKey.getState(oldState)?.enabled ?? false;
       const isEnabled = suggestionsPluginKey.getState(newState)?.enabled ?? false;
       const hasHistoryChange = trs.some((tr) => tr.getMeta('history$') !== undefined);
+      const hasUndoHistoryChange = trs.some((tr) => isUndoHistoryTransaction(tr));
       if (wasEnabled !== isEnabled) {
         // Emit bridge message on next microtask to avoid dispatch-in-dispatch
         queueMicrotask(() => {
@@ -3406,7 +3416,7 @@ export const suggestionsPlugin = $prose(() => {
         }
         return null;
       }
-      if (hasHistoryChange) {
+      if (hasUndoHistoryChange) {
         const historyMetadataReconcileTr = buildHistorySuggestionMetadataReconciliationTransaction(
           oldState,
           newState,

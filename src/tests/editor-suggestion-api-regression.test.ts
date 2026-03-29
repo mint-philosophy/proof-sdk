@@ -322,7 +322,9 @@ function run(): void {
       && suggestionsAppendTransactionBlock.includes("if (metaType === 'SET_METADATA' && tr.getMeta('suggestions-wrapped')) return false;")
       && suggestionsAppendTransactionBlock.includes('const effectivelyDisabled = !isEnabled && !suggestionsModuleEnabled && !suggestionsDesiredEnabled;')
       && suggestionsAppendTransactionBlock.includes("const hasHistoryChange = trs.some((tr) => tr.getMeta('history$') !== undefined);")
+      && suggestionsAppendTransactionBlock.includes('const hasUndoHistoryChange = trs.some((tr) => isUndoHistoryTransaction(tr));')
       && suggestionsAppendTransactionBlock.includes("console.log('[suggestions.appendTransaction.historyRestoreEnable]', {")
+      && suggestionsSource.includes('export function isUndoHistoryTransaction(tr: Transaction): boolean {')
       && suggestionsSource.includes('function buildHistorySuggestionMetadataReconciliationTransaction(')
       && suggestionsSource.includes("console.log('[suggestions.appendTransaction.historyMetadataReconcile]', {")
       && suggestionsAppendTransactionBlock.includes('suggestionsModuleEnabled = true;')
@@ -336,7 +338,7 @@ function run(): void {
       && suggestionsAppendTransactionBlock.includes('const splitMergeTr = buildAdjacentSplitInsertMergeTransaction(oldState, newState);')
       && suggestionsAppendTransactionBlock.includes('if (hasWrappedSuggestionTransaction || hasRemoteSuggestionInsert) {')
       && suggestionsAppendTransactionBlock.includes('if (hasNativeTypedInputPassthrough) {')
-      && suggestionsAppendTransactionBlock.includes('if (hasHistoryChange) {')
+      && suggestionsAppendTransactionBlock.includes('if (hasUndoHistoryChange) {')
       && suggestionsAppendTransactionBlock.includes('|| isExplicitYjsChangeOriginTransaction(tr)')
       && !suggestionsAppendTransactionBlock.includes("|| tr.getMeta(marksPluginKey) !== undefined"),
     'Expected suggestions appendTransaction to ignore authored-tracker INTERNAL mark transactions, reconcile stale suggestion metadata after history undo, convert matched native typed-input passthroughs into immediate mark-only wrap transactions, still allow split-insert healing after wrapped local typing, and skip explicit Yjs change-origin echoes plus raw y-sync transactions that already carry incoming suggestion marks',
@@ -346,6 +348,7 @@ function run(): void {
   assert(
     editorSource.includes('consumePendingNativeTextInputTransactionMatch,')
       && editorSource.includes('buildTextPreservingInsertPersistenceTransaction,')
+      && editorSource.includes('isUndoHistoryTransaction,')
       && setupSuggestionsInterceptorBlock.includes('const nativeTextInputMatch = consumePendingNativeTextInputTransactionMatch(beforeState, tr);')
       && setupSuggestionsInterceptorBlock.includes('if (nativeTextInputMatch) {')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.passthroughNativeTextInput]', {")
@@ -408,6 +411,7 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes("dispatchWithRevision(tr, 'systemTrackChangesSuppressedPassthrough');")
       && setupSuggestionsInterceptorBlock.includes('if (Boolean(tr?.docChanged) && shouldSuppressHandledTextInputEcho(beforeState, tr)) {')
+      && setupSuggestionsInterceptorBlock.includes('if (isUndoHistoryTransaction(tr)) {')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.suppressHandledTextInputEcho]', {"),
     'Expected the suggestions interceptor to pass through collab/template system transactions, treat recent raw Yjs plain-text self-echoes as remote for repair, honor the latched desired Track Changes state through share/collab resets, suppress immediate handled-input duplicate echoes, and now instrument the live dispatch/updateState runtime around the native typed-input lane',
   );

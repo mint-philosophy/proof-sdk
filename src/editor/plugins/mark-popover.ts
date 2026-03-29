@@ -1481,48 +1481,29 @@ class MarkPopoverController {
   private getLiveSuggestionActionTarget(
     fallbackMarkId?: string | null,
   ): SuggestionActionTarget | null {
-    let suggestions = this.getPendingSuggestionReviewItems();
+    const suggestions = this.getPendingSuggestionReviewItems();
     const stateActiveMarkId = getActiveMarkId(this.view.state);
-    let preferredMarkIds: Array<string | null | undefined> = [
+    const preferredMarkIds: Array<string | null | undefined> = [
+      fallbackMarkId ?? null,
       stateActiveMarkId,
       this.activeMarkId,
-      fallbackMarkId ?? null,
     ];
-
-    let target = resolveSuggestionActionTarget(suggestions, preferredMarkIds);
-    if (!target && this.reopenFirstPendingSuggestion()) {
-      suggestions = this.getPendingSuggestionReviewItems();
-      const reboundMarkId = getActiveMarkId(this.view.state) ?? this.activeMarkId;
-      preferredMarkIds = [reboundMarkId];
-      target = resolveSuggestionActionTarget(suggestions, preferredMarkIds);
-    }
-
-    return target;
+    return resolveSuggestionActionTarget(suggestions, preferredMarkIds);
   }
 
   private getLiveAdjacentSuggestionTarget(
     direction: 'next' | 'prev',
     fallbackMarkId?: string | null,
   ): SuggestionActionTarget | null {
-    let suggestions = this.getPendingSuggestionReviewItems();
-    let target = resolveAdjacentSuggestionActionTarget(
-      suggestions,
+    return resolveAdjacentSuggestionActionTarget(
+      this.getPendingSuggestionReviewItems(),
       [
+        fallbackMarkId ?? null,
         getActiveMarkId(this.view.state),
         this.activeMarkId,
-        fallbackMarkId ?? null,
       ],
       direction,
     );
-    if (!target && this.reopenFirstPendingSuggestion()) {
-      suggestions = this.getPendingSuggestionReviewItems();
-      target = resolveAdjacentSuggestionActionTarget(
-        suggestions,
-        [getActiveMarkId(this.view.state) ?? this.activeMarkId],
-        direction,
-      );
-    }
-    return target;
   }
 
   private getSortedPendingReviewActionIds(markIds: string[]): string[] {

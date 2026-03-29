@@ -23,12 +23,12 @@ function run(): void {
       && source.includes('export function resolveSuggestionActionTarget(')
       && source.includes('export function resolveAdjacentSuggestionActionTarget(')
       && source.includes('const stateActiveMarkId = getActiveMarkId(this.view.state);')
-      && source.includes('let suggestions = this.getPendingSuggestionReviewItems();')
-      && source.includes('let preferredMarkIds: Array<string | null | undefined> = [')
+      && source.includes('const suggestions = this.getPendingSuggestionReviewItems();')
+      && source.includes('const preferredMarkIds: Array<string | null | undefined> = [')
+      && source.includes('fallbackMarkId ?? null,')
       && source.includes('stateActiveMarkId,')
       && source.includes('this.activeMarkId,')
-      && source.includes('fallbackMarkId ?? null,')
-      && source.includes('let target = resolveSuggestionActionTarget(suggestions, preferredMarkIds);')
+      && source.includes('return resolveSuggestionActionTarget(suggestions, preferredMarkIds);')
       && source.includes("const getActiveSuggestionActionTarget = (): {")
       && source.includes('} | null => this.getLiveSuggestionActionTarget(mark.id);')
       && source.includes("const getPreviousSuggestionNavigationTarget = (): {")
@@ -45,7 +45,8 @@ function run(): void {
       && source.includes('const adjacentMarkId = getAdjacentSuggestionReviewMarkId(suggestions, currentTarget.markId, direction);')
       && source.includes('const adjacentReviewItem = suggestions.find((item) => item.memberMarkIds.includes(adjacentMarkId)) ?? null;')
       && source.includes("kind: adjacentReviewItem.kind,")
-      && !source.includes('const adjacentTarget = this.getLiveSuggestionActionTarget(adjacentMarkId);'),
+      && source.includes('return resolveAdjacentSuggestionActionTarget(')
+      && !source.includes('if (!target && this.reopenFirstPendingSuggestion()) {'),
     'Expected suggestion navigation to resolve the live adjacent review target from the current active suggestion instead of relying on stale render-time previous/next ids',
   );
 
@@ -73,8 +74,7 @@ function run(): void {
     source.includes('if (this.reopenFirstPendingSuggestion({')
       && source.includes('preserveReviewTransition: this.suggestionReviewTransitionPending,')
       && source.includes('if (this.suggestionReviewTransitionPending) {')
-      && source.includes('if (!target && this.reopenFirstPendingSuggestion()) {')
-      && source.includes('const reboundMarkId = getActiveMarkId(this.view.state) ?? this.activeMarkId;'),
+      && !source.includes('const reboundMarkId = getActiveMarkId(this.view.state) ?? this.activeMarkId;'),
     'Expected stale suggestion popovers to rebind to the first remaining pending suggestion after collab reseeds, and to keep the review transition alive instead of closing during transient mixed-mark gaps',
   );
 

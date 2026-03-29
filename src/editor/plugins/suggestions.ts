@@ -2131,6 +2131,23 @@ export function __debugBuildTextPreservingInsertPersistenceTransaction(
   return buildTextPreservingInsertPersistenceTransaction(oldState, newState);
 }
 
+function shouldRunTextPreservingInsertPersistenceFallback(
+  trs: readonly Transaction[],
+  options?: { hasRemoteSuggestionInsert?: boolean },
+): boolean {
+  const hasWrappedSuggestionTransaction = trs.some((tr) => tr.getMeta('suggestions-wrapped'));
+  if (hasWrappedSuggestionTransaction) return false;
+  if (options?.hasRemoteSuggestionInsert) return false;
+  return true;
+}
+
+export function __debugShouldRunTextPreservingInsertPersistenceFallback(
+  trs: readonly Transaction[],
+  options?: { hasRemoteSuggestionInsert?: boolean },
+): boolean {
+  return shouldRunTextPreservingInsertPersistenceFallback(trs, options);
+}
+
 export function __debugBuildAdjacentSplitInsertMergeTransaction(
   oldState: EditorState,
   newState: EditorState,
@@ -2308,12 +2325,40 @@ export function __debugResolveTrackedDeleteRange(
   state: EditorState,
   key: 'Backspace' | 'Delete',
   modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean },
+  selectionOverride?: MarkRange | null,
 ): MarkRange | null {
+  const finish = (reason: string, range: MarkRange | null): MarkRange | null => {
+    console.log('[suggestions.resolveTrackedDeleteRange]', {
+      key,
+      modifiers: modifiers ?? null,
+      selectionOverride,
+      stateSelection: {
+        from: state.selection.from,
+        to: state.selection.to,
+        empty: state.selection.empty,
+      },
+      reason,
+      range,
+      rangeText: range ? state.doc.textBetween(range.from, range.to, '', '') : '',
+    });
+    return range;
+  };
+
+  const overriddenSelection = selectionOverride && selectionOverride.to > selectionOverride.from
+    ? {
+        from: Math.min(selectionOverride.from, selectionOverride.to),
+        to: Math.max(selectionOverride.from, selectionOverride.to),
+      }
+    : null;
+  if (overriddenSelection) {
+    return finish('selection-override', overriddenSelection);
+  }
+
   const selection = state.selection;
   if (!selection.empty) {
     const from = Math.min(selection.from, selection.to);
     const to = Math.max(selection.from, selection.to);
-    return to > from ? { from, to } : null;
+    return finish('state-selection', to > from ? { from, to } : null);
   }
 
   const cursor = selection.from;
@@ -2321,27 +2366,105 @@ export function __debugResolveTrackedDeleteRange(
 
   if (key === 'Backspace') {
     if (modifiers?.metaKey && textblock) {
-      return cursor > textblock.from ? { from: textblock.from, to: cursor } : null;
+      return finish('backspace-line', cursor > textblock.from ? { from: textblock.from, to: cursor } : null);
     }
     if ((modifiers?.altKey || modifiers?.ctrlKey) && textblock) {
       const prefix = state.doc.textBetween(textblock.from, cursor, '', '');
       const startOffset = resolveBackwardWordOffset(prefix);
       const from = textblock.from + startOffset;
-      return cursor > from ? { from, to: cursor } : null;
+      return finish('backspace-word', cursor > from ? { from, to: cursor } : null);
     }
-    return cursor > 0 ? { from: cursor - 1, to: cursor } : null;
+    return finish('backspace-char', cursor > 0 ? { from: cursor - 1, to: cursor } : null);
   }
 
   if (modifiers?.metaKey && textblock) {
-    return cursor < textblock.to ? { from: cursor, to: textblock.to } : null;
+    return finish('delete-line', cursor < textblock.to ? { from: cursor, to: textblock.to } : null);
   }
   if ((modifiers?.altKey || modifiers?.ctrlKey) && textblock) {
     const suffix = state.doc.textBetween(cursor, textblock.to, '', '');
     const endOffset = resolveForwardWordOffset(suffix);
     const to = cursor + endOffset;
-    return to > cursor ? { from: cursor, to } : null;
+    return finish('delete-word', to > cursor ? { from: cursor, to } : null);
   }
-  return cursor < state.doc.content.size ? { from: cursor, to: cursor + 1 } : null;
+  return finish('delete-char', cursor < state.doc.content.size ? { from: cursor, to: cursor + 1 } : null);
+}
+
+function getLiveDomSelectionRange(view: EditorView): MarkRange | null {
+  const ownerDocument = view.dom.ownerDocument;
+  const selection = ownerDocument?.getSelection?.()
+    ?? (typeof document !== 'undefined' ? document.getSelection() : null);
+  const selectionText = selection?.toString() ?? '';
+  if (!selection || selection.rangeCount === 0) {
+    console.log('[suggestions.getLiveDomSelectionRange.none]', {
+      hasSelection: Boolean(selection),
+      rangeCount: selection?.rangeCount ?? 0,
+      selectionText,
+    });
+    return null;
+  }
+
+  const range = selection.getRangeAt(0);
+  const elementNodeType = ownerDocument?.defaultView?.Node?.ELEMENT_NODE ?? 1;
+  const getElement = (node: Node | null): Element | null => {
+    if (!node) return null;
+    return node.nodeType === elementNodeType ? node as Element : node.parentElement;
+  };
+
+  const startElement = getElement(range.startContainer);
+  const endElement = getElement(range.endContainer);
+  if (!startElement || !endElement) {
+    console.log('[suggestions.getLiveDomSelectionRange.no-elements]', {
+      selectionText,
+      startNodeName: range.startContainer?.nodeName ?? null,
+      endNodeName: range.endContainer?.nodeName ?? null,
+    });
+    return null;
+  }
+  if (!view.dom.contains(startElement) || !view.dom.contains(endElement)) {
+    console.log('[suggestions.getLiveDomSelectionRange.outside-view]', {
+      selectionText,
+      startTag: startElement.tagName,
+      endTag: endElement.tagName,
+    });
+    return null;
+  }
+
+  try {
+    const startPos = view.posAtDOM(range.startContainer, range.startOffset);
+    const endPos = view.posAtDOM(range.endContainer, range.endOffset);
+    const from = Math.min(startPos, endPos);
+    const to = Math.max(startPos, endPos);
+    const resolved = from < to ? { from, to } : null;
+    console.log('[suggestions.getLiveDomSelectionRange.result]', {
+      selectionText,
+      startPos,
+      endPos,
+      from,
+      to,
+      resolved,
+      resolvedText: resolved ? view.state.doc.textBetween(resolved.from, resolved.to, '', '') : '',
+      stateSelection: {
+        from: view.state.selection.from,
+        to: view.state.selection.to,
+        empty: view.state.selection.empty,
+      },
+    });
+    return resolved;
+  } catch (error) {
+    console.log('[suggestions.getLiveDomSelectionRange.error]', {
+      selectionText,
+      startNodeName: range.startContainer?.nodeName ?? null,
+      startOffset: range.startOffset,
+      endNodeName: range.endContainer?.nodeName ?? null,
+      endOffset: range.endOffset,
+      error: error instanceof Error ? {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+      } : String(error),
+    });
+    return null;
+  }
 }
 
 /**
@@ -3433,13 +3556,15 @@ export const suggestionsPlugin = $prose(() => {
         return null;
       }
 
-      const persistenceFallbackTr = buildTextPreservingInsertPersistenceTransaction(oldState, newState);
-      if (persistenceFallbackTr) {
-        console.log('[suggestions.appendTransactionPersistenceFallback]', {
-          from: persistenceFallbackTr.selection.from,
-          to: persistenceFallbackTr.selection.to,
-        });
-        return persistenceFallbackTr;
+      if (shouldRunTextPreservingInsertPersistenceFallback(trs, { hasRemoteSuggestionInsert })) {
+        const persistenceFallbackTr = buildTextPreservingInsertPersistenceTransaction(oldState, newState);
+        if (persistenceFallbackTr) {
+          console.log('[suggestions.appendTransactionPersistenceFallback]', {
+            from: persistenceFallbackTr.selection.from,
+            to: persistenceFallbackTr.selection.to,
+          });
+          return persistenceFallbackTr;
+        }
       }
 
       const splitMergeTr = buildAdjacentSplitInsertMergeTransaction(oldState, newState);
@@ -3531,11 +3656,45 @@ export const suggestionsPlugin = $prose(() => {
             return true;
           }
 
-          const range = __debugResolveTrackedDeleteRange(view.state, intent.key, intent.modifiers);
-          if (!range || range.to <= range.from) return false;
+          const domSelectionRange = getLiveDomSelectionRange(view);
+          console.log('[suggestions.beforeinput.delete]', {
+            inputType: inputEvent.inputType ?? null,
+            pendingIntent: pendingIntent?.intent ?? null,
+            intent,
+            domSelectionText: view.dom.ownerDocument?.getSelection?.()?.toString() ?? '',
+            domSelectionRange,
+            stateSelection: {
+              from: view.state.selection.from,
+              to: view.state.selection.to,
+              empty: view.state.selection.empty,
+            },
+          });
+          const range = __debugResolveTrackedDeleteRange(
+            view.state,
+            intent.key,
+            intent.modifiers,
+            domSelectionRange,
+          );
+          if (!range || range.to <= range.from) {
+            console.log('[suggestions.beforeinput.delete.no-range]', {
+              inputType: inputEvent.inputType ?? null,
+              intent,
+              domSelectionRange,
+            });
+            return false;
+          }
 
           event.preventDefault();
-          view.dispatch(view.state.tr.delete(range.from, range.to));
+          const deleteTr = view.state.tr.delete(range.from, range.to);
+          if (domSelectionRange && domSelectionRange.from < domSelectionRange.to) {
+            deleteTr.setMeta('proof-dom-selection-range', domSelectionRange);
+          }
+          console.log('[suggestions.beforeinput.delete.dispatch]', {
+            range,
+            rangeText: view.state.doc.textBetween(range.from, range.to, '', ''),
+            carriesDomSelectionMeta: Boolean(domSelectionRange && domSelectionRange.from < domSelectionRange.to),
+          });
+          view.dispatch(deleteTr);
           return true;
         },
       },
@@ -3570,6 +3729,27 @@ export const suggestionsPlugin = $prose(() => {
             from: view.state.selection.from,
             defaultPrevented: event.defaultPrevented,
             composing: event.isComposing || view.composing,
+          });
+        }
+
+        if (event.key === 'Backspace' || event.key === 'Delete') {
+          console.log('[suggestions.handleKeyDown.delete]', {
+            key: event.key,
+            enabled: isSuggestionsEnabled(view.state),
+            defaultPrevented: event.defaultPrevented,
+            composing: event.isComposing || view.composing,
+            modifiers: {
+              altKey: event.altKey,
+              ctrlKey: event.ctrlKey,
+              metaKey: event.metaKey,
+              shiftKey: event.shiftKey,
+            },
+            domSelectionText: view.dom.ownerDocument?.getSelection?.()?.toString() ?? '',
+            stateSelection: {
+              from: view.state.selection.from,
+              to: view.state.selection.to,
+              empty: view.state.selection.empty,
+            },
           });
         }
 
@@ -3619,6 +3799,10 @@ export const suggestionsPlugin = $prose(() => {
 
         if (event.key !== 'Backspace' && event.key !== 'Delete') return false;
         if (shouldSuppressTrackChangesKeydown(event)) {
+          console.log('[suggestions.handleKeyDown.delete.suppressed]', {
+            key: event.key,
+            reason: 'guarded-modifier-delete',
+          });
           rememberModifiedDeleteIntent(view, event, { handled: true });
           event.preventDefault();
           event.stopPropagation();
@@ -3630,11 +3814,23 @@ export const suggestionsPlugin = $prose(() => {
             metaKey: event.metaKey,
             ctrlKey: event.ctrlKey,
           });
-          if (!range || range.to <= range.from) return false;
+          if (!range || range.to <= range.from) {
+            console.log('[suggestions.handleKeyDown.delete.no-range]', {
+              key: event.key,
+              branch: 'modified',
+            });
+            return false;
+          }
 
           rememberModifiedDeleteIntent(view, event, { handled: true });
           event.preventDefault();
           event.stopPropagation();
+          console.log('[suggestions.handleKeyDown.delete.dispatch]', {
+            key: event.key,
+            branch: 'modified',
+            range,
+            rangeText: view.state.doc.textBetween(range.from, range.to, '', ''),
+          });
           view.dispatch(view.state.tr.delete(range.from, range.to));
           return true;
         }
@@ -3645,9 +3841,21 @@ export const suggestionsPlugin = $prose(() => {
           metaKey: event.metaKey,
           ctrlKey: event.ctrlKey,
         });
-        if (!range || range.to <= range.from) return false;
+        if (!range || range.to <= range.from) {
+          console.log('[suggestions.handleKeyDown.delete.no-range]', {
+            key: event.key,
+            branch: 'plain',
+          });
+          return false;
+        }
 
         event.preventDefault();
+        console.log('[suggestions.handleKeyDown.delete.dispatch]', {
+          key: event.key,
+          branch: 'plain',
+          range,
+          rangeText: view.state.doc.textBetween(range.from, range.to, '', ''),
+        });
         view.dispatch(view.state.tr.delete(range.from, range.to));
         return true;
       },

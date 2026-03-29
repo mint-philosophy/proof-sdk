@@ -1538,6 +1538,7 @@ class ProofEditorImpl implements ProofEditor {
 
     const view = this.editor.ctx.get(editorViewCtx);
     (window as any).__editorView = view;
+    (window as any).__proofView = view;
     view.dom.dataset.trackChangesView = 'simple';
     this.updateEditableState(view);
     this.cleanupNavigation = initAgentNavigation(view);

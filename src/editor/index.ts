@@ -1284,11 +1284,13 @@ class ProofEditorImpl implements ProofEditor {
   private collabHydrationAttemptSeq: number = 0;
   private collabHydrationRunning: boolean = false;
   private hasCompletedInitialCollabHydration: boolean = false;
+  private collabHydrationSatisfiedByPreservedState: boolean = false;
   private hasLocalContentEditSinceHydration: boolean = false;
   private lastContentChangeSource: 'local' | 'remote' | 'system' | null = null;
   private pendingProjectionPublish: boolean = false;
   private initialMarksSynced: boolean = false;
   private lastReceivedServerMarks: Record<string, StoredMark> = {};
+  private lastAuthoritativeServerMarks: Record<string, StoredMark> = {};
   private pendingHydrationMarks: Record<string, StoredMark> | null = null;
   private shareReviewMutationQueue: Promise<void> = Promise.resolve();
   private shareReviewMutationDepth: number = 0;
@@ -1749,6 +1751,7 @@ class ProofEditorImpl implements ProofEditor {
         this.resetProjectionPublishState();
         if (Object.keys(initialMarks).length > 0) {
           this.lastReceivedServerMarks = initialMarks;
+          this.replaceAuthoritativeServerMarks(initialMarks);
           this.initialMarksSynced = true;
           this.pendingHydrationMarks = { ...initialMarks };
         }
@@ -1804,6 +1807,7 @@ class ProofEditorImpl implements ProofEditor {
           }, traceMarkId && Object.prototype.hasOwnProperty.call(mergedIncomingMarks, traceMarkId) ? 'warn' : 'info');
 
           this.lastReceivedServerMarks = { ...mergedIncomingMarks };
+          this.replaceAuthoritativeServerMarks(incomingMarks);
           this.initialMarksSynced = true;
           if (!this.isEditorDocStructurallyEmpty()) {
             this.applyLatestCollabMarksToEditor();
@@ -1910,6 +1914,7 @@ class ProofEditorImpl implements ProofEditor {
             ? { ...(doc.marks as Record<string, StoredMark>) }
             : {};
           this.lastReceivedServerMarks = initialMarks;
+          this.replaceAuthoritativeServerMarks(initialMarks);
           this.initialMarksSynced = true;
         }
         this.showErrorBanner('Live collaboration is currently unavailable for this shared document.');
@@ -2147,7 +2152,27 @@ class ProofEditorImpl implements ProofEditor {
   private resetShareMarksSyncState(): void {
     this.initialMarksSynced = false;
     this.lastReceivedServerMarks = {};
+    this.lastAuthoritativeServerMarks = {};
     this.pendingHydrationMarks = null;
+  }
+
+  private replaceAuthoritativeServerMarks(marks: Record<string, StoredMark>): void {
+    this.lastAuthoritativeServerMarks = canonicalizeStoredMarks(marks);
+  }
+
+  private mergeAuthoritativeServerMarks(marks: Record<string, StoredMark>): void {
+    this.lastAuthoritativeServerMarks = canonicalizeStoredMarks({
+      ...this.lastAuthoritativeServerMarks,
+      ...marks,
+    });
+  }
+
+  private getAuthoritativeServerMarksForReview(): Record<string, StoredMark> {
+    const authoritativeMarks = canonicalizeStoredMarks(this.lastAuthoritativeServerMarks);
+    if (Object.keys(authoritativeMarks).length > 0) {
+      return authoritativeMarks;
+    }
+    return canonicalizeStoredMarks(this.lastReceivedServerMarks);
   }
 
   private getActiveShareReviewTraceContext(): typeof this.shareReviewTraceContext {
@@ -2906,6 +2931,7 @@ class ProofEditorImpl implements ProofEditor {
       if (!this.shouldAllowCollabTemplateSeed(refreshed.session)) {
         reconnectTemplate = null;
       }
+      const canUseSoftRefresh = shouldPreserveLocalState && !collabClient.requiresHardReconnect(refreshed.session);
       this.traceShareReview('collab.refresh.ready', {
         preserveLocalState,
         forcePreserveEditorState,
@@ -2913,15 +2939,32 @@ class ProofEditorImpl implements ProofEditor {
         nextAccessEpoch: refreshed.session.accessEpoch ?? null,
         reconnectTemplate: this.summarizeTraceMarkdown(reconnectTemplate),
         shouldPreserveLocalState,
+        canUseSoftRefresh,
       });
-      this.pendingCollabRebindOnSync = true;
-      this.pendingCollabRebindResetDoc = !shouldPreserveLocalState || !this.collabCanEdit;
-      this.resetProjectionPublishState();
+      if (canUseSoftRefresh) {
+        this.pendingCollabRebindOnSync = false;
+        this.pendingCollabRebindResetDoc = false;
+        this.resetPendingCollabTemplateState(true);
+        this.collabHydrationSatisfiedByPreservedState = this.collabCanEdit;
+        if (this.collabHydrationSatisfiedByPreservedState) {
+          this.markInitialCollabHydrationComplete();
+        }
+      } else {
+        this.pendingCollabRebindOnSync = true;
+        this.pendingCollabRebindResetDoc = !shouldPreserveLocalState || !this.collabCanEdit;
+        this.resetProjectionPublishState();
+        this.collabHydrationSatisfiedByPreservedState = shouldPreserveLocalState && this.collabCanEdit;
+        if (this.collabHydrationSatisfiedByPreservedState) {
+          this.markInitialCollabHydrationComplete();
+        }
+      }
       collabClient.reconnectWithSession(refreshed.session, { preserveLocalState: shouldPreserveLocalState });
-      this.resetPendingCollabTemplateState(false);
-      this.pendingCollabTemplateMarkdown = this.shouldAllowCollabTemplateSeed(refreshed.session)
-        ? reconnectTemplate
-        : null;
+      if (!canUseSoftRefresh) {
+        this.resetPendingCollabTemplateState(false);
+        this.pendingCollabTemplateMarkdown = this.shouldAllowCollabTemplateSeed(refreshed.session)
+          ? reconnectTemplate
+          : null;
+      }
       this.updateShareEditGate();
       if (canEditBefore !== this.collabCanEdit) {
         this.updateShareEditGate();
@@ -2983,7 +3026,8 @@ class ProofEditorImpl implements ProofEditor {
       && !this.suppressTrackChangesDuringCollabReconnect;
     const hydrated = !baseAllowLocalEdits
       ? true
-      : this.hasCompletedInitialCollabHydration && this.isCollabHydratedForEditing();
+      : this.hasCompletedInitialCollabHydration
+        && (this.collabHydrationSatisfiedByPreservedState || this.isCollabHydratedForEditing());
     if (baseAllowLocalEdits && !hydrated) {
       // Prevent "type into blank doc" races that can overwrite remote Yjs state.
       this.kickCollabHydration();
@@ -5295,6 +5339,7 @@ class ProofEditorImpl implements ProofEditor {
 
   private applyAuthoritativeShareMarks(serverMarks: Record<string, StoredMark>): void {
     this.lastReceivedServerMarks = { ...serverMarks };
+    this.replaceAuthoritativeServerMarks(serverMarks);
     this.initialMarksSynced = true;
     if (!this.editor || this.isEditorDocStructurallyEmpty()) return;
 
@@ -5407,6 +5452,7 @@ class ProofEditorImpl implements ProofEditor {
 
     // Update lastReceivedServerMarks with the rehydrated marks
     this.lastReceivedServerMarks = { ...this.lastReceivedServerMarks, ...serverMarks };
+    this.mergeAuthoritativeServerMarks(serverMarks);
 
     this.suppressTrackChangesDuringCollabReconnect = false;
     this.updateShareEditGate();
@@ -5432,6 +5478,7 @@ class ProofEditorImpl implements ProofEditor {
 
   private resetProjectionPublishState(): void {
     this.hasCompletedInitialCollabHydration = !this.isShareMode || !this.collabEnabled;
+    this.collabHydrationSatisfiedByPreservedState = false;
     this.hasLocalContentEditSinceHydration = false;
     this.lastContentChangeSource = null;
     this.pendingProjectionPublish = false;
@@ -8746,6 +8793,7 @@ class ProofEditorImpl implements ProofEditor {
               : null;
             if (!serverMarks) return;
             this.lastReceivedServerMarks = mergePendingServerMarks(this.lastReceivedServerMarks, serverMarks);
+            this.mergeAuthoritativeServerMarks(serverMarks);
             this.initialMarksSynced = true;
             if (this.editor) {
               this.editor.action((innerCtx) => {
@@ -8796,6 +8844,7 @@ class ProofEditorImpl implements ProofEditor {
             : null;
           if (!serverMarks) return;
           this.lastReceivedServerMarks = mergePendingServerMarks(this.lastReceivedServerMarks, serverMarks);
+          this.mergeAuthoritativeServerMarks(serverMarks);
           this.initialMarksSynced = true;
           if (this.editor) {
             this.editor.action((innerCtx) => {
@@ -9942,6 +9991,7 @@ class ProofEditorImpl implements ProofEditor {
    */
   private loadCanonicalShareDocument(markdown: string, marks: Record<string, StoredMark>): void {
     this.lastReceivedServerMarks = { ...marks };
+    this.replaceAuthoritativeServerMarks(marks);
     this.initialMarksSynced = true;
     this.loadDocument(embedMarks(markdown, marks), {
       allowShareContentMutation: true,
@@ -10215,7 +10265,7 @@ class ProofEditorImpl implements ProofEditor {
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
       const serializer = ctx.get(serializerCtx);
-      const persistedMetadata = this.buildAuthoritativeShareReviewSnapshotMarks(view);
+      const persistedMetadata = this.buildPersistableShareReviewSnapshotMarks(view);
       const markdown = this.normalizeMarkdownForRuntime(serializer(view.state.doc));
       const pendingIds = Object.entries(persistedMetadata)
         .filter(([, mark]) => {
@@ -10233,12 +10283,12 @@ class ProofEditorImpl implements ProofEditor {
     return snapshot;
   }
 
-  private buildAuthoritativeShareReviewSnapshotMarks(
+  private buildPersistableShareReviewSnapshotMarks(
     view: import('@milkdown/kit/prose/view').EditorView,
   ): Record<string, StoredMark> {
     const localMetadata = getMarkMetadataWithQuotes(view.state);
     const localCanonical = buildCanonicalShareMarkMetadata(view.state, localMetadata);
-    const authoritativeServerMarks = canonicalizeStoredMarks(this.lastReceivedServerMarks);
+    const authoritativeServerMarks = this.getAuthoritativeServerMarksForReview();
     if (Object.keys(authoritativeServerMarks).length === 0) {
       return localCanonical;
     }
@@ -10246,6 +10296,17 @@ class ProofEditorImpl implements ProofEditor {
       ...localCanonical,
       ...authoritativeServerMarks,
     });
+  }
+
+  private buildAuthoritativeShareReviewMutationMarks(
+    view: import('@milkdown/kit/prose/view').EditorView,
+  ): Record<string, StoredMark> {
+    const authoritativeServerMarks = this.getAuthoritativeServerMarksForReview();
+    if (Object.keys(authoritativeServerMarks).length > 0) {
+      return authoritativeServerMarks;
+    }
+    const localMetadata = getMarkMetadataWithQuotes(view.state);
+    return buildCanonicalShareMarkMetadata(view.state, localMetadata);
   }
 
   private storedMarksContainPendingIds(marks: Record<string, unknown> | null | undefined, expectedIds: string[]): boolean {
@@ -10274,6 +10335,7 @@ class ProofEditorImpl implements ProofEditor {
           this.lastReceivedServerMarks = serverMarks
             ? { ...(serverMarks as Record<string, StoredMark>) }
             : {};
+          this.replaceAuthoritativeServerMarks(this.lastReceivedServerMarks);
           this.initialMarksSynced = true;
           return true;
         }
@@ -10378,6 +10440,7 @@ class ProofEditorImpl implements ProofEditor {
           : null;
         if (!serverMarks) return;
         this.lastReceivedServerMarks = { ...serverMarks };
+        this.replaceAuthoritativeServerMarks(serverMarks);
         this.initialMarksSynced = true;
         if (this.editor) {
           this.editor.action((innerCtx) => {
@@ -10413,6 +10476,7 @@ class ProofEditorImpl implements ProofEditor {
             : null;
           if (!serverMarks) return;
           this.lastReceivedServerMarks = { ...serverMarks };
+          this.replaceAuthoritativeServerMarks(serverMarks);
           this.initialMarksSynced = true;
           if (this.editor) {
             this.editor.action((innerCtx) => {
@@ -10451,7 +10515,7 @@ class ProofEditorImpl implements ProofEditor {
       const actor = getCurrentActor();
       const snapshot = this.buildShareBatchSuggestionSnapshot();
       const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);
-      const resolvedSourceMark = this.lastReceivedServerMarks[effectiveMarkId] ?? sourceMark;
+      const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;
       const pendingCountBefore = this.hasActiveRemoteCollabPeer()
         ? null
         : this.getLocalPendingShareReviewMarkCount();
@@ -10574,6 +10638,7 @@ class ProofEditorImpl implements ProofEditor {
             : null;
           if (!serverMarks) return;
           this.lastReceivedServerMarks = { ...serverMarks };
+          this.replaceAuthoritativeServerMarks(serverMarks);
           this.initialMarksSynced = true;
           if (this.editor) {
             this.editor.action((innerCtx) => {
@@ -10609,7 +10674,7 @@ class ProofEditorImpl implements ProofEditor {
       const actor = getCurrentActor();
       const snapshot = this.buildShareBatchSuggestionSnapshot();
       const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);
-      const resolvedSourceMark = this.lastReceivedServerMarks[effectiveMarkId] ?? sourceMark;
+      const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;
       this.beginShareReviewTrace('reject', markId);
       const result = await shareClient.rejectSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);
       if (!result || 'error' in result || result.success !== true) {
@@ -10706,7 +10771,7 @@ class ProofEditorImpl implements ProofEditor {
   }
 
   private getAuthoritativePendingSuggestionIdsForShareReview(): string[] {
-    const authoritativeIds = this.getSortedPendingSuggestionIdsFromStoredMarks(this.lastReceivedServerMarks);
+    const authoritativeIds = this.getSortedPendingSuggestionIdsFromStoredMarks(this.getAuthoritativeServerMarksForReview());
     if (authoritativeIds.length > 0) return authoritativeIds;
     return this.getSortedPendingSuggestionIdsForShareReview();
   }
@@ -10783,13 +10848,14 @@ class ProofEditorImpl implements ProofEditor {
   }
 
   private resolveAuthoritativeShareReviewMarkId(markId: string, sourceMark: StoredMark | null): string {
-    const authoritativeMark = this.lastReceivedServerMarks[markId];
+    const authoritativeServerMarks = this.getAuthoritativeServerMarksForReview();
+    const authoritativeMark = authoritativeServerMarks[markId];
     if (authoritativeMark?.status === 'pending') return markId;
     if (!sourceMark) return markId;
 
     let bestCandidateId: string | null = null;
     let bestScore = Number.NEGATIVE_INFINITY;
-    for (const [candidateId, candidateMark] of Object.entries(this.lastReceivedServerMarks)) {
+    for (const [candidateId, candidateMark] of Object.entries(authoritativeServerMarks)) {
       const score = this.scoreEquivalentShareReviewMark(sourceMark, candidateMark);
       if (score > bestScore) {
         bestScore = score;
@@ -10802,7 +10868,6 @@ class ProofEditorImpl implements ProofEditor {
   }
 
   private resolveShareReviewMutationRequestMarkId(markId: string, sourceMark: StoredMark | null): string {
-    if (sourceMark?.status === 'pending') return markId;
     return this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);
   }
 
@@ -10932,7 +10997,7 @@ class ProofEditorImpl implements ProofEditor {
       const serialized = this.serializeMarkdown(view);
       if (!serialized) return;
       const markdown = this.normalizeMarkdownForCollab(serialized);
-      const metadata = this.buildAuthoritativeShareReviewSnapshotMarks(view);
+      const metadata = this.buildAuthoritativeShareReviewMutationMarks(view);
       snapshot = {
         markdown,
         marks: metadata as Record<string, unknown>,

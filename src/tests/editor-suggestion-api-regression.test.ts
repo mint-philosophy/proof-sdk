@@ -79,9 +79,10 @@ function run(): void {
   assert(
     sortedServerPendingIdsBlock.includes('private getCurrentShareReviewStoredMark(markId: string): StoredMark | null {')
       && sortedServerPendingIdsBlock.includes('private getAuthoritativePendingSuggestionIdsForShareReview(): string[] {')
-      && sortedServerPendingIdsBlock.includes('private resolveAuthoritativeShareReviewMarkId(markId: string, sourceMark: StoredMark | null): string {')
-      && sortedServerPendingIdsBlock.includes('const authoritativeMark = this.lastReceivedServerMarks[markId];')
-      && sortedServerPendingIdsBlock.includes('const score = this.scoreEquivalentShareReviewMark(sourceMark, candidateMark);'),
+      && editorSource.includes('private getAuthoritativeServerMarksForReview(): Record<string, StoredMark> {')
+      && editorSource.includes('private resolveAuthoritativeShareReviewMarkId(markId: string, sourceMark: StoredMark | null): string {')
+      && editorSource.includes('const authoritativeMark = authoritativeServerMarks[markId];')
+      && editorSource.includes('const score = this.scoreEquivalentShareReviewMark(sourceMark, candidateMark);'),
     'Expected persisted share review actions to remap stale UI suggestion ids onto the latest authoritative pending marks before sending accept/reject mutations',
   );
   const buildShareBatchSuggestionSnapshotBlock = sliceBetween(
@@ -90,16 +91,23 @@ function run(): void {
     '\n  /**\n   * Accept all pending suggestions\n   */',
   );
   assert(
-    editorSource.includes('private buildAuthoritativeShareReviewSnapshotMarks(')
+    editorSource.includes('private buildPersistableShareReviewSnapshotMarks(')
+      && editorSource.includes('private buildAuthoritativeShareReviewMutationMarks(')
+      && editorSource.includes('private lastAuthoritativeServerMarks: Record<string, StoredMark> = {};')
+      && editorSource.includes('private replaceAuthoritativeServerMarks(marks: Record<string, StoredMark>): void {')
+      && editorSource.includes('private mergeAuthoritativeServerMarks(marks: Record<string, StoredMark>): void {')
+      && editorSource.includes('private getAuthoritativeServerMarksForReview(): Record<string, StoredMark> {')
       && editorSource.includes('const localCanonical = buildCanonicalShareMarkMetadata(view.state, localMetadata);')
-      && editorSource.includes('const authoritativeServerMarks = canonicalizeStoredMarks(this.lastReceivedServerMarks);')
+      && editorSource.includes('const authoritativeServerMarks = this.getAuthoritativeServerMarksForReview();')
       && editorSource.includes('return canonicalizeStoredMarks({')
       && editorSource.includes('...localCanonical,')
       && editorSource.includes('...authoritativeServerMarks,')
-      && buildShareBatchSuggestionSnapshotBlock.includes('const metadata = this.buildAuthoritativeShareReviewSnapshotMarks(view);')
+      && editorSource.includes('if (Object.keys(authoritativeServerMarks).length > 0) {')
+      && editorSource.includes('return authoritativeServerMarks;')
+      && buildShareBatchSuggestionSnapshotBlock.includes('const metadata = this.buildAuthoritativeShareReviewMutationMarks(view);')
       && buildShareBatchSuggestionSnapshotBlock.includes('marks: metadata as Record<string, unknown>,')
       && !buildShareBatchSuggestionSnapshotBlock.includes('buildCanonicalShareMarkMetadata(view.state, metadata)'),
-    'Expected persisted review mutation snapshots to reuse the authoritative server-backed mark metadata instead of rebuilding from raw local mark anchors that may have drifted after prior reloads',
+    'Expected persisted review mutation snapshots to send the authoritative server mark set when available, while keeping a separate persist snapshot builder that can still merge local and server marks for full pushUpdate recovery',
   );
   assert(
     flushShareReviewMutationStateBlock.includes('if (this.shareMarksFlushTimer !== null) {')
@@ -149,15 +157,16 @@ function run(): void {
   assert(
     markAcceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
       && editorSource.includes('private resolveShareReviewMutationRequestMarkId(markId: string, sourceMark: StoredMark | null): string {')
-      && editorSource.includes("if (sourceMark?.status === 'pending') return markId;")
+      && editorSource.includes('return this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);')
       && markAcceptPersistedBlock.includes('const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);')
       && markAcceptPersistedBlock.includes('const result = await shareClient.acceptSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);')
       && markAcceptPersistedBlock.includes('const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));')
       && markAcceptPersistedBlock.includes("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
       && editorSource.includes('private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {')
-      && markAcceptPersistedBlock.includes('const resolvedSourceMark = this.lastReceivedServerMarks[effectiveMarkId] ?? sourceMark;')
+      && editorSource.includes('this.replaceAuthoritativeServerMarks(incomingMarks);')
+      && markAcceptPersistedBlock.includes('const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;')
       && markAcceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally('),
-    'Expected persisted single-mark accept to keep the live local mark id when it is still pending, only remap stale UI ids onto the latest authoritative mark id when needed, tombstone the resolved ids, and verify that neither the original ids nor an equivalent pending suggestion survives locally before treating the share mutation as success',
+    'Expected persisted single-mark accept to resolve the request id against a dedicated authoritative server mark set, not the merged live mark cache, then tombstone the resolved ids and verify the accepted suggestion is actually gone locally',
   );
 
   const markRejectPersistedBlock = sliceBetween(editorSource, '  async markRejectPersisted(markId: string): Promise<boolean> {', '\n  private getSortedPendingSuggestionIdsForShareReview(): string[] {');
@@ -166,7 +175,7 @@ function run(): void {
       && markRejectPersistedBlock.includes('const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);')
       && markRejectPersistedBlock.includes('const result = await shareClient.rejectSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);')
       && markRejectPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });"),
-    'Expected persisted single-mark reject to keep the live local mark id when it is still pending and only remap stale UI ids before calling the share mutation route',
+    'Expected persisted single-mark reject to resolve the request id against the authoritative pending server marks before calling the share mutation route',
   );
 
   const handleMarksChangeBlock = sliceBetween(editorSource, '  private handleMarksChange(', '\n  private serializeMarkdown(');

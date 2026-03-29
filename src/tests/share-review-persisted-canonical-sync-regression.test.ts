@@ -83,10 +83,23 @@ function run(): void {
   assert(
     reconnectBlock.includes('const forcePreserveEditorState = this.preserveEditorStateOnNextCollabReconnect;')
       && reconnectBlock.includes('const shouldPreserveLocalState = forcePreserveEditorState')
+      && reconnectBlock.includes('const canUseSoftRefresh = shouldPreserveLocalState && !collabClient.requiresHardReconnect(refreshed.session);')
+      && reconnectBlock.includes('if (canUseSoftRefresh) {')
+      && reconnectBlock.includes('this.pendingCollabRebindOnSync = false;')
+      && reconnectBlock.includes('this.pendingCollabRebindResetDoc = false;')
+      && reconnectBlock.includes('this.resetPendingCollabTemplateState(true);')
+      && reconnectBlock.includes('this.collabHydrationSatisfiedByPreservedState = this.collabCanEdit;')
+      && reconnectBlock.includes('} else {')
+      && reconnectBlock.includes('this.resetProjectionPublishState();')
+      && reconnectBlock.includes('this.collabHydrationSatisfiedByPreservedState = shouldPreserveLocalState && this.collabCanEdit;')
+      && reconnectBlock.includes('if (this.collabHydrationSatisfiedByPreservedState) {')
+      && reconnectBlock.includes('this.markInitialCollabHydrationComplete();')
       && reconnectBlock.includes('if (this.skipNextCollabTemplateSeed) {')
       && reconnectBlock.includes('reconnectTemplate = null;')
-      && reconnectBlock.includes('this.skipNextCollabTemplateSeed = false;'),
-    'Expected collab reconnect to support preserving the current canonical editor state while skipping a redundant reconnect template replay',
+      && reconnectBlock.includes('this.skipNextCollabTemplateSeed = false;')
+      && reconnectBlock.includes('if (!canUseSoftRefresh) {')
+      && reconnectBlock.includes('this.pendingCollabTemplateMarkdown = this.shouldAllowCollabTemplateSeed(refreshed.session)'),
+    'Expected collab reconnect to treat access-epoch token refreshes as a soft same-room reconnect, skipping the full rebind/hydration path while still preserving canonical editor state on hard reconnects',
   );
 
   const refreshLoopBlock = sliceBetween(
@@ -128,9 +141,10 @@ function run(): void {
   assert(
     editGateBlock.includes('const collabReconnectStable = !this.pendingCollabRebindOnSync')
       && editGateBlock.includes('&& !this.suppressTrackChangesDuringCollabReconnect;')
-      && editGateBlock.includes('this.hasCompletedInitialCollabHydration && this.isCollabHydratedForEditing();')
+      && editGateBlock.includes('this.hasCompletedInitialCollabHydration')
+      && editGateBlock.includes('(this.collabHydrationSatisfiedByPreservedState || this.isCollabHydratedForEditing())')
       && editGateBlock.includes('const allowLocalEdits = baseAllowLocalEdits && collabReconnectStable && hydrated;'),
-    'Expected share edit gating to keep the editor locked until post-review collab reconnect and hydration are fully stable',
+    'Expected share edit gating to keep the editor locked until post-review collab reconnect is stable, while allowing preserved-state reconnects to bypass a redundant hydration wait once the room is synced again',
   );
 
   const remotePeerBlock = sliceBetween(
@@ -212,7 +226,7 @@ function run(): void {
   assert(
     acceptPersistedBlock.includes("const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);")
       && editorSource.includes('private resolveShareReviewMutationRequestMarkId(markId: string, sourceMark: StoredMark | null): string {')
-      && editorSource.includes("if (sourceMark?.status === 'pending') return markId;")
+      && editorSource.includes('return this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);')
       && editorSource.includes('private async ensureShareReviewMutationAppliedLocally(')
       && editorSource.includes('private getMissingPendingShareReviewMarkIds(expectedIds: string[]): string[] {')
       && editorSource.includes('private shouldAwaitShareReviewMutationSettle(): boolean {')
@@ -222,7 +236,7 @@ function run(): void {
       && acceptPersistedBlock.indexOf("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
         < acceptPersistedBlock.indexOf("let success = !shouldPreferCanonicalDeleteResult")
       && acceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
-      && acceptPersistedBlock.includes('const resolvedSourceMark = this.lastReceivedServerMarks[effectiveMarkId] ?? sourceMark;')
+      && acceptPersistedBlock.includes('const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;')
       && acceptPersistedBlock.includes("let success = !shouldPreferCanonicalDeleteResult")
       && acceptPersistedBlock.includes('success = await this.applyShareMutationDocumentResult(result);')
       && acceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(')
@@ -233,7 +247,7 @@ function run(): void {
       && editorSource.includes('const missingAuthoritativePendingIds = this.getMissingPendingShareReviewMarkIds(authoritativePendingIds);')
       && editorSource.includes('|| missingAuthoritativePendingIds.length > 0')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to preserve the current local pending mark id when it is still valid, remap only stale UI ids to the authoritative pending mark, tombstone both local and remote ids, verify that the accepted mark or any equivalent pending suggestion is actually gone locally, reconcile the mutation, and re-verify after any pending collab reconnect before treating the persisted accept as settled',
+    'Expected markAcceptPersisted to resolve the request id against the authoritative pending server marks, tombstone both local and remote ids, verify that the accepted mark or any equivalent pending suggestion is actually gone locally, reconcile the mutation, and re-verify after any pending collab reconnect before treating the persisted accept as settled',
   );
 
   const rejectPersistedBlock = sliceBetween(
@@ -248,7 +262,7 @@ function run(): void {
       && rejectPersistedBlock.indexOf("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
         < rejectPersistedBlock.indexOf("const success = (")
       && rejectPersistedBlock.includes('const preserveRejectResultAcrossReconnect = this.hasActiveRemoteCollabPeer();')
-      && rejectPersistedBlock.includes('const resolvedSourceMark = this.lastReceivedServerMarks[effectiveMarkId] ?? sourceMark;')
+      && rejectPersistedBlock.includes('const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;')
       && rejectPersistedBlock.includes("const success = (")
       && rejectPersistedBlock.includes("!shouldPreferCanonicalDeleteResult")
       && rejectPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(')

@@ -552,8 +552,7 @@ export class CollabClient {
     return this.activeSession.docId === session.docId
       && this.activeSession.slug === session.slug
       && this.activeSession.role === session.role
-      && this.activeSession.shareState === session.shareState
-      && this.activeSession.accessEpoch === session.accessEpoch;
+      && this.activeSession.shareState === session.shareState;
   }
 
   requiresHardReconnect(session: CollabSessionInfo): boolean {
@@ -754,6 +753,11 @@ export class CollabClient {
 
   reconnectWithSession(session: CollabSessionInfo, options?: { preserveLocalState?: boolean }): void {
     const preserveLocalState = options?.preserveLocalState !== false;
+    if (preserveLocalState && this.softRefreshSession(session)) {
+      this.pendingMarksSnapshot = null;
+      this.pendingReconnectReplayUpdates = [];
+      return;
+    }
     const recentReconnectReplayUpdates = preserveLocalState
       && this.canPersistDurableUpdates(session.role)
       ? this.getRecentReconnectReplayUpdates()

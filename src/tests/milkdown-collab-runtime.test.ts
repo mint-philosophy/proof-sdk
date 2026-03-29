@@ -117,8 +117,9 @@ function run(): void {
     'Expected hard reconnects to preserve bounded buffered/recent local updates and never replay the full previous Y.Doc into a new live room',
   );
   assert(
-    source.includes('this.activeSession.accessEpoch === session.accessEpoch;'),
-    'Expected hard-reconnect decisions to include accessEpoch changes',
+    source.includes('this.activeSession.shareState === session.shareState;')
+      && !source.includes('this.activeSession.accessEpoch === session.accessEpoch;'),
+    'Expected soft session refresh to treat accessEpoch-only token rotations as the same live room identity',
   );
   assert(
     source.includes('private sessionRole: ShareRole | null = null;')

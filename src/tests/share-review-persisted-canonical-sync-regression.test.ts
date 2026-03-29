@@ -153,6 +153,7 @@ function run(): void {
   assert(
     acceptPersistedBlock.includes("const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);")
       && editorSource.includes('private async ensureShareReviewMutationAppliedLocally(')
+      && editorSource.includes('private shouldAwaitShareReviewMutationSettle(): boolean {')
       && editorSource.includes('private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {')
       && acceptPersistedBlock.includes('const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));')
       && acceptPersistedBlock.includes("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
@@ -162,10 +163,11 @@ function run(): void {
       && acceptPersistedBlock.includes("let success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
       && acceptPersistedBlock.includes('success = await this.applyShareMutationDocumentResult(result);')
       && acceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds, sourceMark);')
-      && acceptPersistedBlock.includes('if (this.hasActiveRemoteCollabPeer()) {')
+      && acceptPersistedBlock.includes('const shouldAwaitStableState = this.shouldAwaitShareReviewMutationSettle();')
+      && acceptPersistedBlock.includes('if (shouldAwaitStableState) {')
       && acceptPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to remap stale UI ids to the authoritative pending mark, tombstone both local and remote ids, verify that the accepted mark or any equivalent pending suggestion is actually gone locally, reconcile the mutation, and only block on collab settle when a remote peer is actually connected',
+    'Expected markAcceptPersisted to remap stale UI ids to the authoritative pending mark, tombstone both local and remote ids, verify that the accepted mark or any equivalent pending suggestion is actually gone locally, reconcile the mutation, and re-verify after any pending collab reconnect before treating the persisted accept as settled',
   );
 
   const rejectPersistedBlock = sliceBetween(

@@ -10057,6 +10057,21 @@ class ProofEditorImpl implements ProofEditor {
     }
   }
 
+  private shouldAwaitShareReviewMutationSettle(): boolean {
+    if (!this.isShareMode || !this.collabEnabled || !this.collabCanEdit) return false;
+
+    return this.hasActiveRemoteCollabPeer()
+      || this.collabConnectionStatus !== 'connected'
+      || !this.collabIsSynced
+      || this.collabUnsyncedChanges !== 0
+      || this.collabPendingLocalUpdates !== 0
+      || this.pendingCollabRebindOnSync
+      || this.suppressTrackChangesDuringCollabReconnect
+      || this.collabSessionRefreshInFlight
+      || Boolean(this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0)
+      || this.preserveEditorStateOnNextCollabReconnect;
+  }
+
   private async waitForStableShareReviewMutationState(): Promise<void> {
     if (!this.isShareMode || !this.collabEnabled || !this.collabCanEdit) return;
 
@@ -10390,8 +10405,13 @@ class ProofEditorImpl implements ProofEditor {
         success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds, sourceMark);
       }
       if (success && this.editor) {
-        if (this.hasActiveRemoteCollabPeer()) {
+        const shouldAwaitStableState = this.shouldAwaitShareReviewMutationSettle();
+        if (shouldAwaitStableState) {
           await this.waitForStableShareReviewMutationState();
+          success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds, sourceMark);
+        }
+        if (!success) {
+          return false;
         }
         captureEvent('suggestion_accepted', { count: 1 });
         this.editor.action((ctx) => {

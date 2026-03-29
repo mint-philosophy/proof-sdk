@@ -737,7 +737,6 @@ class MarkPopoverController {
     }
     this.suggestionReviewTransitionPending = true;
     const reviewedIdSet = new Set(reviewedMarkIds);
-    let stableFollowupMarkId: string | null = null;
 
     const attempt = (remainingAttempts: number): void => {
       const followupMarkId = this.getSuggestionReviewFollowupMarkId(preferredMarkId, reviewedMarkIds);
@@ -757,14 +756,9 @@ class MarkPopoverController {
         }
 
         if (followupPanelOpen && collabStable) {
-          if (stableFollowupMarkId === followupMarkId || remainingAttempts <= 0) {
-            this.suggestionReviewTransitionPending = false;
-            this.suggestionReviewFollowupTimer = null;
-            return;
-          }
-          stableFollowupMarkId = followupMarkId;
-        } else {
-          stableFollowupMarkId = null;
+          this.suggestionReviewTransitionPending = false;
+          this.suggestionReviewFollowupTimer = null;
+          return;
         }
 
         if (remainingAttempts > 0) {
@@ -1716,6 +1710,15 @@ class MarkPopoverController {
 
   private handleOutsidePointerDown = (event: PointerEvent) => {
     if (this.isEventWithinInteractivePopoverChrome(event)) return;
+    console.log('[mark-popover.outsidePointerDown.close]', {
+      mode: this.mode,
+      activeMarkId: this.activeMarkId,
+      transitionPending: this.suggestionReviewTransitionPending,
+      reviewActionInFlight: this.reviewActionInFlight,
+      targetTag: (event.target as HTMLElement | null)?.tagName ?? null,
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
     this.hideReviewContextMenu();
     this.close();
   };
@@ -1723,6 +1726,15 @@ class MarkPopoverController {
   private handleOutsideClick = (event: MouseEvent) => {
     if ((Date.now() - this.lastHandledPointerDownAt) < 450) return;
     if (this.isEventWithinInteractivePopoverChrome(event)) return;
+    console.log('[mark-popover.outsideClick.close]', {
+      mode: this.mode,
+      activeMarkId: this.activeMarkId,
+      transitionPending: this.suggestionReviewTransitionPending,
+      reviewActionInFlight: this.reviewActionInFlight,
+      targetTag: (event.target as HTMLElement | null)?.tagName ?? null,
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
     this.hideReviewContextMenu();
     this.close();
   };
@@ -1994,6 +2006,13 @@ class MarkPopoverController {
 
     // Clear action row when editor loses focus
     this.handleEditorBlur = () => {
+      console.log('[mark-popover.editorBlur]', {
+        mode: this.mode,
+        activeMarkId: this.activeMarkId,
+        transitionPending: this.suggestionReviewTransitionPending,
+        reviewActionInFlight: this.reviewActionInFlight,
+        hasLiveSelection: this.hasLiveSelection,
+      });
       if (isMobileTouch()) {
         // Use a pending timer so selectionchange doesn't re-set hasLiveSelection
         if (this.blurPendingTimer) clearTimeout(this.blurPendingTimer);
@@ -2249,6 +2268,15 @@ class MarkPopoverController {
   }
 
   close(): void {
+    if (this.mode === 'suggestion' || this.activeMarkId) {
+      console.log('[mark-popover.close]', {
+        mode: this.mode,
+        activeMarkId: this.activeMarkId,
+        transitionPending: this.suggestionReviewTransitionPending,
+        reviewActionInFlight: this.reviewActionInFlight,
+        stack: new Error().stack?.split('\n').slice(1, 5) ?? null,
+      });
+    }
     if (this.suggestionReviewFollowupTimer !== null) {
       window.clearTimeout(this.suggestionReviewFollowupTimer);
       this.suggestionReviewFollowupTimer = null;

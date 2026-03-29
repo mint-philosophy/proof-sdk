@@ -32,15 +32,14 @@ function run(): void {
   );
 
   assert(
-    source.includes('let stableFollowupMarkId: string | null = null;')
-      && source.includes('if (stableFollowupMarkId === followupMarkId || remainingAttempts <= 0) {')
-      && source.includes('stableFollowupMarkId = followupMarkId;')
-      && source.includes("const stateActiveMarkId = getActiveMarkId(this.view.state);")
+    source.includes("const stateActiveMarkId = getActiveMarkId(this.view.state);")
       && source.includes('const followupActive = stateActiveMarkId === followupMarkId;')
       && source.includes("this.openForMark(followupMarkId, undefined, { source: 'direct' });")
+      && source.includes('if (followupPanelOpen && collabStable) {')
+      && source.includes('this.suggestionReviewTransitionPending = false;')
       && source.includes('const fallbackMarkId = this.getFirstPendingSuggestionMarkId();')
       && source.includes("this.openForMark(fallbackMarkId, undefined, { source: 'direct' });"),
-    'Expected review follow-up to require a confirmed stable reopen before it clears the transition guard, and to force-open the remaining pending suggestion if the timed follow-up never stabilizes',
+    'Expected review follow-up to clear its transition guard as soon as the next suggestion is visibly open and collab-stable, and to force-open the remaining pending suggestion if the timed follow-up never stabilizes',
   );
 
   assert(

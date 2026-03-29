@@ -2117,7 +2117,24 @@ class MarkPopoverController {
   }
 
   destroy(): void {
-    this.close();
+    this.hideReviewContextMenu();
+    this.hideOverlayChrome();
+    this.popover.style.display = 'none';
+    this.popover.innerHTML = '';
+    this.mode = null;
+    this.activeMarkId = null;
+    this.composeRange = null;
+    this.composeBy = null;
+    this.anchor = null;
+    this.lastThreadLength = 0;
+    this.threadFocusMode = 'reply-box';
+    this.mobileStripSignature = '';
+    this.mobileStripExpanded = false;
+    this.hasLiveSelection = false;
+    this.cachedActionRange = null;
+    this.cachedActionRangeAt = 0;
+    this.activeSuggestionOpenedFromHover = false;
+    this.hoverPopoverActive = false;
     this.clearUndoToast();
     this.resetStripGestureVisual();
     this.clearSuggestionHoverTimers();
@@ -2131,6 +2148,9 @@ class MarkPopoverController {
     window.removeEventListener('resize', this.handleScroll);
     window.visualViewport?.removeEventListener('resize', this.handleViewportChange);
     window.visualViewport?.removeEventListener('scroll', this.handleViewportChange);
+    document.removeEventListener('pointerdown', this.handleOutsidePointerDown);
+    document.removeEventListener('mousedown', this.handleOutsideClick);
+    document.removeEventListener('keydown', this.handleKeydown, true);
     if (this.handleSelectionChange) {
       document.removeEventListener('selectionchange', this.handleSelectionChange);
       this.handleSelectionChange = null;

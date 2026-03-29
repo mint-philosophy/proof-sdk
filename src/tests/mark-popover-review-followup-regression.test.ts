@@ -85,11 +85,23 @@ function run(): void {
   assert(
     source.includes('private isEventWithinInteractivePopoverChrome(')
       && source.includes('const composedPath = typeof event.composedPath === \'function\' ? event.composedPath() : [];')
+      && source.includes("if (targetElement?.closest('.mark-popover, .mark-mobile-strip, .mark-review-context-menu')) {")
       && source.includes('if (composedPath.includes(element)) return true;')
       && source.includes('const rect = element.getBoundingClientRect();')
       && source.includes('event.clientX >= rect.left')
       && source.includes('if (this.isEventWithinInteractivePopoverChrome(event)) return;'),
     'Expected outside-click handling to treat pointer events inside the visible popover chrome as internal interactions even if the DOM target is stale during auto-advance rerenders',
+  );
+
+  assert(
+    source.includes('destroy(): void {')
+      && !source.includes('destroy(): void {\n    this.close();')
+      && source.includes("document.removeEventListener('pointerdown', this.handleOutsidePointerDown);")
+      && source.includes("document.removeEventListener('mousedown', this.handleOutsideClick);")
+      && source.includes("document.removeEventListener('keydown', this.handleKeydown, true);")
+      && source.includes("this.popover.style.display = 'none';")
+      && source.includes("this.activeMarkId = null;"),
+    'Expected plugin-view destroy to tear down old popover chrome and document listeners without calling close(), so auto-advanced review state is not cleared during plugin-view recreation',
   );
 
   assert(

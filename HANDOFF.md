@@ -1,6 +1,6 @@
 ## Current state
 
-- `fix73` (`7bc741a`) is the next browser candidate for Bug 28, the mixed-mark auto-advance failure:
+- `fix73` (`2d9a180`) is the next browser candidate for Bug 28, the mixed-mark auto-advance failure:
   - browser QA on `fix72` showed the popover could visibly advance to the next mark, but the second click still acted on a stale review target and silently closed
   - the popover controller now resolves the live action target from editor state at click time, rebinding from `getActiveMarkId(this.view.state)` before it runs any persisted accept/reject mutation
   - the review finish path also no longer does the eager `navigateToSuggestion(nextMarkId)` pre-navigation that was still using the pre-mutation adjacent id before `openSuggestionAfterReview(...)` recomputed the real follow-up
@@ -8,8 +8,8 @@
   - the transition guard no longer looked like the only failure point
   - the mixed-mark failure persisted specifically on the auto-advanced second click, while manual rail reopen still worked
   - Bug 17 also still reproduced in browser QA on `fix72`, despite the original doc-load history guard still existing in source and `document-load-history-regression.test.ts` passing locally
-- Local built client bundle: `6ec91aa1af9e5bbb6516975e58761fe2689df279fa0e44ddecd1400ac82aa6b4`
-- Local `/health` now reports build SHA `b15c0d4301e225ad9ab030696d0409733f8a2cd2`
+- Local built client bundle: `1cd0c47e1971a9bfc1692b2aecbb3660c25d06c03be97ad1e644d4332b3443bd`
+- Local `/health` now reports build SHA `2d9a18066f20fc283da33460a3e6dbaf850271f1`
 - The shared proof daemon is currently configured for local testing on this VM:
   - `PROOF_PUBLIC_BASE_URL=http://127.0.0.1:4010`
   - `COLLAB_PUBLIC_BASE_URL=ws://127.0.0.1:4010/ws`

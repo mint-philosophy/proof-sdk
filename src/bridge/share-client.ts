@@ -237,16 +237,37 @@ export class ShareClient {
   }
 
   private rememberObservedDocument(doc: { updatedAt?: string | undefined } | null | undefined): void {
-    if (typeof doc?.updatedAt === 'string' && doc.updatedAt.trim().length > 0) {
-      this.lastObservedUpdatedAt = doc.updatedAt.trim();
+    const payload = this.unwrapMutationSuccessPayload(doc && typeof doc === 'object' && !Array.isArray(doc)
+      ? doc as Record<string, unknown>
+      : null);
+    if (typeof payload?.updatedAt === 'string' && payload.updatedAt.trim().length > 0) {
+      this.lastObservedUpdatedAt = payload.updatedAt.trim();
     }
   }
 
   private rememberObservedMutationBase(payload: Record<string, unknown> | null | undefined): void {
-    const base = this.extractMutationBase(payload ?? null);
+    const base = this.extractMutationBase(this.unwrapMutationSuccessPayload(payload ?? null) ?? payload ?? null);
     if (base) {
       this.lastObservedMutationBase = base;
     }
+  }
+
+  private unwrapMutationSuccessPayload(payload: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+    if (!payload) return null;
+    const wrappedData = payload.data;
+    if (payload.success === true && wrappedData && typeof wrappedData === 'object' && !Array.isArray(wrappedData)) {
+      return wrappedData as Record<string, unknown>;
+    }
+    return payload;
+  }
+
+  private unwrapMutationErrorDetails(payload: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+    if (!payload) return null;
+    const wrappedDetails = payload.details;
+    if (wrappedDetails && typeof wrappedDetails === 'object' && !Array.isArray(wrappedDetails)) {
+      return wrappedDetails as Record<string, unknown>;
+    }
+    return payload;
   }
 
   private rememberAccessEpoch(accessEpoch: unknown): void {
@@ -378,18 +399,19 @@ export class ShareClient {
   }
 
   private parseShareMarkMutationResponse(payload: Record<string, unknown> | null): ShareMarkMutationResponse {
-    const collab = (payload?.collab && typeof payload.collab === 'object' && !Array.isArray(payload.collab))
-      ? payload.collab as Record<string, unknown>
+    const body = this.unwrapMutationSuccessPayload(payload);
+    const collab = (body?.collab && typeof body.collab === 'object' && !Array.isArray(body.collab))
+      ? body.collab as Record<string, unknown>
       : null;
     return {
-      success: payload?.success === true,
-      marks: (payload?.marks && typeof payload.marks === 'object' && !Array.isArray(payload.marks))
-        ? payload.marks as Record<string, unknown>
+      success: body?.success === true,
+      marks: (body?.marks && typeof body.marks === 'object' && !Array.isArray(body.marks))
+        ? body.marks as Record<string, unknown>
         : undefined,
-      markdown: typeof payload?.markdown === 'string'
-        ? payload.markdown
-        : (typeof payload?.content === 'string' ? payload.content : undefined),
-      updatedAt: typeof payload?.updatedAt === 'string' ? payload.updatedAt : undefined,
+      markdown: typeof body?.markdown === 'string'
+        ? body.markdown
+        : (typeof body?.content === 'string' ? body.content : undefined),
+      updatedAt: typeof body?.updatedAt === 'string' ? body.updatedAt : undefined,
       collab: collab
         ? {
             status: typeof collab.status === 'string' ? collab.status : undefined,
@@ -402,7 +424,7 @@ export class ShareClient {
   private parseRecoverableMarkMutationError(payload: Record<string, unknown> | null): ShareMarkMutationResponse | null {
     const code = typeof payload?.code === 'string' ? payload.code.trim().toUpperCase() : '';
     if (code !== 'COLLAB_SYNC_FAILED') return null;
-    const recovered = this.parseShareMarkMutationResponse(payload);
+    const recovered = this.parseShareMarkMutationResponse(this.unwrapMutationErrorDetails(payload));
     if (!recovered.markdown && !recovered.marks) return null;
     return {
       ...recovered,

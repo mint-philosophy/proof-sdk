@@ -21,10 +21,14 @@ function run(): void {
   assert(
     shareClientSource.includes('markdown?: string;')
       && shareClientSource.includes('collab?: {')
-      && shareClientSource.includes("markdown: typeof payload?.markdown === 'string'")
+      && shareClientSource.includes('private unwrapMutationSuccessPayload(')
+      && shareClientSource.includes('private unwrapMutationErrorDetails(')
+      && shareClientSource.includes('const body = this.unwrapMutationSuccessPayload(payload);')
+      && shareClientSource.includes("markdown: typeof body?.markdown === 'string'")
       && shareClientSource.includes("status: typeof collab.status === 'string' ? collab.status : undefined")
+      && shareClientSource.includes('const recovered = this.parseShareMarkMutationResponse(this.unwrapMutationErrorDetails(payload));')
       && shareClientSource.includes("markdown: typeof context.doc?.markdown === 'string' ? context.doc.markdown : undefined"),
-    'Expected share mark mutations to carry canonical markdown through direct and recovered responses',
+    'Expected share mark mutations to unwrap coordinator success and recoverable error payloads so canonical markdown survives persisted review actions',
   );
 
   const applyResultBlock = sliceBetween(
@@ -172,6 +176,7 @@ function run(): void {
       && editorSource.includes('private resolveShareReviewMutationRequestMarkId(markId: string, sourceMark: StoredMark | null): string {')
       && editorSource.includes("if (sourceMark?.status === 'pending') return markId;")
       && editorSource.includes('private async ensureShareReviewMutationAppliedLocally(')
+      && editorSource.includes('private getMissingPendingShareReviewMarkIds(expectedIds: string[]): string[] {')
       && editorSource.includes('private shouldAwaitShareReviewMutationSettle(): boolean {')
       && editorSource.includes('private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {')
       && acceptPersistedBlock.includes('const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));')
@@ -186,6 +191,9 @@ function run(): void {
       && acceptPersistedBlock.includes('const shouldAwaitStableState = this.shouldAwaitShareReviewMutationSettle();')
       && acceptPersistedBlock.includes('if (shouldAwaitStableState) {')
       && acceptPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
+      && editorSource.includes('const authoritativePendingIds = (result?.marks && typeof result.marks === \'object\' && !Array.isArray(result.marks))')
+      && editorSource.includes('const missingAuthoritativePendingIds = this.getMissingPendingShareReviewMarkIds(authoritativePendingIds);')
+      && editorSource.includes('|| missingAuthoritativePendingIds.length > 0')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
     'Expected markAcceptPersisted to preserve the current local pending mark id when it is still valid, remap only stale UI ids to the authoritative pending mark, tombstone both local and remote ids, verify that the accepted mark or any equivalent pending suggestion is actually gone locally, reconcile the mutation, and re-verify after any pending collab reconnect before treating the persisted accept as settled',
   );
@@ -260,6 +268,7 @@ function run(): void {
       && localResolveBlock.includes(': rejectMark(view, markId);')
       && localResolveBlock.includes('const liveMarkdown = this.normalizeMarkdownForCollab(serializer(view.state.doc));')
       && localResolveBlock.includes("matchedServerResult = liveMarkdown === expectedMarkdown && !Object.prototype.hasOwnProperty.call(liveMetadata, markId);")
+      && localResolveBlock.includes('this.applyAuthoritativeShareMarks(serverMarks);')
       && localResolveBlock.includes('this.pendingCollabReconnectTemplateOverride = expectedMarkdown;')
       && localResolveBlock.includes("const shouldPreserveMatchedResultAcrossReconnect = action === 'accept'")
       && localResolveBlock.includes("|| (action === 'reject' && this.hasActiveRemoteCollabPeer());")
@@ -269,7 +278,7 @@ function run(): void {
       && localResolveBlock.includes('this.disconnectCollabService();')
       && localResolveBlock.includes('collabClient.disconnect();')
       && localResolveBlock.includes('void this.refreshCollabSessionAndReconnect(false);'),
-    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response, and to preserve matched local accept results through the subsequent collab reconnect while keeping reject preservation gated on active remote peers',
+    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response, immediately reapply authoritative remaining marks, and preserve matched local accept results through the subsequent collab reconnect while keeping reject preservation gated on active remote peers',
   );
 
   console.log('share-review-persisted-canonical-sync-regression.test.ts passed');

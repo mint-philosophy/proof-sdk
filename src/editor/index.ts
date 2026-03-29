@@ -10075,13 +10075,12 @@ class ProofEditorImpl implements ProofEditor {
       }, matchedServerResult ? 'info' : 'warn');
       if (!matchedServerResult) return;
 
-      this.lastReceivedServerMarks = { ...serverMarks };
-      this.initialMarksSynced = true;
     });
 
     const shouldPreserveMatchedResultAcrossReconnect = action === 'accept'
       || (action === 'reject' && this.hasActiveRemoteCollabPeer());
     if (matchedServerResult) {
+      this.applyAuthoritativeShareMarks(serverMarks);
       if (shouldPreserveMatchedResultAcrossReconnect) {
         this.pendingCollabReconnectTemplateOverride = null;
         this.skipNextCollabTemplateSeed = true;
@@ -10767,6 +10766,19 @@ class ProofEditorImpl implements ProofEditor {
     return hasPending;
   }
 
+  private getMissingPendingShareReviewMarkIds(expectedIds: string[]): string[] {
+    if (!this.editor || expectedIds.length === 0) return [];
+
+    let missingIds: string[] = [];
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const pendingIds = new Set(getPendingSuggestions(getMarks(view.state)).map((mark) => mark.id));
+      missingIds = expectedIds.filter((markId) => !pendingIds.has(markId));
+    });
+
+    return missingIds;
+  }
+
   private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {
     if (!this.editor || !sourceMark) return [];
 
@@ -10809,17 +10821,24 @@ class ProofEditorImpl implements ProofEditor {
     sourceMark: StoredMark | null,
     pendingCountBefore: number | null = null,
   ): Promise<boolean> {
+    const authoritativePendingIds = (result?.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
+      ? this.getSortedPendingSuggestionIdsFromStoredMarks(result.marks as Record<string, StoredMark>)
+      : [];
     const equivalentPendingIds = this.getEquivalentPendingShareReviewMarkIds(sourceMark);
+    const missingAuthoritativePendingIds = this.getMissingPendingShareReviewMarkIds(authoritativePendingIds);
     const pendingCountDidNotDrop = pendingCountBefore !== null
       && pendingCountBefore > 0
       && this.getLocalPendingShareReviewMarkCount() >= pendingCountBefore;
     const needsRepair = this.hasPendingShareReviewMarks(resolvedMarkIds)
       || equivalentPendingIds.length > 0
+      || missingAuthoritativePendingIds.length > 0
       || pendingCountDidNotDrop;
     if (!needsRepair) return true;
 
     this.traceShareReview('mutation.local-verify-failed', {
       resolvedMarkIds,
+      authoritativePendingIds,
+      missingAuthoritativePendingIds,
       equivalentPendingIds,
       pendingCountBefore,
       pendingCountDidNotDrop,
@@ -10834,6 +10853,7 @@ class ProofEditorImpl implements ProofEditor {
     if (!applied) return false;
 
     const stillPending = this.hasPendingShareReviewMarks(resolvedMarkIds)
+      || this.getMissingPendingShareReviewMarkIds(authoritativePendingIds).length > 0
       || this.getEquivalentPendingShareReviewMarkIds(sourceMark).length > 0
       || (
         pendingCountBefore !== null
@@ -10842,6 +10862,7 @@ class ProofEditorImpl implements ProofEditor {
       );
     this.traceShareReview('mutation.local-verify-result', {
       resolvedMarkIds,
+      authoritativePendingIds,
       equivalentPendingIds,
       pendingCountBefore,
       stillPending,

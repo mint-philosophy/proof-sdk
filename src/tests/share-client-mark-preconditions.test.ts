@@ -14,6 +14,31 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   });
 }
 
+function wrapMutationSuccess(route: string, data: Record<string, unknown>): Record<string, unknown> {
+  return {
+    success: true,
+    route,
+    slug: 'test-doc',
+    data,
+  };
+}
+
+function wrapMutationFailure(
+  route: string,
+  code: string,
+  message: string,
+  details: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    success: false,
+    route,
+    slug: 'test-doc',
+    code,
+    message,
+    details,
+  };
+}
+
 async function run(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const originalWindow = (globalThis as { window?: unknown }).window;
@@ -67,13 +92,17 @@ async function run(): Promise<void> {
       return jsonResponse({ revision: 40 + stateReads, updatedAt: `2026-03-06T00:00:0${stateReads}.000Z` });
     }
     if (url.pathname === '/api/agent/test-doc/marks/accept' && body?.markId === 'mark-accept-recovered') {
-      return jsonResponse({
-        success: false,
-        code: 'COLLAB_SYNC_FAILED',
-        error: 'Suggestion acceptance did not converge to live collaboration state',
-        markdown: 'Recovered canonical markdown',
-        marks: {},
-      }, 409);
+      return jsonResponse(wrapMutationFailure(
+        'POST /marks/accept',
+        'COLLAB_SYNC_FAILED',
+        'Suggestion acceptance did not converge to live collaboration state',
+        {
+          success: false,
+          error: 'Suggestion acceptance did not converge to live collaboration state',
+          markdown: 'Recovered canonical markdown',
+          marks: {},
+        },
+      ), 409);
     }
     if (url.pathname === '/api/agent/test-doc/marks/accept' && body?.markId === 'mark-accept-delayed') {
       delayedAcceptAttempts += 1;
@@ -84,13 +113,29 @@ async function run(): Promise<void> {
           error: 'Suggestion not found yet in the authoritative share state',
         }, 409);
       }
-      return jsonResponse({ success: true, marks: {}, markdown: 'Delayed canonical markdown' });
+      return jsonResponse(wrapMutationSuccess('POST /marks/accept', {
+        success: true,
+        marks: {},
+        markdown: 'Delayed canonical markdown',
+      }));
     }
     if (url.pathname === '/api/agent/test-doc/marks/accept') {
-      return jsonResponse({ success: true, marks: {}, markdown: 'Accepted canonical markdown' });
+      return jsonResponse(wrapMutationSuccess('POST /marks/accept', {
+        success: true,
+        marks: {},
+        markdown: 'Accepted canonical markdown',
+        collab: {
+          status: 'pending',
+          reason: 'verification_deferred',
+        },
+      }));
     }
     if (url.pathname === '/api/agent/test-doc/marks/accept-all') {
-      return jsonResponse({ success: true, marks: {}, markdown: 'Accepted all canonical markdown' });
+      return jsonResponse(wrapMutationSuccess('POST /marks/accept-all', {
+        success: true,
+        marks: {},
+        markdown: 'Accepted all canonical markdown',
+      }));
     }
     if (url.pathname === '/api/agent/test-doc/marks/reject' && body?.markId === 'mark-reject-delayed') {
       delayedRejectAttempts += 1;
@@ -153,6 +198,11 @@ async function run(): Promise<void> {
       (accept && 'error' in accept) ? undefined : accept?.markdown,
       'Accepted canonical markdown',
       'acceptSuggestion should surface canonical markdown from the mutation response',
+    );
+    assert.equal(
+      (accept && 'error' in accept) ? undefined : accept?.collab?.status,
+      'pending',
+      'acceptSuggestion should surface wrapped collab metadata from the mutation response',
     );
 
     const recoveredAccept = await shareClient.acceptSuggestion('mark-accept-recovered', 'human:editor');

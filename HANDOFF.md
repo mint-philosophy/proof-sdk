@@ -1,5 +1,23 @@
 ## Current state
 
+- `fix76` (`051268d`) is the current local build for `Bug 6` deletion undo:
+  - live Playwright repro against `http://127.0.0.1:4010` now passes for the deletion lane
+  - repro used a real shared doc, selected `beta`, created a tracked deletion with `Backspace`, then issued `Cmd+Z`
+  - final ProseMirror state after undo was plain text `Alpha beta gamma` with `pendingDeleteMarksInDoc: 0`
+  - the failure turned out not to be the keydown/history command itself; it was stale pending-suggestion cache in share mode
+  - when local undo cleared the last pending delete, `handleMarksChange(...)` used to return early on the empty actionable set, so `lastReceivedServerMarks` still held the old pending suggestion id
+  - that stale cache could then be merged back into live state after the history cycle, recreating the delete mark
+  - the fix does two things:
+    - tracks previously observed pending suggestion ids across `handleMarksChange(...)`
+    - prunes locally removed pending suggestion ids from the cached server marks before merging live metadata back into share state
+  - new regression coverage:
+    - `src/tests/pending-suggestion-server-prune-regression.test.ts`
+    - updated source guard in `src/tests/editor-suggestion-api-regression.test.ts`
+  - local daemon is rebuilt and restarted on `127.0.0.1:4010`
+  - local `/health` reports `051268dcb0c70171402c59214d8093003dbe0e1b-dirty`
+  - local `editor.js` hash is `a81fcd02df83c783ffd96d7e0a80d81cc3c1402ba29661fe2a39ccb28b86d7ba`
+  - worktree is intentionally still dirty because `package.json` now includes the user-installed local Playwright tooling
+
 - `fix74` (`990c433`) is the current local browser-verified build for the review popover auto-advance lane:
   - browser QA confirmed **Bug 28 / Bug 29 are fully fixed**
   - auto-advanced `Accept & Next` and `Reject & Next` now work across mixed mark chains, not just pure deletion chains

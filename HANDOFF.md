@@ -1,19 +1,22 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `36e8194bc61d09b51d8b284579af78e81d0e719fec15361924d934c7170d17e5`
-- Local `/health` now reports build SHA `d41469304533bd0734c3bbbb0ca4828c0d6c2190`
+- Live client bundle on `proof-test.mintresearch.org`: `ac5086e9459e3151464a9b00b3adb1976a93d97941e7ad29f210a0f38f2882bf`
+- Local `/health` now reports build SHA `857ec7749106fca719eea3e03d62d6a1209f5b41`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
-- Browser QA on `fix63` (`d414693`) now passes the multi-operation stability regression:
+- Browser QA on `fix63` (`d414693`) passed the multi-operation stability regression:
   - `insert -> delete elsewhere -> overwrite elsewhere` stays stable
   - no corruption and no fragmentation in the live edit lane
-  - remaining known follow-ups from browser QA:
-    - overwrite-created insert can still revert from inline to widget on warm reload
-    - `Accept & Next` reportedly accepted all pending marks in one click
-    - insertion `Reject & Next` reportedly kept the inserted text instead of removing it
-    - undo is still partial, and formatting changes still bypass TC
+- `fix64` (`857ec77`) is now live but not yet browser-verified:
+  - it adds a review-transition guard intended to stop `Accept & Next` from cascading across marks
+  - it adds reject-side canonical rewrite fallback so materialized inserts are removed instead of preserved when reject falls back
+- Remaining known follow-ups before fix64 browser QA:
+  - overwrite-created insert can still revert from inline to widget on warm reload
+  - undo is still partial
+  - formatting changes still bypass TC
 - Last commits in this session:
-  - pending `fix64`: guard review actions during follow-up transition and make reject fallback remove materialized insert text
+  - `9af1d9c` `docs: record fix64 rollout`
+  - `857ec77` `fix64: stabilize review actions and insert reject fallback`
   - `d414693` `fix63: preserve rich live insert metadata in share sync`
   - `392fe58` `docs: record fix62 browser QA pass`
   - `a6d6ae4` `docs: record fix62 handoff`
@@ -31,14 +34,14 @@
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
 
-## Pending fix64 review-action regressions
+## Fix64 review-action regressions
 
-Shared reports:
+Shared reports before the patch:
 - `fix63` solved the multi-operation corruption lane, but browser QA still reported two high-severity review regressions:
   - `Accept & Next` appeared to accept every pending mark instead of just the current review item
   - insertion reject via the right-click review path kept the inserted text instead of removing it
 
-What changed locally:
+What changed:
 - `src/editor/plugins/mark-popover.ts`
   - `runSuggestionReviewAction(...)` now refuses to start a second review mutation while `suggestionReviewTransitionPending` is true
   - this is meant to block a trailing synthetic click from re-firing the next review button while the panel is auto-advancing

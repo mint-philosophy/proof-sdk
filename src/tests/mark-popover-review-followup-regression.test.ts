@@ -19,6 +19,7 @@ function run(): void {
   assert(
     source.includes('const getActiveSuggestionActionTarget = (): {')
       && source.includes('private getLiveSuggestionActionTarget(')
+      && source.includes('private getLiveAdjacentSuggestionTarget(')
       && source.includes('const stateActiveMarkId = getActiveMarkId(this.view.state);')
       && source.includes('stateActiveMarkId,')
       && source.includes('this.activeMarkId,')
@@ -26,9 +27,21 @@ function run(): void {
       && source.includes('const fallbackPendingMarkId = this.getFirstPendingSuggestionMarkId();')
       && source.includes("const getActiveSuggestionActionTarget = (): {")
       && source.includes('} | null => this.getLiveSuggestionActionTarget(mark.id);')
+      && source.includes("const getPreviousSuggestionNavigationTarget = (): {")
+      && source.includes("} | null => this.getLiveAdjacentSuggestionTarget('prev', mark.id);")
+      && source.includes("const getNextSuggestionNavigationTarget = (): {")
+      && source.includes("} | null => this.getLiveAdjacentSuggestionTarget('next', mark.id);")
       && source.includes("this.runSuggestionReviewAction(target.markId, 'reject', target.nextMarkId, target.kind, {")
       && source.includes("this.runSuggestionReviewAction(target.markId, 'accept', target.nextMarkId, target.kind, {"),
     'Expected review actions to resolve the live active suggestion target from editor state at click time so an auto-advanced popover cannot keep firing a stale mark id after navigation',
+  );
+
+  assert(
+    source.includes('const adjacentMarkId = this.getAdjacentSuggestionMarkId(currentTarget.markId, direction);')
+      && source.includes('const adjacentTarget = this.getLiveSuggestionActionTarget(adjacentMarkId);')
+      && source.includes('const adjacentReviewItem = this.getSuggestionReviewItemByMarkId(adjacentMarkId);')
+      && source.includes("kind: adjacentReviewItem.kind,"),
+    'Expected suggestion navigation to resolve the live adjacent review target from the current active suggestion instead of relying on stale render-time previous/next ids',
   );
 
   assert(
@@ -78,6 +91,9 @@ function run(): void {
     source.includes("if (!options?.preserveReviewTransition && this.suggestionReviewFollowupTimer !== null) {")
       && source.includes('if (!options?.preserveReviewTransition) {')
       && source.includes("preserveReviewTransition?: boolean;")
+      && source.includes('const navigated = proof.navigateToMark(markId);')
+      && source.includes('if (navigated) {')
+      && source.includes("this.openForMark(markId, undefined, {")
       && !source.includes("if (nextMarkId) {\n        this.navigateToSuggestion(nextMarkId);\n      }\n      this.openSuggestionAfterReview(nextMarkId, reviewedMarkIds);"),
     'Expected openForMark to keep the follow-up timer and transition guard intact during review-driven navigation, and expected review finish to avoid the stale pre-navigation that bound auto-advanced popovers to the wrong mark',
   );

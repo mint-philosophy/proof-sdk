@@ -888,17 +888,11 @@ class MarkPopoverController {
     if (proof?.navigateToMark) {
       const navigated = proof.navigateToMark(markId);
       if (navigated) {
-        const stateActiveMarkId = getActiveMarkId(this.view.state);
-        if (stateActiveMarkId === markId && (this.activeMarkId !== markId || this.popover.style.display === 'none')) {
-          this.openForMark(markId, undefined, {
-            source: 'direct',
-            preserveReviewTransition: options?.preserveReviewTransition,
-          });
-          return;
-        }
-        if (stateActiveMarkId === markId) {
-          return;
-        }
+        this.openForMark(markId, undefined, {
+          source: 'direct',
+          preserveReviewTransition: options?.preserveReviewTransition,
+        });
+        return;
       }
     }
     this.openForMark(markId, undefined, {
@@ -1469,6 +1463,34 @@ class MarkPopoverController {
       markId: activeMark.id,
       nextMarkId: this.getAdjacentSuggestionMarkId(activeMark.id, 'next'),
       kind: activeMark.kind,
+    };
+  }
+
+  private getLiveAdjacentSuggestionTarget(
+    direction: 'next' | 'prev',
+    fallbackMarkId?: string | null,
+  ): {
+    markId: string;
+    nextMarkId: string | null;
+    kind: 'insert' | 'delete' | 'replace';
+  } | null {
+    const currentTarget = this.getLiveSuggestionActionTarget(fallbackMarkId);
+    if (!currentTarget) return null;
+
+    const adjacentMarkId = this.getAdjacentSuggestionMarkId(currentTarget.markId, direction);
+    if (!adjacentMarkId) return null;
+
+    const adjacentTarget = this.getLiveSuggestionActionTarget(adjacentMarkId);
+    if (adjacentTarget) {
+      return adjacentTarget;
+    }
+
+    const adjacentReviewItem = this.getSuggestionReviewItemByMarkId(adjacentMarkId);
+    if (!adjacentReviewItem) return null;
+    return {
+      markId: adjacentReviewItem.primaryMarkId,
+      nextMarkId: this.getAdjacentSuggestionMarkId(adjacentReviewItem.primaryMarkId, 'next'),
+      kind: adjacentReviewItem.kind,
     };
   }
 
@@ -2978,13 +3000,23 @@ class MarkPopoverController {
     const actions = document.createElement('div');
     actions.className = 'mark-popover-actions';
     const canEdit = canEditInRuntime();
-    const previousMarkId = this.getAdjacentSuggestionMarkId(mark.id, 'prev');
-    const nextMarkId = this.getAdjacentSuggestionMarkId(mark.id, 'next');
     const getActiveSuggestionActionTarget = (): {
       markId: string;
       nextMarkId: string | null;
       kind: 'insert' | 'delete' | 'replace';
     } | null => this.getLiveSuggestionActionTarget(mark.id);
+    const getPreviousSuggestionNavigationTarget = (): {
+      markId: string;
+      nextMarkId: string | null;
+      kind: 'insert' | 'delete' | 'replace';
+    } | null => this.getLiveAdjacentSuggestionTarget('prev', mark.id);
+    const getNextSuggestionNavigationTarget = (): {
+      markId: string;
+      nextMarkId: string | null;
+      kind: 'insert' | 'delete' | 'replace';
+    } | null => this.getLiveAdjacentSuggestionTarget('next', mark.id);
+    const previousMarkId = getPreviousSuggestionNavigationTarget()?.markId ?? null;
+    const nextMarkId = getNextSuggestionNavigationTarget()?.markId ?? null;
 
     const applyButton = document.createElement('button');
     applyButton.type = 'button';
@@ -3051,7 +3083,8 @@ class MarkPopoverController {
     previousButton.textContent = 'Previous';
     previousButton.title = 'Previous change (Cmd/Ctrl+Alt+[';
     installTouchSafeButton(previousButton, () => {
-      this.navigateToSuggestion(previousMarkId);
+      const target = getPreviousSuggestionNavigationTarget();
+      this.navigateToSuggestion(target?.markId ?? null);
     }, {
       preventMousePointerDown: false,
       preventMouseDown: false,
@@ -3064,7 +3097,8 @@ class MarkPopoverController {
     nextButton.textContent = 'Next';
     nextButton.title = 'Next change (Cmd/Ctrl+Alt+])';
     installTouchSafeButton(nextButton, () => {
-      this.navigateToSuggestion(nextMarkId);
+      const target = getNextSuggestionNavigationTarget();
+      this.navigateToSuggestion(target?.markId ?? null);
     }, {
       preventMousePointerDown: false,
       preventMouseDown: false,

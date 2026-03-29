@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 
-import { buildSuggestionReviewItems } from '../editor/plugins/mark-popover.ts';
+import {
+  buildSuggestionReviewItems,
+  resolveAdjacentSuggestionActionTarget,
+  resolveSuggestionActionTarget,
+} from '../editor/plugins/mark-popover.ts';
 import type { Mark } from '../formats/marks.ts';
 
 function buildInsertMark(id: string, at: string, from: number, to: number, content: string): Mark {
@@ -55,6 +59,40 @@ function run(): void {
     buildInsertMark('insert-3', '2026-03-29T12:00:15.500Z', 28, 33, 'SIX'),
   ]);
   assert.equal(unrelatedItems.length, 2, 'Expected replacement grouping to reject distant timestamps so unrelated adjacent suggestions stay separate');
+
+  const navigationItems = buildSuggestionReviewItems([
+    buildDeleteMark('delete-red', '2026-03-29T12:01:00.000Z', 0, 3, 'Red'),
+    buildInsertMark('insert-red', '2026-03-29T12:01:00.300Z', 0, 7, 'CRIMSON'),
+    buildDeleteMark('delete-green', '2026-03-29T12:01:05.000Z', 8, 13, 'green'),
+    buildInsertMark('insert-green', '2026-03-29T12:01:05.300Z', 8, 15, 'EMERALD'),
+    buildDeleteMark('delete-blue', '2026-03-29T12:01:10.000Z', 16, 20, 'blue'),
+    buildInsertMark('insert-blue', '2026-03-29T12:01:10.300Z', 16, 21, 'AZURE'),
+    buildDeleteMark('delete-yellow', '2026-03-29T12:01:15.000Z', 22, 28, 'yellow'),
+    buildInsertMark('insert-yellow', '2026-03-29T12:01:15.300Z', 22, 26, 'GOLD'),
+  ]);
+  assert.equal(navigationItems.length, 4, 'Expected four overwrite pairs to remain as four review items');
+
+  const liveTarget = resolveSuggestionActionTarget(navigationItems, ['delete-yellow']);
+  assert.deepEqual(
+    liveTarget,
+    {
+      markId: 'insert-yellow',
+      nextMarkId: 'delete-red',
+      kind: 'replace',
+    },
+    'Expected live review actions to resolve from the grouped replacement item instead of the raw active delete mark',
+  );
+
+  const previousTarget = resolveAdjacentSuggestionActionTarget(navigationItems, ['delete-yellow'], 'prev');
+  assert.deepEqual(
+    previousTarget,
+    {
+      markId: 'delete-blue',
+      nextMarkId: 'insert-yellow',
+      kind: 'replace',
+    },
+    'Expected previous navigation to move to the adjacent replacement review item instead of staying on the current one',
+  );
 
   console.log('mark-popover-replacement-pair-regression.test.ts passed');
 }

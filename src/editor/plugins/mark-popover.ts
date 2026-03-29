@@ -100,6 +100,12 @@ export type SuggestionReviewItem = {
   deleteMark?: Mark;
 };
 
+export type SuggestionActionTarget = {
+  markId: string;
+  nextMarkId: string | null;
+  kind: 'insert' | 'delete' | 'replace';
+};
+
 type InlineTextAccessor = {
   textBetween: (from: number, to: number, blockSeparator?: string, leafText?: string) => string;
 };
@@ -636,6 +642,72 @@ export function buildSuggestionReviewItems(
   return items;
 }
 
+export function getAdjacentSuggestionReviewMarkId(
+  suggestions: SuggestionReviewItem[],
+  currentMarkId: string,
+  direction: 'next' | 'prev',
+): string | null {
+  if (suggestions.length === 0) return null;
+
+  const currentIndex = suggestions.findIndex((item) => item.memberMarkIds.includes(currentMarkId));
+  if (currentIndex < 0) {
+    return direction === 'next'
+      ? (suggestions[0]?.primaryMarkId ?? null)
+      : (suggestions[suggestions.length - 1]?.primaryMarkId ?? null);
+  }
+  if (suggestions.length === 1) return null;
+
+  const nextIndex = direction === 'next'
+    ? (currentIndex + 1) % suggestions.length
+    : (currentIndex - 1 + suggestions.length) % suggestions.length;
+  const nextId = suggestions[nextIndex]?.primaryMarkId ?? null;
+  return nextId === currentMarkId ? null : nextId;
+}
+
+export function resolveSuggestionActionTarget(
+  suggestions: SuggestionReviewItem[],
+  preferredMarkIds: Array<string | null | undefined>,
+): SuggestionActionTarget | null {
+  if (suggestions.length === 0) return null;
+
+  const preferredId = preferredMarkIds.find((value) =>
+    typeof value === 'string'
+    && value.length > 0
+    && suggestions.some((item) => item.memberMarkIds.includes(value)),
+  ) ?? null;
+  const reviewItem = preferredId
+    ? (suggestions.find((item) => item.memberMarkIds.includes(preferredId)) ?? null)
+    : (suggestions[0] ?? null);
+  if (!reviewItem) return null;
+
+  return {
+    markId: reviewItem.primaryMarkId,
+    nextMarkId: getAdjacentSuggestionReviewMarkId(suggestions, reviewItem.primaryMarkId, 'next'),
+    kind: reviewItem.kind,
+  };
+}
+
+export function resolveAdjacentSuggestionActionTarget(
+  suggestions: SuggestionReviewItem[],
+  preferredMarkIds: Array<string | null | undefined>,
+  direction: 'next' | 'prev',
+): SuggestionActionTarget | null {
+  const currentTarget = resolveSuggestionActionTarget(suggestions, preferredMarkIds);
+  if (!currentTarget) return null;
+
+  const adjacentMarkId = getAdjacentSuggestionReviewMarkId(suggestions, currentTarget.markId, direction);
+  if (!adjacentMarkId) return null;
+
+  const adjacentReviewItem = suggestions.find((item) => item.memberMarkIds.includes(adjacentMarkId)) ?? null;
+  if (!adjacentReviewItem) return null;
+
+  return {
+    markId: adjacentReviewItem.primaryMarkId,
+    nextMarkId: getAdjacentSuggestionReviewMarkId(suggestions, adjacentReviewItem.primaryMarkId, 'next'),
+    kind: adjacentReviewItem.kind,
+  };
+}
+
 class MarkPopoverController {
   private view: EditorView;
   private popover: HTMLDivElement;
@@ -714,22 +786,7 @@ class MarkPopoverController {
   }
 
   private getAdjacentSuggestionMarkId(currentMarkId: string, direction: 'next' | 'prev'): string | null {
-    const suggestions = this.getPendingSuggestionReviewItems();
-    if (suggestions.length === 0) return null;
-
-    const currentIndex = suggestions.findIndex((item) => item.memberMarkIds.includes(currentMarkId));
-    if (currentIndex < 0) {
-      return direction === 'next'
-        ? (suggestions[0]?.primaryMarkId ?? null)
-        : (suggestions[suggestions.length - 1]?.primaryMarkId ?? null);
-    }
-    if (suggestions.length === 1) return null;
-
-    const nextIndex = direction === 'next'
-      ? (currentIndex + 1) % suggestions.length
-      : (currentIndex - 1 + suggestions.length) % suggestions.length;
-    const nextId = suggestions[nextIndex]?.primaryMarkId ?? null;
-    return nextId === currentMarkId ? null : nextId;
+    return getAdjacentSuggestionReviewMarkId(this.getPendingSuggestionReviewItems(), currentMarkId, direction);
   }
 
   private getSuggestionReviewFollowupMarkId(
@@ -1423,75 +1480,49 @@ class MarkPopoverController {
 
   private getLiveSuggestionActionTarget(
     fallbackMarkId?: string | null,
-  ): {
-    markId: string;
-    nextMarkId: string | null;
-    kind: 'insert' | 'delete' | 'replace';
-  } | null {
-    let marks = getMarks(this.view.state);
+  ): SuggestionActionTarget | null {
+    let suggestions = this.getPendingSuggestionReviewItems();
     const stateActiveMarkId = getActiveMarkId(this.view.state);
-    const preferredMarkIds = [
+    let preferredMarkIds: Array<string | null | undefined> = [
       stateActiveMarkId,
       this.activeMarkId,
       fallbackMarkId ?? null,
-    ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+    ];
 
-    let activeMark: Mark | undefined;
-    for (const preferredMarkId of preferredMarkIds) {
-      activeMark = marks.find((item) => item.id === preferredMarkId);
-      if (activeMark) break;
-    }
-
-    if (!activeMark) {
-      const fallbackPendingMarkId = this.getFirstPendingSuggestionMarkId();
-      if (fallbackPendingMarkId) {
-        activeMark = marks.find((item) => item.id === fallbackPendingMarkId);
-      }
-    }
-
-    if (!activeMark && this.reopenFirstPendingSuggestion()) {
-      marks = getMarks(this.view.state);
+    let target = resolveSuggestionActionTarget(suggestions, preferredMarkIds);
+    if (!target && this.reopenFirstPendingSuggestion()) {
+      suggestions = this.getPendingSuggestionReviewItems();
       const reboundMarkId = getActiveMarkId(this.view.state) ?? this.activeMarkId;
-      if (reboundMarkId) {
-        activeMark = marks.find((item) => item.id === reboundMarkId);
-      }
+      preferredMarkIds = [reboundMarkId];
+      target = resolveSuggestionActionTarget(suggestions, preferredMarkIds);
     }
 
-    if (!activeMark || (activeMark.kind !== 'insert' && activeMark.kind !== 'delete' && activeMark.kind !== 'replace')) return null;
-
-    return {
-      markId: activeMark.id,
-      nextMarkId: this.getAdjacentSuggestionMarkId(activeMark.id, 'next'),
-      kind: activeMark.kind,
-    };
+    return target;
   }
 
   private getLiveAdjacentSuggestionTarget(
     direction: 'next' | 'prev',
     fallbackMarkId?: string | null,
-  ): {
-    markId: string;
-    nextMarkId: string | null;
-    kind: 'insert' | 'delete' | 'replace';
-  } | null {
-    const currentTarget = this.getLiveSuggestionActionTarget(fallbackMarkId);
-    if (!currentTarget) return null;
-
-    const adjacentMarkId = this.getAdjacentSuggestionMarkId(currentTarget.markId, direction);
-    if (!adjacentMarkId) return null;
-
-    const adjacentTarget = this.getLiveSuggestionActionTarget(adjacentMarkId);
-    if (adjacentTarget) {
-      return adjacentTarget;
+  ): SuggestionActionTarget | null {
+    let suggestions = this.getPendingSuggestionReviewItems();
+    let target = resolveAdjacentSuggestionActionTarget(
+      suggestions,
+      [
+        getActiveMarkId(this.view.state),
+        this.activeMarkId,
+        fallbackMarkId ?? null,
+      ],
+      direction,
+    );
+    if (!target && this.reopenFirstPendingSuggestion()) {
+      suggestions = this.getPendingSuggestionReviewItems();
+      target = resolveAdjacentSuggestionActionTarget(
+        suggestions,
+        [getActiveMarkId(this.view.state) ?? this.activeMarkId],
+        direction,
+      );
     }
-
-    const adjacentReviewItem = this.getSuggestionReviewItemByMarkId(adjacentMarkId);
-    if (!adjacentReviewItem) return null;
-    return {
-      markId: adjacentReviewItem.primaryMarkId,
-      nextMarkId: this.getAdjacentSuggestionMarkId(adjacentReviewItem.primaryMarkId, 'next'),
-      kind: adjacentReviewItem.kind,
-    };
+    return target;
   }
 
   private getSortedPendingReviewActionIds(markIds: string[]): string[] {

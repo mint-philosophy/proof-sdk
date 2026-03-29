@@ -1,16 +1,22 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `b973f5d2373b4371829134d05c92de581ab47c77afd44b0bdfd998d990cabf24`
-- Local `/health` now reports build SHA `a54a0ba87c141558ff1c98b2589673df615f5efc`
+- Live client bundle on `proof-test.mintresearch.org`: `36e8194bc61d09b51d8b284579af78e81d0e719fec15361924d934c7170d17e5`
+- Local `/health` now reports build SHA `d41469304533bd0734c3bbbb0ca4828c0d6c2190`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
-- Browser QA on `fix62` (`a54a0ba`) now passes the primary insertion lane:
-  - typed insert renders as one inline green span with `widgetCount=0`
-  - deleting elsewhere no longer duplicates the insert
-  - overwrite now produces one delete + one insert as expected
-  - warm reload preserves the pending inserts/deletes
-- Remaining browser-known lane after `fix62`: clicking inline insert text / rail badge still does not open the review popover, so insertion accept/reject remains blocked behind the popover target path
+- Browser QA on `fix63` (`d414693`) now passes the multi-operation stability regression:
+  - `insert -> delete elsewhere -> overwrite elsewhere` stays stable
+  - no corruption and no fragmentation in the live edit lane
+  - remaining known follow-ups from browser QA:
+    - overwrite-created insert can still revert from inline to widget on warm reload
+    - `Accept & Next` reportedly accepted all pending marks in one click
+    - insertion `Reject & Next` reportedly kept the inserted text instead of removing it
+    - undo is still partial, and formatting changes still bypass TC
 - Last commits in this session:
+  - pending `fix64`: guard review actions during follow-up transition and make reject fallback remove materialized insert text
+  - `d414693` `fix63: preserve rich live insert metadata in share sync`
+  - `392fe58` `docs: record fix62 browser QA pass`
+  - `a6d6ae4` `docs: record fix62 handoff`
   - `a54a0ba` `fix62: materialize collapsed inserts onto live text`
   - `fix53` pending commit: route recent raw Yjs plain-text self-echoes through remote repair
   - `fix52` pending commit: preserve exact metadata anchors for materialized pending inserts
@@ -24,6 +30,33 @@
   - `273b3b6` `fix44: use prosemirror default text input transactions`
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Pending fix64 review-action regressions
+
+Shared reports:
+- `fix63` solved the multi-operation corruption lane, but browser QA still reported two high-severity review regressions:
+  - `Accept & Next` appeared to accept every pending mark instead of just the current review item
+  - insertion reject via the right-click review path kept the inserted text instead of removing it
+
+What changed locally:
+- `src/editor/plugins/mark-popover.ts`
+  - `runSuggestionReviewAction(...)` now refuses to start a second review mutation while `suggestionReviewTransitionPending` is true
+  - this is meant to block a trailing synthetic click from re-firing the next review button while the panel is auto-advancing
+- `server/document-engine.ts`
+  - added `buildRejectedSuggestionMarkdown(...)` for reject-side canonical rewrite fallback
+  - reject fallback now removes materialized insert text instead of preserving the current markdown unchanged when hydration falls back
+  - the same reject-side canonical rewrite is applied in both sync and async single-mark suggestion mutation paths
+- `src/tests/document-engine-reject-insert-regression.test.ts`
+  - new regression covering materialized insert rejection and anchor-based inline insert rejection
+- `src/tests/mark-popover-review-followup-regression.test.ts`
+  - updated source guard requiring the follow-up transition guard in review actions
+
+Verified locally:
+- `npx tsx src/tests/document-engine-reject-insert-regression.test.ts`
+- `npx tsx src/tests/mark-popover-review-followup-regression.test.ts`
+- `npx tsx src/tests/share-track-changes-multi-insert-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npm run build`
 
 ## Fix62 materialize collapsed inserts onto live text
 

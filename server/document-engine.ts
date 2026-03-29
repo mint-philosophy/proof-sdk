@@ -916,6 +916,64 @@ export function __buildAcceptedSuggestionMarkdownForTests(markdown: string, sugg
   return buildAcceptedSuggestionMarkdown(markdown, suggestion);
 }
 
+function getStoredSuggestionSourceSelection(
+  markdown: string,
+  suggestion: StoredMark,
+): { sourceStart: number; sourceEnd: number } | null {
+  const storedRange = getStoredMarkRange(suggestion);
+  const startOffset = parseRelativeCharOffset(suggestion.startRel) ?? storedRange?.from ?? null;
+  const endOffset = parseRelativeCharOffset(suggestion.endRel) ?? storedRange?.to ?? null;
+  if (startOffset === null || endOffset === null || endOffset <= startOffset) return null;
+
+  const { stripped, map } = stripMarkdownWithMapping(markdown);
+  const canonical = canonicalizeVisibleTextWithMapping(stripped, map);
+  return mapVisibleSelectionToSourceRange(markdown, canonical.map, startOffset, endOffset);
+}
+
+function buildRejectedSuggestionMarkdown(markdown: string, suggestion: StoredMark): string | null {
+  if (suggestion.kind === 'delete') return markdown;
+
+  if (suggestion.kind === 'insert') {
+    const content = typeof suggestion.content === 'string' ? suggestion.content : '';
+    const normalizedContent = normalizeQuote(content);
+    const sourceSelection = getStoredSuggestionSourceSelection(markdown, suggestion);
+    if (sourceSelection) {
+      const span = expandMarkdownSpan(markdown, sourceSelection.sourceStart, sourceSelection.sourceEnd);
+      const spanText = normalizeQuote(stripAllProofSpanTags(markdown.slice(span.start, span.end)));
+      if (
+        spanText.length > 0
+        && normalizedContent.length > 0
+        && (spanText === normalizedContent
+          || spanText.includes(normalizedContent)
+          || normalizedContent.includes(spanText))
+      ) {
+        return `${markdown.slice(0, span.start)}${markdown.slice(span.end)}`;
+      }
+    }
+
+    const quote = typeof suggestion.quote === 'string' ? suggestion.quote : '';
+    if (!quote || !content) return markdown;
+    const anchorSpan = findQuoteSpanInMarkdown(markdown, quote);
+    if (anchorSpan) {
+      const afterAnchor = markdown.slice(anchorSpan.end);
+      if (afterAnchor.startsWith(content)) {
+        return `${markdown.slice(0, anchorSpan.end)}${afterAnchor.slice(content.length)}`;
+      }
+    }
+
+    const combined = `${quote}${content}`;
+    const replaced = replaceFirstOccurrence(markdown, combined, quote);
+    if (replaced !== null) return replaced;
+    return markdown;
+  }
+
+  return markdown;
+}
+
+export function __buildRejectedSuggestionMarkdownForTests(markdown: string, suggestion: StoredMark): string | null {
+  return buildRejectedSuggestionMarkdown(markdown, suggestion);
+}
+
 function getDeleteSuggestionCleanupOffsets(markdown: string, suggestion: StoredMark): number[] {
   if (suggestion.kind !== 'delete') return [];
   const quote = typeof suggestion.quote === 'string' ? suggestion.quote : '';
@@ -2398,6 +2456,11 @@ function updateSuggestionStatus(
       acceptedMarkdown,
       deleteCleanupOffsets,
     );
+  } else if (status === 'rejected' && (existing.kind === 'insert' || existing.kind === 'delete' || existing.kind === 'replace')) {
+    const rejectedMarkdown = buildRejectedSuggestionMarkdown(doc.markdown, existingForApply.mark);
+    if (rejectedMarkdown !== null) {
+      nextMarkdown = applyMutationCleanup('POST /marks/reject', rejectedMarkdown);
+    }
   }
 
   const ok = updateDocumentAtomic(
@@ -2889,9 +2952,10 @@ async function updateSuggestionStatusAsync(
     ) {
       const nextMarks = { ...marks };
       delete nextMarks[markId];
+      const rejectedMarkdown = buildRejectedSuggestionMarkdown(doc.markdown, stabilizedExisting) ?? doc.markdown;
       const mutation = await mutateCanonicalDocument({
         slug,
-        nextMarkdown: doc.markdown,
+        nextMarkdown: applyMutationCleanup('POST /marks/reject', rejectedMarkdown),
         nextMarks: nextMarks as unknown as Record<string, unknown>,
         source: `engine:${status}:${actor}:fallback`,
         baseRevision: doc.revision,
@@ -3120,7 +3184,14 @@ async function computeSuggestionStatusTransition(
     ) {
       const nextMarks = { ...marks };
       delete nextMarks[markId];
-      return { ok: true, nextMarkdown: markdown, nextMarks };
+      return {
+        ok: true,
+        nextMarkdown: applyMutationCleanup(
+          'POST /marks/reject',
+          buildRejectedSuggestionMarkdown(markdown, stabilizedExisting) ?? markdown,
+        ),
+        nextMarks,
+      };
     }
     return { ok: false, result: toStructuredMutationFailureResult(structuredResult, 'Suggestion anchor quote not found in document') };
   }

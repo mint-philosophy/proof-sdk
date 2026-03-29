@@ -1381,7 +1381,7 @@ class MarkPopoverController {
     _suggestionKind: 'insert' | 'delete' | 'replace',
     options?: { followupMode?: 'advance' | 'close' },
   ): void {
-    if (this.reviewActionInFlight) {
+    if (this.reviewActionInFlight || this.suggestionReviewTransitionPending) {
       return;
     }
     this.clearReviewActionRetryTimer();

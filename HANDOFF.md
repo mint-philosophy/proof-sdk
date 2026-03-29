@@ -1,8 +1,11 @@
 ## Current state
 
-- Local built client bundle: `25e33cbb215adbbc2fd37266a3e81755e0134f7e46cd09dcb5e2f280da5f76af`
-- Local `/health` before the next restart still reports build SHA `857ec7749106fca719eea3e03d62d6a1209f5b41`
-- `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
+- Local built client bundle: `6ec91aa1af9e5bbb6516975e58761fe2689df279fa0e44ddecd1400ac82aa6b4`
+- Local `/health` now reports build SHA `b15c0d4301e225ad9ab030696d0409733f8a2cd2`
+- The shared proof daemon is currently configured for local testing on this VM:
+  - `PROOF_PUBLIC_BASE_URL=http://127.0.0.1:4010`
+  - `COLLAB_PUBLIC_BASE_URL=ws://127.0.0.1:4010/ws`
+- `proof-test.mintresearch.org` was returning `502` during `fix69`, so public `/health` and public asset hashes were not reliable for that lane
 - Branch: `codex/simple-markup-rebuild-20260322`
 - Browser QA on `fix64` (`857ec77`) confirmed the core review lane is now working end to end:
   - typed insertion marks create as single inline spans
@@ -10,6 +13,11 @@
   - hard reload preserves inserts and deletes
   - `Accept & Next` no longer cascades across all marks
   - reject on insertion now removes the inserted text correctly
+- Browser QA on `fix69` (`b15c0d4`) confirmed the full overwrite accept lane now passes locally:
+  - overwrite created one delete plus grouped insert spans
+  - `Accept & Next` on the insertion consumed the insert and advanced cleanly
+  - `Accept & Next` on the remaining deletion then consumed the delete
+  - final state after the lane was clean text with `0` inserts, `0` deletes, and `0` rails
 - `fix65` (`fce6f1f`) is the next browser candidate:
   - it targets the remaining undo blocker where `Cmd+Z` after a tracked deletion appears to do nothing
   - the fix reconciles stale suggestion metadata after history undo so a removed delete mark cannot be reconstructed from metadata on the next pass
@@ -26,9 +34,14 @@
   - the local verification step now checks not just the original resolved ids, but also any equivalent pending suggestion that still matches the accepted source mark
   - if either survives, the editor force-applies the canonical result and rechecks before allowing the review flow to continue
 - Remaining known follow-ups after fix64:
+  - `Bug 25`: the Edit / Track Changes toolbar toggle still disappears during review workflow
+  - `Bug 6`: undo still does not reliably remove TC marks
+  - `Bug 10`: formatting changes still bypass TC
+  - structural edit coverage still needs another pass
   - warm reload can still revert some overwrite-created inserts from inline to widget
-  - formatting changes still bypass TC
+  - restore the Cloudflare tunnel for `proof-test.mintresearch.org` once local testing is no longer enough
 - Last commits in this session:
+  - `b15c0d4` `fix69: reverify persisted accept after collab settle`
   - `fix68` pending commit: verify deletion accepts against equivalent pending marks
   - `fix67` pending commit: verify persisted insert accepts are actually cleared locally
   - `fix66` pending commit: hoist `hasHistoryChange` so TC appendTransaction no longer crashes

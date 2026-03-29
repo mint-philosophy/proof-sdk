@@ -1735,6 +1735,12 @@ class MarkPopoverController {
   private isEventWithinInteractivePopoverChrome(event: PointerEvent | MouseEvent): boolean {
     const target = event.target;
     const composedPath = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    const targetElement = target instanceof Element
+      ? target
+      : (target instanceof Node ? target.parentElement : null);
+    if (targetElement?.closest('.mark-popover, .mark-mobile-strip, .mark-review-context-menu')) {
+      return true;
+    }
     const isWithinElement = (element: HTMLElement): boolean => {
       if (target instanceof Node && element.contains(target)) return true;
       if (composedPath.includes(element)) return true;

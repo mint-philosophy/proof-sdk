@@ -161,6 +161,7 @@ import {
   type StoredMark,
   buildCanonicalShareMarkMetadata,
   mergePendingServerMarks,
+  pruneLocallyRemovedPendingSuggestionServerMarks,
   tombstoneResolvedMarkIds,
   getMarksByKind,
   getPendingSuggestions,
@@ -1366,6 +1367,7 @@ class ProofEditorImpl implements ProofEditor {
   private lastEditorInputActivitySentAt: number = 0;
   private lastLocalTypingAt: number = 0;
   private pendingDomSuggestionSelection: MarkRange | null = null;
+  private lastObservedPendingSuggestionIds = new Set<string>();
   private runtimeTraceSeq: number = 0;
   private runtimeDispatchDepth: number = 0;
   private runtimeUpdateStateDepth: number = 0;
@@ -6723,9 +6725,32 @@ class ProofEditorImpl implements ProofEditor {
     actionMetadata?: Record<string, StoredMark>
   ): void {
     if (this.suppressMarksSync) return;
+
+    const previousPendingSuggestionIds = this.lastObservedPendingSuggestionIds;
+    const nextPendingSuggestionIds = new Set(
+      Object.entries(actionMetadata ?? {})
+        .filter(([, entry]) =>
+          (entry?.kind === 'insert' || entry?.kind === 'delete' || entry?.kind === 'replace')
+          && entry.status === 'pending'
+        )
+        .map(([id]) => id),
+    );
+    const removedPendingSuggestionIds = [...previousPendingSuggestionIds].filter(
+      (id) => !nextPendingSuggestionIds.has(id),
+    );
+    this.lastObservedPendingSuggestionIds = nextPendingSuggestionIds;
+
     // Authored-only edits can trigger marks callbacks with no actionable marks.
-    // Skipping avoids pushing stale markdown snapshots during fast typing.
-    if (actionMarks.length === 0) return;
+    // Keep skipping those, but do not skip transitions where pending suggestions
+    // were removed; share-mode caches must see the clear or stale pending marks
+    // will be merged back after history/review operations.
+    if (
+      actionMarks.length === 0
+      && nextPendingSuggestionIds.size === 0
+      && removedPendingSuggestionIds.length === 0
+    ) {
+      return;
+    }
 
     let markdown = this.serializeMarkdown(view);
     if (!markdown) {
@@ -6749,9 +6774,14 @@ class ProofEditorImpl implements ProofEditor {
       liveMetadata = syncInsertSuggestionMetadataFromDoc(view.state.doc, liveMetadata, liveInsertIds);
     }
 
-    const metadata = mergePendingServerMarks(
+    const serverMarksForMerge = pruneLocallyRemovedPendingSuggestionServerMarks(
+      previousPendingSuggestionIds,
       liveMetadata,
       this.lastReceivedServerMarks,
+    );
+    const metadata = mergePendingServerMarks(
+      liveMetadata,
+      serverMarksForMerge,
     );
     const persistedMetadata = this.isShareMode
       ? buildCanonicalShareMarkMetadata(view.state, metadata)

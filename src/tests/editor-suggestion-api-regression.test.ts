@@ -158,12 +158,16 @@ function run(): void {
       && handleMarksChangeBlock.includes('if (this.isShareMode) {')
       && handleMarksChangeBlock.includes("const liveInsertIds = actionMarks")
       && handleMarksChangeBlock.includes("syncInsertSuggestionMetadataFromDoc(view.state.doc, liveMetadata, liveInsertIds)")
+      && handleMarksChangeBlock.includes('const previousPendingSuggestionIds = this.lastObservedPendingSuggestionIds;')
+      && handleMarksChangeBlock.includes('const removedPendingSuggestionIds = [...previousPendingSuggestionIds].filter(')
+      && handleMarksChangeBlock.includes('pruneLocallyRemovedPendingSuggestionServerMarks(')
       && handleMarksChangeBlock.includes('this.scheduleShareMarksFlush();')
       && handleMarksChangeBlock.includes('Let content flow through the existing collab binding')
       && handleMarksChangeBlock.includes('} else if (this.collabEnabled && this.collabCanEdit) {')
       && handleMarksChangeBlock.includes('collabClient.setMarksMetadata(metadata);')
+      && !handleMarksChangeBlock.includes('if (actionMarks.length === 0) return;')
       && !handleMarksChangeBlock.includes('this.flushShareMarks();'),
-    'Expected share-mode mark updates to resync live insert metadata from the document, then defer the share flush until after the dispatch cycle instead of pushing marks immediately during tracked typing',
+    'Expected share-mode mark updates to resync live insert metadata from the document, prune stale cached pending suggestion ids after local removals, and defer the share flush until after the dispatch cycle instead of pushing marks immediately during tracked typing',
   );
 
   const createTrackChangesToggleBlock = sliceBetween(
@@ -430,7 +434,6 @@ function run(): void {
       && preserveInsertCoalescingBlock.includes("return carriesIncomingSuggestionMarks || isExplicitYjsChangeOriginTransaction(transaction);"),
     'Expected remote self-echo handling to preserve tracked-insert coalescing only for focused recent local typing in collab mode',
   );
-
   const applyPendingCollabTemplateBlock = sliceBetween(editorSource, '  private applyPendingCollabTemplate(): void {', '\n  private disconnectCollabService(): void {');
   assert(
     editorSource.includes('private runWithTrackChangesSystemTransactionsSuppressed<T>(run: () => T): T {')

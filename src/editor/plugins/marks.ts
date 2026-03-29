@@ -1835,6 +1835,36 @@ function getPendingSuggestionAnchorRichness(mark: StoredMark | undefined): numbe
   return score;
 }
 
+function isPendingSuggestionMark(mark: StoredMark | undefined): boolean {
+  if (!mark) return false;
+  const kind = mark.kind;
+  return (kind === 'insert' || kind === 'delete' || kind === 'replace')
+    && mark.status === 'pending';
+}
+
+export function pruneLocallyRemovedPendingSuggestionServerMarks(
+  previousPendingSuggestionIds: Iterable<string>,
+  currentMetadata: Record<string, StoredMark>,
+  serverMarks: Record<string, StoredMark>,
+): Record<string, StoredMark> {
+  const canonicalCurrent = canonicalizeStoredMarks(currentMetadata);
+  const canonicalServer = canonicalizeStoredMarks(serverMarks);
+  const currentPendingIds = new Set(
+    Object.entries(canonicalCurrent)
+      .filter(([, mark]) => isPendingSuggestionMark(mark))
+      .map(([id]) => id),
+  );
+  const nextServerMarks = { ...canonicalServer };
+
+  for (const id of previousPendingSuggestionIds) {
+    if (currentPendingIds.has(id)) continue;
+    if (!isPendingSuggestionMark(nextServerMarks[id])) continue;
+    delete nextServerMarks[id];
+  }
+
+  return canonicalizeStoredMarks(nextServerMarks);
+}
+
 export function mergePendingServerMarks(
   localMetadata: Record<string, StoredMark>,
   serverMarks: Record<string, StoredMark>,

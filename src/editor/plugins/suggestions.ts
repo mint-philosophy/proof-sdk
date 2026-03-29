@@ -501,6 +501,48 @@ function removeSuggestionIdsFromRange(
   return nextTr;
 }
 
+function buildDisabledInsertedSuggestionCleanupTransaction(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  const diff = detectPlainTextInsertionDiff(oldState, newState);
+  if (!diff) return null;
+
+  const suggestionType = newState.schema.marks.proofSuggestion;
+  if (!suggestionType) return null;
+
+  let leakedSuggestionMarks = false;
+  newState.doc.nodesBetween(diff.from, diff.to, (node) => {
+    if (!node.isText) return true;
+    if (node.marks.some((mark) => mark.type === suggestionType)) {
+      leakedSuggestionMarks = true;
+      return false;
+    }
+    return true;
+  });
+
+  const currentStored = newState.storedMarks ?? newState.selection.$from.marks();
+  const leakedStoredMarks = currentStored.some((mark) => mark.type === suggestionType);
+  if (!leakedSuggestionMarks && !leakedStoredMarks) return null;
+
+  let tr = newState.tr;
+  if (leakedSuggestionMarks) {
+    tr = tr.removeMark(diff.from, diff.to, suggestionType);
+  }
+  if (leakedStoredMarks) {
+    tr = tr.setStoredMarks(currentStored.filter((mark) => mark.type !== suggestionType));
+  }
+  tr.setMeta('suggestions-wrapped', true);
+  return tr;
+}
+
+export function __debugBuildDisabledInsertedSuggestionCleanupTransaction(
+  oldState: EditorState,
+  newState: EditorState,
+): Transaction | null {
+  return buildDisabledInsertedSuggestionCleanupTransaction(oldState, newState);
+}
+
 function summarizeAppendTransactionsForDebug(trs: readonly Transaction[]): Array<Record<string, unknown>> {
   return trs.map((tr, index) => {
     const suggestionsMeta = tr.getMeta(suggestionsPluginKey) as { enabled?: unknown } | undefined;
@@ -3368,6 +3410,15 @@ export const suggestionsPlugin = $prose(() => {
           const meta = tr.getMeta(suggestionsPluginKey) as { enabled?: unknown } | undefined;
           return Boolean(meta && typeof meta === 'object' && !Array.isArray(meta) && meta.enabled === false);
         });
+        const disabledInsertedCleanupTr = buildDisabledInsertedSuggestionCleanupTransaction(oldState, newState);
+        if (disabledInsertedCleanupTr) {
+          console.log('[suggestions.appendTransaction.tcOffInsertedCleanup]', {
+            from: disabledInsertedCleanupTr.selection.from,
+            to: disabledInsertedCleanupTr.selection.to,
+            transactions: summarizeAppendTransactionsForDebug(trs),
+          });
+          return disabledInsertedCleanupTr;
+        }
         // When TC is off, strip any suggestion marks that leaked onto new content.
         // We check ALL doc-changing transactions, including those marked as
         // 'suggestions-wrapped' — if TC is off, wrapped marks are leaks too.

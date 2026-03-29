@@ -1367,6 +1367,52 @@ class MarkPopoverController {
     return true;
   }
 
+  private getLiveSuggestionActionTarget(
+    fallbackMarkId?: string | null,
+  ): {
+    markId: string;
+    nextMarkId: string | null;
+    kind: 'insert' | 'delete' | 'replace';
+  } | null {
+    let marks = getMarks(this.view.state);
+    const preferredMarkIds = [
+      getActiveMarkId(this.view.state),
+      this.activeMarkId,
+      fallbackMarkId ?? null,
+    ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+    let activeMark: Mark | undefined;
+    for (const preferredMarkId of preferredMarkIds) {
+      activeMark = marks.find((item) => item.id === preferredMarkId);
+      if (activeMark) break;
+    }
+
+    if (!activeMark) {
+      const fallbackPendingMarkId = this.getFirstPendingSuggestionMarkId();
+      if (fallbackPendingMarkId) {
+        activeMark = marks.find((item) => item.id === fallbackPendingMarkId);
+      }
+    }
+
+    if (!activeMark && this.reopenFirstPendingSuggestion()) {
+      marks = getMarks(this.view.state);
+      const reboundMarkId = getActiveMarkId(this.view.state) ?? this.activeMarkId;
+      if (reboundMarkId) {
+        activeMark = marks.find((item) => item.id === reboundMarkId);
+      }
+    }
+
+    if (!activeMark || (activeMark.kind !== 'insert' && activeMark.kind !== 'delete' && activeMark.kind !== 'replace')) {
+      return null;
+    }
+
+    return {
+      markId: activeMark.id,
+      nextMarkId: this.getAdjacentSuggestionMarkId(activeMark.id, 'next'),
+      kind: activeMark.kind,
+    };
+  }
+
   private getSortedPendingReviewActionIds(markIds: string[]): string[] {
     return getPendingSuggestions(getMarks(this.view.state))
       .filter((mark) => markIds.includes(mark.id))
@@ -1378,24 +1424,33 @@ class MarkPopoverController {
     markId: string,
     action: 'accept' | 'reject',
     nextMarkId: string | null,
-    _suggestionKind: 'insert' | 'delete' | 'replace',
+    suggestionKind: 'insert' | 'delete' | 'replace',
     options?: { followupMode?: 'advance' | 'close' },
   ): void {
     if (this.reviewActionInFlight) {
       return;
     }
     if (this.suggestionReviewTransitionPending) {
-      const followupReady = this.mode === 'suggestion'
-        && this.activeMarkId === markId
-        && this.popover.style.display !== 'none';
-      if (!followupReady) {
+      const followupTarget = this.mode === 'suggestion' && this.popover.style.display !== 'none'
+        ? this.getLiveSuggestionActionTarget(markId)
+        : null;
+      if (!followupTarget) {
         return;
       }
+      markId = followupTarget.markId;
+      nextMarkId = followupTarget.nextMarkId;
+      suggestionKind = followupTarget.kind;
       this.suggestionReviewTransitionPending = false;
       if (this.suggestionReviewFollowupTimer !== null) {
         window.clearTimeout(this.suggestionReviewFollowupTimer);
         this.suggestionReviewFollowupTimer = null;
       }
+    }
+    const liveTarget = this.getLiveSuggestionActionTarget(markId);
+    if (liveTarget) {
+      markId = liveTarget.markId;
+      nextMarkId = liveTarget.nextMarkId;
+      suggestionKind = liveTarget.kind;
     }
     this.clearReviewActionRetryTimer();
     this.hideReviewContextMenu();
@@ -1451,9 +1506,6 @@ class MarkPopoverController {
         this.suggestionReviewTransitionPending = false;
         this.close();
         return;
-      }
-      if (nextMarkId) {
-        this.navigateToSuggestion(nextMarkId);
       }
       this.openSuggestionAfterReview(nextMarkId, reviewedMarkIds);
     };
@@ -2767,32 +2819,7 @@ class MarkPopoverController {
       markId: string;
       nextMarkId: string | null;
       kind: 'insert' | 'delete' | 'replace';
-    } | null => {
-      let marks = getMarks(this.view.state);
-      const preferredMarkId = this.activeMarkId ?? mark.id;
-      let activeMark = marks.find((item) => item.id === preferredMarkId);
-      if (!activeMark) {
-        const fallbackMarkId = this.getFirstPendingSuggestionMarkId();
-        if (fallbackMarkId) {
-          activeMark = marks.find((item) => item.id === fallbackMarkId);
-        }
-      }
-      if (!activeMark && this.reopenFirstPendingSuggestion()) {
-        marks = getMarks(this.view.state);
-        const reboundMarkId = this.activeMarkId;
-        if (reboundMarkId) {
-          activeMark = marks.find((item) => item.id === reboundMarkId);
-        }
-      }
-      if (!activeMark || (activeMark.kind !== 'insert' && activeMark.kind !== 'delete' && activeMark.kind !== 'replace')) {
-        return null;
-      }
-      return {
-        markId: activeMark.id,
-        nextMarkId: this.getAdjacentSuggestionMarkId(activeMark.id, 'next'),
-        kind: activeMark.kind,
-      };
-    };
+    } | null => this.getLiveSuggestionActionTarget(mark.id);
 
     const applyButton = document.createElement('button');
     applyButton.type = 'button';

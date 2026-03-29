@@ -18,12 +18,16 @@ function run(): void {
 
   assert(
     source.includes('const getActiveSuggestionActionTarget = (): {')
-      && source.includes('const preferredMarkId = this.activeMarkId ?? mark.id;')
-      && source.includes('const fallbackMarkId = this.getFirstPendingSuggestionMarkId();')
-      && source.includes("nextMarkId: this.getAdjacentSuggestionMarkId(activeMark.id, 'next'),")
+      && source.includes('private getLiveSuggestionActionTarget(')
+      && source.includes('getActiveMarkId(this.view.state),')
+      && source.includes('this.activeMarkId,')
+      && source.includes('fallbackMarkId ?? null,')
+      && source.includes('const fallbackPendingMarkId = this.getFirstPendingSuggestionMarkId();')
+      && source.includes("const getActiveSuggestionActionTarget = (): {")
+      && source.includes('} | null => this.getLiveSuggestionActionTarget(mark.id);')
       && source.includes("this.runSuggestionReviewAction(target.markId, 'reject', target.nextMarkId, target.kind, {")
       && source.includes("this.runSuggestionReviewAction(target.markId, 'accept', target.nextMarkId, target.kind, {"),
-    'Expected review action buttons to resolve the active mark and next target at click time so a stale popover cannot keep firing the previous mark id after navigation',
+    'Expected review actions to resolve the live active suggestion target from editor state at click time so an auto-advanced popover cannot keep firing a stale mark id after navigation',
   );
 
   assert(
@@ -52,26 +56,30 @@ function run(): void {
       && source.includes('preserveReviewTransition: this.suggestionReviewTransitionPending,')
       && source.includes('if (this.suggestionReviewTransitionPending) {')
       && source.includes('if (!activeMark && this.reopenFirstPendingSuggestion()) {')
-      && source.includes('const reboundMarkId = this.activeMarkId;'),
+      && source.includes('const reboundMarkId = getActiveMarkId(this.view.state) ?? this.activeMarkId;'),
     'Expected stale suggestion popovers to rebind to the first remaining pending suggestion after collab reseeds, and to keep the review transition alive instead of closing during transient mixed-mark gaps',
   );
 
   assert(
     source.includes('private reviewActionInFlight: boolean = false;')
       && source.includes('if (this.reviewActionInFlight) {')
-      && source.includes('const followupReady = this.mode === \'suggestion\'')
-      && source.includes('this.activeMarkId === markId')
+      && source.includes("const followupTarget = this.mode === 'suggestion' && this.popover.style.display !== 'none'")
+      && source.includes('markId = followupTarget.markId;')
+      && source.includes('nextMarkId = followupTarget.nextMarkId;')
+      && source.includes('suggestionKind = followupTarget.kind;')
+      && source.includes('const liveTarget = this.getLiveSuggestionActionTarget(markId);')
       && source.includes('this.suggestionReviewTransitionPending = false;')
       && source.includes('this.reviewActionInFlight = true;')
       && source.includes('this.reviewActionInFlight = false;'),
-    'Expected review actions to block duplicate dispatch while a persisted accept/reject is in flight, but to let a visible auto-advanced follow-up mark cancel the stale transition guard and accept the next click',
+    'Expected review actions to block duplicate dispatch while a persisted accept/reject is in flight, but to rebind stale auto-advanced clicks onto the live pending suggestion before running the next mutation',
   );
 
   assert(
     source.includes("if (!options?.preserveReviewTransition && this.suggestionReviewFollowupTimer !== null) {")
       && source.includes('if (!options?.preserveReviewTransition) {')
-      && source.includes("preserveReviewTransition?: boolean;"),
-    'Expected openForMark to keep the follow-up timer and transition guard intact during review-driven navigation',
+      && source.includes("preserveReviewTransition?: boolean;")
+      && !source.includes("if (nextMarkId) {\n        this.navigateToSuggestion(nextMarkId);\n      }\n      this.openSuggestionAfterReview(nextMarkId, reviewedMarkIds);"),
+    'Expected openForMark to keep the follow-up timer and transition guard intact during review-driven navigation, and expected review finish to avoid the stale pre-navigation that bound auto-advanced popovers to the wrong mark',
   );
 
   assert(

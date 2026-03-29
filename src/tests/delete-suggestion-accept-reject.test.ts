@@ -63,9 +63,9 @@ async function run(): Promise<void> {
     assertEqual(acceptResult.status, 200, `Expected delete accept to succeed, got ${acceptResult.status}`);
     const acceptedDoc = db.getDocumentBySlug(acceptSlug);
     assertEqual(
-      stripAllProofSpanTags(acceptedDoc?.markdown ?? '').replace(/\s+/g, ' ').trim(),
+      stripAllProofSpanTags(acceptedDoc?.markdown ?? '').trim(),
       'Alpha gamma.',
-      'Expected accepting a normal delete suggestion to remove the deleted text and wrapper',
+      'Expected accepting a normal delete suggestion to remove the deleted text and wrapper without leaving doubled spacing',
     );
     assert(
       !acceptedDoc?.markdown.includes(`data-id="${acceptMarkId}"`),
@@ -90,7 +90,7 @@ async function run(): Promise<void> {
     assertEqual(rejectResult.status, 200, `Expected delete reject to succeed, got ${rejectResult.status}`);
     const rejectedDoc = db.getDocumentBySlug(rejectSlug);
     assertEqual(
-      stripAllProofSpanTags(rejectedDoc?.markdown ?? '').replace(/\s+/g, ' ').trim(),
+      stripAllProofSpanTags(rejectedDoc?.markdown ?? '').trim(),
       'Alpha beta gamma.',
       'Expected rejecting a normal delete suggestion to restore the original text and remove the wrapper',
     );

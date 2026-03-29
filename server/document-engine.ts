@@ -1028,9 +1028,24 @@ export function __buildRejectedSuggestionMarkdownForTests(markdown: string, sugg
 
 function getDeleteSuggestionCleanupOffsets(markdown: string, suggestion: StoredMark): number[] {
   if (suggestion.kind !== 'delete') return [];
+  const offsets = new Set<number>();
   const quote = typeof suggestion.quote === 'string' ? suggestion.quote : '';
   const span = quote ? findRawQuoteSpanInMarkdown(markdown, quote) : null;
-  return span ? [span.start] : [];
+  if (span) {
+    offsets.add(span.start);
+  }
+
+  const startRel = parseRelativeCharOffset(suggestion.startRel);
+  if (startRel !== null) {
+    offsets.add(startRel);
+  }
+
+  const range = getStoredMarkRange(suggestion);
+  if (range) {
+    offsets.add(Math.max(0, range.from - 1));
+  }
+
+  return [...offsets].sort((a, b) => a - b);
 }
 
 function replaceFirstOccurrence(source: string, find: string, replace: string): string | null {
@@ -1074,9 +1089,13 @@ function buildAcceptedSuggestionMarkdown(markdown: string, suggestion: StoredMar
   if (suggestion.kind === 'delete') {
     const span = findQuoteSpanInMarkdown(markdown, quote);
     if (span) {
-      return `${markdown.slice(0, span.start)}${markdown.slice(span.end)}`;
+      return collapseAcceptedDeleteWhitespaceAtOffset(
+        `${markdown.slice(0, span.start)}${markdown.slice(span.end)}`,
+        span.start,
+      );
     }
-    return replaceFirstOccurrence(markdown, quote, '');
+    const accepted = replaceFirstOccurrence(markdown, quote, '');
+    return accepted === null ? null : collapseAcceptedDeleteWhitespaceAtOffset(accepted, markdown.indexOf(quote));
   }
 
   if (suggestion.kind === 'replace') {
@@ -1649,7 +1668,10 @@ function buildAcceptedSuggestionMarkdownFromSelection(
   }
 
   if (suggestion.kind === 'delete') {
-    return `${markdown.slice(0, span.start)}${markdown.slice(span.end)}`;
+    return collapseAcceptedDeleteWhitespaceAtOffset(
+      `${markdown.slice(0, span.start)}${markdown.slice(span.end)}`,
+      span.start,
+    );
   }
 
   if (suggestion.kind === 'replace') {
@@ -1783,15 +1805,48 @@ function buildStoredSelectionMetadata(
   return { quote: normalizedFallback };
 }
 
+function collapseAcceptedDeleteWhitespaceAtOffset(markdown: string, offset: number): string {
+  const clampedOffset = Math.max(0, Math.min(markdown.length, Math.trunc(offset)));
+  let start = clampedOffset;
+  while (start > 0 && markdown[start - 1] === ' ') start -= 1;
+  let end = clampedOffset;
+  while (end < markdown.length && markdown[end] === ' ') end += 1;
+
+  if ((end - start) < 2) return markdown;
+  if (start === 0 || end >= markdown.length) return markdown;
+  if (markdown[start - 1] === '\n' || markdown[end] === '\n') return markdown;
+
+  return `${markdown.slice(0, start)} ${markdown.slice(end)}`;
+}
+
+function collapseAcceptedDeleteWhitespace(markdown: string, cleanupOffsets: number[]): string {
+  if (cleanupOffsets.length === 0) return markdown;
+
+  let nextMarkdown = markdown;
+  const sortedOffsets = [...new Set(cleanupOffsets
+    .filter((offset) => Number.isFinite(offset))
+    .map((offset) => Math.trunc(offset)))]
+    .sort((a, b) => b - a);
+
+  for (const offset of sortedOffsets) {
+    nextMarkdown = collapseAcceptedDeleteWhitespaceAtOffset(nextMarkdown, offset);
+  }
+
+  return nextMarkdown;
+}
+
 function applyMutationCleanup(route: string, markdown: string, structuralCleanupOffsets: number[] = []): string {
   const cleanup = applyPostMutationCleanup(markdown, {
     structuralCleanupEnabled: isStructuralCleanupEnabled(),
     structuralCleanupOffsets,
   });
+  const whitespaceCleanedMarkdown = route === 'POST /marks/accept'
+    ? collapseAcceptedDeleteWhitespace(cleanup.markdown, structuralCleanupOffsets)
+    : cleanup.markdown;
   if (cleanup.structuralCleanupApplied) {
     recordEditStructuralCleanupApplied(route);
   }
-  return cleanup.markdown;
+  return whitespaceCleanedMarkdown;
 }
 
 function readState(slug: string): EngineExecutionResult {
@@ -3055,6 +3110,9 @@ async function updateSuggestionStatusAsync(
   }
 
   let nextMarkdown = structuredResult.markdown;
+  const deleteCleanupOffsets = status === 'accepted' && directAcceptMark.kind === 'delete'
+    ? getDeleteSuggestionCleanupOffsets(doc.markdown, directAcceptMark)
+    : [];
   let nextMarks = (
     status === 'accepted'
       && shouldRebasePendingInsertMarksForAcceptedSuggestion(doc.markdown, nextMarkdown, directAcceptMark)
@@ -3084,6 +3142,8 @@ async function updateSuggestionStatusAsync(
   }
   if (status === 'accepted' && directAcceptMark.kind === 'insert') {
     nextMarkdown = applyMutationCleanup('POST /marks/accept', stripProofSpanTags(nextMarkdown));
+  } else if (status === 'accepted' && directAcceptMark.kind === 'delete') {
+    nextMarkdown = applyMutationCleanup('POST /marks/accept', nextMarkdown, deleteCleanupOffsets);
   }
 
   const mutation = await mutateCanonicalDocument({
@@ -3249,6 +3309,9 @@ async function computeSuggestionStatusTransition(
   }
 
   let nextMarkdown = structuredResult.markdown;
+  const deleteCleanupOffsets = status === 'accepted' && directAcceptMark.kind === 'delete'
+    ? getDeleteSuggestionCleanupOffsets(markdown, directAcceptMark)
+    : [];
   let nextMarks = (
     status === 'accepted'
       && rebasePendingInserts
@@ -3281,6 +3344,8 @@ async function computeSuggestionStatusTransition(
   }
   if (status === 'accepted' && directAcceptMark.kind === 'insert') {
     nextMarkdown = applyMutationCleanup('POST /marks/accept', stripProofSpanTags(nextMarkdown));
+  } else if (status === 'accepted' && directAcceptMark.kind === 'delete') {
+    nextMarkdown = applyMutationCleanup('POST /marks/accept', nextMarkdown, deleteCleanupOffsets);
   }
 
   return {

@@ -26,8 +26,8 @@ function run(): void {
   assert(accepted !== null, 'Expected delete accept helper to produce markdown');
   assertEqual(
     accepted,
-    'Alpha  gamma.',
-    'Expected delete accept helper to remove the entire suggestion wrapper, not leave an empty proof span',
+    'Alpha gamma.',
+    'Expected delete accept helper to remove the suggestion wrapper without leaving a doubled space gap',
   );
 
   const insertMarkId = 'insert-materialized-regression-1234567890abcdef';

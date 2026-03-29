@@ -1375,8 +1375,9 @@ class MarkPopoverController {
     kind: 'insert' | 'delete' | 'replace';
   } | null {
     let marks = getMarks(this.view.state);
+    const stateActiveMarkId = getActiveMarkId(this.view.state);
     const preferredMarkIds = [
-      getActiveMarkId(this.view.state),
+      stateActiveMarkId,
       this.activeMarkId,
       fallbackMarkId ?? null,
     ].filter((value): value is string => typeof value === 'string' && value.length > 0);
@@ -1403,14 +1404,42 @@ class MarkPopoverController {
     }
 
     if (!activeMark || (activeMark.kind !== 'insert' && activeMark.kind !== 'delete' && activeMark.kind !== 'replace')) {
+      console.log('[mark-popover.reviewTarget.resolve]', {
+        resolved: false,
+        fallbackMarkId: fallbackMarkId ?? null,
+        stateActiveMarkId,
+        controllerActiveMarkId: this.activeMarkId,
+        preferredMarkIds,
+        firstPendingSuggestionMarkId: this.getFirstPendingSuggestionMarkId(),
+        pendingReviewItems: this.getPendingSuggestionReviewItems().map((item) => ({
+          primaryMarkId: item.primaryMarkId,
+          memberMarkIds: item.memberMarkIds,
+          kind: item.kind,
+        })),
+      });
       return null;
     }
 
-    return {
+    const target = {
       markId: activeMark.id,
       nextMarkId: this.getAdjacentSuggestionMarkId(activeMark.id, 'next'),
       kind: activeMark.kind,
     };
+    console.log('[mark-popover.reviewTarget.resolve]', {
+      resolved: true,
+      fallbackMarkId: fallbackMarkId ?? null,
+      stateActiveMarkId,
+      controllerActiveMarkId: this.activeMarkId,
+      preferredMarkIds,
+      target,
+      firstPendingSuggestionMarkId: this.getFirstPendingSuggestionMarkId(),
+      pendingReviewItems: this.getPendingSuggestionReviewItems().map((item) => ({
+        primaryMarkId: item.primaryMarkId,
+        memberMarkIds: item.memberMarkIds,
+        kind: item.kind,
+      })),
+    });
+    return target;
   }
 
   private getSortedPendingReviewActionIds(markIds: string[]): string[] {
@@ -1427,6 +1456,19 @@ class MarkPopoverController {
     suggestionKind: 'insert' | 'delete' | 'replace',
     options?: { followupMode?: 'advance' | 'close' },
   ): void {
+    console.log('[mark-popover.reviewAction.start]', {
+      requestedMarkId: markId,
+      action,
+      requestedNextMarkId: nextMarkId,
+      suggestionKind,
+      followupMode: options?.followupMode ?? 'advance',
+      transitionPending: this.suggestionReviewTransitionPending,
+      reviewActionInFlight: this.reviewActionInFlight,
+      controllerActiveMarkId: this.activeMarkId,
+      stateActiveMarkId: getActiveMarkId(this.view.state),
+      mode: this.mode,
+      popoverVisible: this.popover.style.display !== 'none',
+    });
     if (this.reviewActionInFlight) {
       return;
     }
@@ -1434,6 +1476,14 @@ class MarkPopoverController {
       const followupTarget = this.mode === 'suggestion' && this.popover.style.display !== 'none'
         ? this.getLiveSuggestionActionTarget(markId)
         : null;
+      console.log('[mark-popover.reviewAction.followupTransition]', {
+        requestedMarkId: markId,
+        followupTarget,
+        controllerActiveMarkId: this.activeMarkId,
+        stateActiveMarkId: getActiveMarkId(this.view.state),
+        mode: this.mode,
+        popoverVisible: this.popover.style.display !== 'none',
+      });
       if (!followupTarget) {
         return;
       }
@@ -1452,6 +1502,14 @@ class MarkPopoverController {
       nextMarkId = liveTarget.nextMarkId;
       suggestionKind = liveTarget.kind;
     }
+    console.log('[mark-popover.reviewAction.boundTarget]', {
+      action,
+      boundMarkId: markId,
+      boundNextMarkId: nextMarkId,
+      suggestionKind,
+      controllerActiveMarkId: this.activeMarkId,
+      stateActiveMarkId: getActiveMarkId(this.view.state),
+    });
     this.clearReviewActionRetryTimer();
     this.hideReviewContextMenu();
     this.clearReviewActionError(markId);
@@ -1461,6 +1519,20 @@ class MarkPopoverController {
       ? [...reviewItem.memberMarkIds]
       : [markId];
     const shouldAdvanceToNextSuggestion = options?.followupMode !== 'close';
+    console.log('[mark-popover.reviewAction.reviewItem]', {
+      action,
+      markId,
+      reviewActionSequence,
+      reviewItem: reviewItem
+        ? {
+            primaryMarkId: reviewItem.primaryMarkId,
+            memberMarkIds: reviewItem.memberMarkIds,
+            kind: reviewItem.kind,
+          }
+        : null,
+      reviewedMarkIds,
+      shouldAdvanceToNextSuggestion,
+    });
 
     const setReviewButtonsBusy = (busy: boolean): void => {
       const buttons = Array.from(this.popover.querySelectorAll('.mark-popover-actions button')) as HTMLButtonElement[];
@@ -1536,12 +1608,34 @@ class MarkPopoverController {
       }
       const runPersistedSequence = async (): Promise<boolean> => {
         const orderedIds = this.getSortedPendingReviewActionIds(reviewedMarkIds);
+        console.log('[mark-popover.reviewAction.persistedSequence.start]', {
+          action,
+          markId,
+          reviewActionSequence,
+          orderedIds,
+          reviewedMarkIds,
+        });
         if (orderedIds.length === 0) return true;
 
         for (const pendingId of orderedIds) {
           const stillPending = this.getSortedPendingReviewActionIds([pendingId]).length > 0;
+          console.log('[mark-popover.reviewAction.persistedSequence.step]', {
+            action,
+            markId,
+            reviewActionSequence,
+            pendingId,
+            stillPending,
+          });
           if (!stillPending) continue;
           const success = await persistedActionForMark(pendingId);
+          console.log('[mark-popover.reviewAction.persistedSequence.result]', {
+            action,
+            markId,
+            reviewActionSequence,
+            pendingId,
+            success,
+            stillPendingAfter: this.getSortedPendingReviewActionIds([pendingId]).length > 0,
+          });
           if (!success) {
             return this.getSortedPendingReviewActionIds([pendingId]).length === 0;
           }
@@ -1549,6 +1643,14 @@ class MarkPopoverController {
         return true;
       };
       void runPersistedSequence().then((success) => {
+        console.log('[mark-popover.reviewAction.persistedSequence.done]', {
+          action,
+          markId,
+          reviewActionSequence,
+          success,
+          activeMarkId: this.activeMarkId,
+          stateActiveMarkId: getActiveMarkId(this.view.state),
+        });
         if (this.reviewActionSequence !== reviewActionSequence) {
           this.reviewActionInFlight = false;
           return;

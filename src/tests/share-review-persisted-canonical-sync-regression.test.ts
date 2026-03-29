@@ -277,13 +277,34 @@ function run(): void {
     '\n  async markAcceptPersisted(markId: string): Promise<boolean> {',
   );
   assert(
-    editorSource.includes('private pendingSharePersistPromise: Promise<boolean> | null = null;')
+    editorSource.includes('private shareReviewMutationDepth: number = 0;')
+      && editorSource.includes('private deferredShareMarksFlush: boolean = false;')
+      && editorSource.includes('private pendingSharePersistPromise: Promise<boolean> | null = null;')
+      && editorSource.includes('private shouldDeferShareMarksFlush(): boolean {')
+      && editorSource.includes('return this.shareReviewMutationDepth > 0 || this.suppressTrackChangesDuringCollabReconnect;')
+      && editorSource.includes('private deferShareMarksFlush(): void {')
+      && editorSource.includes('this.deferredShareMarksFlush = true;')
+      && editorSource.includes('private releaseDeferredShareMarksFlush(): void {')
+      && editorSource.includes('this.deferredShareMarksFlush = false;')
+      && editorSource.includes('this.scheduleShareMarksFlush();')
       && flushReviewMutationStateBlock.includes('if (this.shareMarksFlushTimer !== null) {')
       && flushReviewMutationStateBlock.includes('clearTimeout(this.shareMarksFlushTimer);')
       && !flushReviewMutationStateBlock.includes("this.flushShareMarks({ persistContent: false, forcePersistMarks: true });")
       && flushReviewMutationStateBlock.includes('const pendingPersist = this.pendingSharePersistPromise;')
       && flushReviewMutationStateBlock.includes('await pendingPersist.catch(() => false);'),
-    'Expected persisted review mutations to cancel a queued async marks-only flush and wait for any in-flight persist before issuing share accept/reject mutations',
+    'Expected persisted review mutations to defer queued share mark flushes while a review mutation or post-mutation reconnect is active, and to wait for any in-flight persist before issuing share accept/reject mutations',
+  );
+
+  const serializedMutationBlock = sliceBetween(
+    editorSource,
+    '  private async runSerializedShareReviewMutation<T>(run: () => Promise<T>): Promise<T> {',
+    '\n  private shouldAwaitShareReviewMutationSettle(): boolean {',
+  );
+  assert(
+    serializedMutationBlock.includes('this.shareReviewMutationDepth += 1;')
+      && serializedMutationBlock.includes('this.shareReviewMutationDepth = Math.max(0, this.shareReviewMutationDepth - 1);')
+      && serializedMutationBlock.includes('this.releaseDeferredShareMarksFlush();'),
+    'Expected serialized share review mutations to hold a dedicated in-flight depth guard and only release deferred marks flushes after the mutation fully unwinds',
   );
 
   const localResolveBlock = sliceBetween(

@@ -153,8 +153,13 @@ function run(): void {
   );
 
   const handleMarksChangeBlock = sliceBetween(editorSource, '  private handleMarksChange(', '\n  private serializeMarkdown(');
+  const scheduleShareMarksFlushBlock = sliceBetween(editorSource, '  private scheduleShareMarksFlush(): void {', '\n  private flushShareMarks(');
+  const flushShareMarksBlock = sliceBetween(editorSource, '  private flushShareMarks(', '\n  private showReadOnlyBanner(): void {');
   assert(
     editorSource.includes('private scheduleShareMarksFlush(): void')
+      && editorSource.includes('private shouldDeferShareMarksFlush(): boolean {')
+      && editorSource.includes('private deferShareMarksFlush(): void {')
+      && editorSource.includes('private releaseDeferredShareMarksFlush(): void {')
       && handleMarksChangeBlock.includes('if (this.isShareMode) {')
       && handleMarksChangeBlock.includes("const liveInsertIds = actionMarks")
       && handleMarksChangeBlock.includes("syncInsertSuggestionMetadataFromDoc(view.state.doc, liveMetadata, liveInsertIds)")
@@ -162,12 +167,16 @@ function run(): void {
       && handleMarksChangeBlock.includes('const removedPendingSuggestionIds = [...previousPendingSuggestionIds].filter(')
       && handleMarksChangeBlock.includes('pruneLocallyRemovedPendingSuggestionServerMarks(')
       && handleMarksChangeBlock.includes('this.scheduleShareMarksFlush();')
+      && scheduleShareMarksFlushBlock.includes('if (this.shouldDeferShareMarksFlush()) {')
+      && scheduleShareMarksFlushBlock.includes('this.deferShareMarksFlush();')
+      && flushShareMarksBlock.includes('if (this.shouldDeferShareMarksFlush()) {')
+      && flushShareMarksBlock.includes('this.deferShareMarksFlush();')
       && handleMarksChangeBlock.includes('Let content flow through the existing collab binding')
       && handleMarksChangeBlock.includes('} else if (this.collabEnabled && this.collabCanEdit) {')
       && handleMarksChangeBlock.includes('collabClient.setMarksMetadata(metadata);')
       && !handleMarksChangeBlock.includes('if (actionMarks.length === 0) return;')
       && !handleMarksChangeBlock.includes('this.flushShareMarks();'),
-    'Expected share-mode mark updates to resync live insert metadata from the document, prune stale cached pending suggestion ids after local removals, and defer the share flush until after the dispatch cycle instead of pushing marks immediately during tracked typing',
+    'Expected share-mode mark updates to resync live insert metadata from the document, prune stale cached pending suggestion ids after local removals, defer the share flush until after the dispatch cycle, and block async marks flushes while persisted review mutations or reconnect suppression are still active',
   );
 
   const createTrackChangesToggleBlock = sliceBetween(

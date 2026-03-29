@@ -1291,6 +1291,7 @@ class ProofEditorImpl implements ProofEditor {
   private lastReceivedServerMarks: Record<string, StoredMark> = {};
   private pendingHydrationMarks: Record<string, StoredMark> | null = null;
   private shareReviewMutationQueue: Promise<void> = Promise.resolve();
+  private shareReviewMutationDepth: number = 0;
   private shareReviewTraceContext: {
     traceId: string;
     action: 'accept' | 'reject';
@@ -1338,6 +1339,7 @@ class ProofEditorImpl implements ProofEditor {
   private shareDocumentUpdatedTimer: ReturnType<typeof setTimeout> | null = null;
   private shareMarksRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shareMarksFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private deferredShareMarksFlush: boolean = false;
   private pendingSharePersistPromise: Promise<boolean> | null = null;
   private pendingShareMarksRefresh: boolean = false;
   private pendingCommentDraftRestoreTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1862,6 +1864,7 @@ class ProofEditorImpl implements ProofEditor {
             }
             if (!this.pendingCollabTemplateMarkdown && !this.pendingCollabRebindOnSync) {
               this.suppressTrackChangesDuringCollabReconnect = false;
+              this.releaseDeferredShareMarksFlush();
             }
           }
           this.updateShareBannerSyncDisplay();
@@ -2125,6 +2128,7 @@ class ProofEditorImpl implements ProofEditor {
       this.pendingCollabTemplateMarkdown = null;
       if (this.collabConnectionStatus === 'connected' && this.collabIsSynced && !this.pendingCollabRebindOnSync) {
         this.suppressTrackChangesDuringCollabReconnect = false;
+        this.releaseDeferredShareMarksFlush();
       }
     }
     this.collabTemplateSeedClaimId = null;
@@ -5405,6 +5409,7 @@ class ProofEditorImpl implements ProofEditor {
 
     this.suppressTrackChangesDuringCollabReconnect = false;
     this.updateShareEditGate();
+    this.releaseDeferredShareMarksFlush();
 
     // Re-enable track changes after the hydration doc reload when either
     // authoritative pending suggestions still exist or the user explicitly
@@ -5494,8 +5499,28 @@ class ProofEditorImpl implements ProofEditor {
     });
   }
 
+  private shouldDeferShareMarksFlush(): boolean {
+    return this.shareReviewMutationDepth > 0 || this.suppressTrackChangesDuringCollabReconnect;
+  }
+
+  private deferShareMarksFlush(): void {
+    if (!this.isShareMode) return;
+    this.deferredShareMarksFlush = true;
+  }
+
+  private releaseDeferredShareMarksFlush(): void {
+    if (!this.deferredShareMarksFlush) return;
+    if (this.shouldDeferShareMarksFlush()) return;
+    this.deferredShareMarksFlush = false;
+    this.scheduleShareMarksFlush();
+  }
+
   private scheduleShareMarksFlush(): void {
     if (!this.isShareMode || this.suppressMarksSync) return;
+    if (this.shouldDeferShareMarksFlush()) {
+      this.deferShareMarksFlush();
+      return;
+    }
     if (this.shareMarksFlushTimer !== null) return;
 
     // Let y-prosemirror publish the local content change into the Yjs fragment
@@ -5508,6 +5533,10 @@ class ProofEditorImpl implements ProofEditor {
 
   private flushShareMarks(_options?: { keepalive?: boolean; persistContent?: boolean; forcePersistMarks?: boolean }): void {
     if (!this.isShareMode || !this.editor || this.suppressMarksSync) return;
+    if (this.shouldDeferShareMarksFlush()) {
+      this.deferShareMarksFlush();
+      return;
+    }
     if (this.shareMarksFlushTimer !== null) {
       clearTimeout(this.shareMarksFlushTimer);
       this.shareMarksFlushTimer = null;
@@ -9978,6 +10007,7 @@ class ProofEditorImpl implements ProofEditor {
       this.preserveEditorStateOnNextCollabReconnect = false;
       this.suppressTrackChangesDuringCollabReconnect = false;
       this.updateShareEditGate();
+      this.releaseDeferredShareMarksFlush();
     }
     if (markdown === null) {
       return this.reloadCanonicalShareDocument();
@@ -10109,10 +10139,13 @@ class ProofEditorImpl implements ProofEditor {
       .catch(() => {})
       .then(() => gate);
     await previous.catch(() => {});
+    this.shareReviewMutationDepth += 1;
     try {
       return await run();
     } finally {
+      this.shareReviewMutationDepth = Math.max(0, this.shareReviewMutationDepth - 1);
       release?.();
+      this.releaseDeferredShareMarksFlush();
     }
   }
 
@@ -10454,6 +10487,7 @@ class ProofEditorImpl implements ProofEditor {
           this.setSuggestionsEnabled(true);
           this.suppressTrackChangesDuringCollabReconnect = false;
           this.updateShareEditGate();
+          this.releaseDeferredShareMarksFlush();
           // Reconnect collab so save/sync keeps working. The preserve flags above
           // ensure connectCollabService skips the doc reset, and the sync handler's
           // applyLatestCollabMarksToEditor will re-anchor any marks that Y.js

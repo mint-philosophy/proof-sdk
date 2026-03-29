@@ -1,20 +1,23 @@
 ## Current state
 
-- Live client bundle on `proof-test.mintresearch.org`: `ac5086e9459e3151464a9b00b3adb1976a93d97941e7ad29f210a0f38f2882bf`
-- Local `/health` now reports build SHA `857ec7749106fca719eea3e03d62d6a1209f5b41`
+- Local built client bundle: `25e33cbb215adbbc2fd37266a3e81755e0134f7e46cd09dcb5e2f280da5f76af`
+- Local `/health` before the next restart still reports build SHA `857ec7749106fca719eea3e03d62d6a1209f5b41`
 - `/health` still reports server SHA `13d34ac958362cee902869c4214768bb6d77c3e9`, so treat the public asset hash as the deploy-freshness check
 - Branch: `codex/simple-markup-rebuild-20260322`
-- Browser QA on `fix63` (`d414693`) passed the multi-operation stability regression:
-  - `insert -> delete elsewhere -> overwrite elsewhere` stays stable
-  - no corruption and no fragmentation in the live edit lane
-- `fix64` (`857ec77`) is now live but not yet browser-verified:
-  - it adds a review-transition guard intended to stop `Accept & Next` from cascading across marks
-  - it adds reject-side canonical rewrite fallback so materialized inserts are removed instead of preserved when reject falls back
-- Remaining known follow-ups before fix64 browser QA:
-  - overwrite-created insert can still revert from inline to widget on warm reload
-  - undo is still partial
+- Browser QA on `fix64` (`857ec77`) confirmed the core review lane is now working end to end:
+  - typed insertion marks create as single inline spans
+  - overwrite creates both delete and insert marks
+  - hard reload preserves inserts and deletes
+  - `Accept & Next` no longer cascades across all marks
+  - reject on insertion now removes the inserted text correctly
+- `fix65` (`fce6f1f`) is the next browser candidate:
+  - it targets the remaining undo blocker where `Cmd+Z` after a tracked deletion appears to do nothing
+  - the fix reconciles stale suggestion metadata after history undo so a removed delete mark cannot be reconstructed from metadata on the next pass
+- Remaining known follow-ups after fix64:
+  - warm reload can still revert some overwrite-created inserts from inline to widget
   - formatting changes still bypass TC
 - Last commits in this session:
+  - `fce6f1f` `fix65: reconcile stale delete metadata after undo`
   - `9af1d9c` `docs: record fix64 rollout`
   - `857ec77` `fix64: stabilize review actions and insert reject fallback`
   - `d414693` `fix63: preserve rich live insert metadata in share sync`
@@ -33,6 +36,35 @@
   - `273b3b6` `fix44: use prosemirror default text input transactions`
   - `c9615af` `fix25: repair fragmented share insert marks on reload`
   - `a004086` `build: resolve finalize script paths via fileURLToPath`
+
+## Fix65 undo metadata reconciliation
+
+Shared reports before the patch:
+- after `fix64`, the create/reload/review workflow was finally stable, but `Cmd+Z` still appeared to do nothing for tracked deletions
+- browser QA showed a delete mark could remain visible after undo even though the history transaction itself fired
+- the most likely failure mode was stale suggestion metadata surviving outside the history stack and rehydrating the deleted mark immediately after undo
+
+What changed:
+- `src/editor/plugins/suggestions.ts`
+  - added `collectActualSuggestionIdsInDoc(...)` to distinguish actual in-document `proofSuggestion` marks from metadata-only pending marks
+  - added `buildHistorySuggestionMetadataReconciliationTransaction(...)`
+  - on history transactions, if an actual suggestion id existed in the pre-undo doc but not in the post-undo doc, and that id still exists in marks metadata, the plugin now emits a metadata-only cleanup transaction
+  - that cleanup runs with `addToHistory: false` and `suggestions-wrapped: true`, so it does not pollute undo history or trigger the normal TC strip path
+- `src/tests/track-changes-undo-delete-regression.test.ts`
+  - new regression proving that raw history undo can leave stale delete metadata behind, and that the new reconciliation transaction removes it
+- `src/tests/editor-suggestion-api-regression.test.ts`
+  - source guard updated so the history reconciliation path cannot silently drop out in a refactor
+
+Why this is the right next step:
+- the browser symptom was not “undo failed to dispatch”; it was “the deletion mark persisted”
+- the marks system can rebuild decorations from metadata even when the corresponding document mark is gone
+- history only knows about document changes, not sidecar metadata, so the delete mark could be removed by undo and then reconstructed from stale metadata on the next pass
+- reconciling metadata against the actual post-history document state closes that gap without changing the normal review or Yjs lanes
+
+Verified locally:
+- `npx tsx src/tests/track-changes-undo-delete-regression.test.ts`
+- `npx tsx src/tests/editor-suggestion-api-regression.test.ts`
+- `npm run build`
 
 ## Fix64 review-action regressions
 

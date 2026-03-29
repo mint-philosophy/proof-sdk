@@ -730,6 +730,14 @@ class MarkPopoverController {
     preferredMarkId: string | null,
     reviewedMarkIds: string[],
   ): void {
+    console.log('[mark-popover.followup.start]', {
+      preferredMarkId,
+      reviewedMarkIds,
+      controllerActiveMarkId: this.activeMarkId,
+      stateActiveMarkId: getActiveMarkId(this.view.state),
+      transitionPending: this.suggestionReviewTransitionPending,
+      reviewActionInFlight: this.reviewActionInFlight,
+    });
     this.clearReviewActionRetryTimer();
     if (this.suggestionReviewFollowupTimer !== null) {
       window.clearTimeout(this.suggestionReviewFollowupTimer);
@@ -740,6 +748,16 @@ class MarkPopoverController {
 
     const attempt = (remainingAttempts: number): void => {
       const followupMarkId = this.getSuggestionReviewFollowupMarkId(preferredMarkId, reviewedMarkIds);
+      console.log('[mark-popover.followup.attempt]', {
+        preferredMarkId,
+        reviewedMarkIds,
+        remainingAttempts,
+        followupMarkId,
+        controllerActiveMarkId: this.activeMarkId,
+        stateActiveMarkId: getActiveMarkId(this.view.state),
+        mode: this.mode,
+        popoverVisible: this.popover.style.display !== 'none',
+      });
       if (followupMarkId) {
         const proof = getProofEditorApi();
         const stateActiveMarkId = getActiveMarkId(this.view.state);
@@ -752,10 +770,18 @@ class MarkPopoverController {
           || (proof.collabConnectionStatus === 'connected' && proof.collabIsSynced === true);
 
         if (!followupPanelOpen) {
+          console.log('[mark-popover.followup.navigate]', {
+            followupMarkId,
+            preserveReviewTransition: true,
+          });
           this.navigateToSuggestion(followupMarkId, { preserveReviewTransition: true });
         }
 
         if (followupPanelOpen && collabStable) {
+          console.log('[mark-popover.followup.settled]', {
+            followupMarkId,
+            collabStable,
+          });
           this.suggestionReviewTransitionPending = false;
           this.suggestionReviewFollowupTimer = null;
           return;
@@ -771,6 +797,7 @@ class MarkPopoverController {
 
         this.suggestionReviewTransitionPending = false;
         this.suggestionReviewFollowupTimer = null;
+        console.log('[mark-popover.followup.forceOpen]', { followupMarkId });
         this.openForMark(followupMarkId, undefined, { source: 'direct' });
         return;
       }
@@ -780,6 +807,7 @@ class MarkPopoverController {
         if (preferredMarkStillPending) {
           this.suggestionReviewTransitionPending = false;
           this.suggestionReviewFollowupTimer = null;
+          console.log('[mark-popover.followup.preferredStillPending]', { preferredMarkId });
           this.openForMark(preferredMarkId, undefined, { source: 'direct' });
           return;
         }
@@ -787,11 +815,13 @@ class MarkPopoverController {
       const fallbackMarkId = this.getFirstPendingSuggestionMarkId();
       if (fallbackMarkId) {
         this.suggestionReviewTransitionPending = false;
+        console.log('[mark-popover.followup.fallbackOpen]', { fallbackMarkId });
         this.openForMark(fallbackMarkId, undefined, { source: 'direct' });
         return;
       }
       if (!preferredMarkId) {
         this.suggestionReviewTransitionPending = false;
+        console.log('[mark-popover.followup.close.noPreferred]');
         this.close();
         return;
       }
@@ -803,6 +833,10 @@ class MarkPopoverController {
         return;
       }
       this.suggestionReviewTransitionPending = false;
+      console.log('[mark-popover.followup.close.exhausted]', {
+        preferredMarkId,
+        reviewedMarkIds,
+      });
       this.close();
     };
 
@@ -817,6 +851,13 @@ class MarkPopoverController {
     options?: { preserveReviewTransition?: boolean },
   ): void {
     if (!markId) return;
+    console.log('[mark-popover.navigateToSuggestion]', {
+      markId,
+      preserveReviewTransition: options?.preserveReviewTransition ?? false,
+      controllerActiveMarkId: this.activeMarkId,
+      stateActiveMarkId: getActiveMarkId(this.view.state),
+      mode: this.mode,
+    });
     this.clearReviewActionRetryTimer();
     const proof = getProofEditorApi();
     if (proof?.navigateToMark) {
@@ -1559,6 +1600,13 @@ class MarkPopoverController {
         }
         if (!optimisticApplied) {
           setReviewButtonsBusy(false);
+          console.log('[mark-popover.reviewAction.finish]', {
+            action,
+            markId,
+            nextMarkId,
+            reviewedMarkIds,
+            followupMode: options?.followupMode ?? 'advance',
+          });
           finish();
         }
       }).catch((error) => {
@@ -2125,6 +2173,11 @@ class MarkPopoverController {
         if (this.shouldSuppressEditorSuggestionAutoOpen(activeMark)) {
           return;
         }
+        console.log('[mark-popover.update.openStateActive]', {
+          stateActiveMarkId,
+          controllerActiveMarkId: this.activeMarkId,
+          mode: this.mode,
+        });
         this.openForMark(stateActiveMarkId, undefined, {
           source: activeMark.kind !== 'comment' && this.activeSuggestionOpenedFromHover ? 'hover' : 'direct',
         });
@@ -2149,14 +2202,23 @@ class MarkPopoverController {
         const marks = getMarks(view.state);
         const mark = marks.find(item => item.id === this.activeMarkId);
         if (!mark) {
+          console.log('[mark-popover.update.activeMissing]', {
+            controllerActiveMarkId: this.activeMarkId,
+            stateActiveMarkId,
+            transitionPending: this.suggestionReviewTransitionPending,
+            firstPendingSuggestionMarkId: this.getFirstPendingSuggestionMarkId(),
+          });
           if (this.reopenFirstPendingSuggestion({
             preserveReviewTransition: this.suggestionReviewTransitionPending,
           })) {
+            console.log('[mark-popover.update.reopenedFirstPending]');
             return;
           }
           if (this.suggestionReviewTransitionPending) {
+            console.log('[mark-popover.update.waitingForFollowup]');
             return;
           }
+          console.log('[mark-popover.update.close.activeMissing]');
           this.close();
           return;
         }
@@ -2225,6 +2287,13 @@ class MarkPopoverController {
       preserveReviewTransition?: boolean;
     },
   ): void {
+    console.log('[mark-popover.openForMark]', {
+      markId,
+      preserveReviewTransition: options?.preserveReviewTransition ?? false,
+      source: options?.source ?? 'direct',
+      controllerActiveMarkId: this.activeMarkId,
+      stateActiveMarkId: getActiveMarkId(this.view.state),
+    });
     this.clearReviewActionRetryTimer();
     if (!options?.preserveReviewTransition && this.suggestionReviewFollowupTimer !== null) {
       window.clearTimeout(this.suggestionReviewFollowupTimer);

@@ -54,6 +54,7 @@ import {
 } from './plugins/agent-cursor';
 import {
   suggestionsPlugins,
+  suggestionsPasteBridgePlugin,
   suggestionsPluginKey,
   enableSuggestions as enableSuggestionsPlugin,
   disableSuggestions as disableSuggestionsPlugin,
@@ -1277,6 +1278,7 @@ class ProofEditorImpl implements ProofEditor {
   private pendingCollabReconnectTemplateOverride: string | null = null;
   private skipNextCollabTemplateSeed: boolean = false;
   private preserveEditorStateOnNextCollabReconnect: boolean = false;
+  private resetEditorDocOnNextCollabReconnect: boolean = false;
   // During session refresh we defer rebinding Milkdown collab until the new provider is synced.
   // This prevents transient empty-doc renders while reconnecting to a fresh Yjs room.
   private pendingCollabRebindOnSync: boolean = false;
@@ -1461,6 +1463,7 @@ class ProofEditorImpl implements ProofEditor {
       .use(listener)
       .use(collab)
       .use(cursor)
+      .use(suggestionsPasteBridgePlugin)
       .use(clipboard);
 
     if (prismPlugin) {
@@ -2902,6 +2905,8 @@ class ProofEditorImpl implements ProofEditor {
       this.resetShareMarksSyncState();
       const forcePreserveEditorState = this.preserveEditorStateOnNextCollabReconnect;
       this.preserveEditorStateOnNextCollabReconnect = false;
+      const forceResetEditorDoc = this.resetEditorDocOnNextCollabReconnect;
+      this.resetEditorDocOnNextCollabReconnect = false;
       const shouldPreserveLocalState = forcePreserveEditorState
         || (preserveLocalState && this.shouldPreservePendingLocalCollabState());
       let reconnectTemplate: string | null = null;
@@ -2935,6 +2940,7 @@ class ProofEditorImpl implements ProofEditor {
       this.traceShareReview('collab.refresh.ready', {
         preserveLocalState,
         forcePreserveEditorState,
+        forceResetEditorDoc,
         previousAccessEpoch,
         nextAccessEpoch: refreshed.session.accessEpoch ?? null,
         reconnectTemplate: this.summarizeTraceMarkdown(reconnectTemplate),
@@ -2942,18 +2948,18 @@ class ProofEditorImpl implements ProofEditor {
         canUseSoftRefresh,
       });
       if (canUseSoftRefresh) {
-        this.pendingCollabRebindOnSync = false;
-        this.pendingCollabRebindResetDoc = false;
+        this.pendingCollabRebindOnSync = forceResetEditorDoc;
+        this.pendingCollabRebindResetDoc = forceResetEditorDoc;
         this.resetPendingCollabTemplateState(true);
-        this.collabHydrationSatisfiedByPreservedState = this.collabCanEdit;
+        this.collabHydrationSatisfiedByPreservedState = !forceResetEditorDoc && this.collabCanEdit;
         if (this.collabHydrationSatisfiedByPreservedState) {
           this.markInitialCollabHydrationComplete();
         }
       } else {
         this.pendingCollabRebindOnSync = true;
-        this.pendingCollabRebindResetDoc = !shouldPreserveLocalState || !this.collabCanEdit;
+        this.pendingCollabRebindResetDoc = forceResetEditorDoc || !shouldPreserveLocalState || !this.collabCanEdit;
         this.resetProjectionPublishState();
-        this.collabHydrationSatisfiedByPreservedState = shouldPreserveLocalState && this.collabCanEdit;
+        this.collabHydrationSatisfiedByPreservedState = !this.pendingCollabRebindResetDoc && shouldPreserveLocalState && this.collabCanEdit;
         if (this.collabHydrationSatisfiedByPreservedState) {
           this.markInitialCollabHydrationComplete();
         }
@@ -10044,6 +10050,7 @@ class ProofEditorImpl implements ProofEditor {
         : this.normalizeMarkdownForCollab(markdown);
       this.skipNextCollabTemplateSeed = skipReconnectTemplateSeed;
       this.preserveEditorStateOnNextCollabReconnect = preserveEditorStateDuringReconnect;
+      this.resetEditorDocOnNextCollabReconnect = preserveEditorStateDuringReconnect;
       this.suppressTrackChangesDuringCollabReconnect = true;
       if (this.collabEnabled) {
         this.collabConnectionStatus = 'connecting';
@@ -10056,6 +10063,7 @@ class ProofEditorImpl implements ProofEditor {
       this.pendingCollabReconnectTemplateOverride = null;
       this.skipNextCollabTemplateSeed = false;
       this.preserveEditorStateOnNextCollabReconnect = false;
+      this.resetEditorDocOnNextCollabReconnect = false;
       this.suppressTrackChangesDuringCollabReconnect = false;
       this.updateShareEditGate();
       this.releaseDeferredShareMarksFlush();
@@ -10110,6 +10118,7 @@ class ProofEditorImpl implements ProofEditor {
 
     resetSuggestionsInsertCoalescing();
     this.pendingCollabReconnectTemplateOverride = expectedMarkdown;
+    this.resetEditorDocOnNextCollabReconnect = true;
     this.suppressTrackChangesDuringCollabReconnect = true;
     this.traceShareReview('mutation.local-resolve.disconnect-old-room', {
       action,
@@ -10321,7 +10330,19 @@ class ProofEditorImpl implements ProofEditor {
     });
   }
 
-  private async waitForAuthoritativeShareReviewMarks(expectedIds: string[]): Promise<boolean> {
+  private doShareReviewMutationMarkdownsMatch(
+    actualMarkdown: string | null | undefined,
+    expectedMarkdown: string | null | undefined,
+  ): boolean {
+    if (typeof expectedMarkdown !== 'string') return true;
+    if (typeof actualMarkdown !== 'string') return false;
+    return this.normalizeMarkdownForCollab(actualMarkdown) === this.normalizeMarkdownForCollab(expectedMarkdown);
+  }
+
+  private async waitForAuthoritativeShareReviewMarks(
+    expectedIds: string[],
+    options?: { expectedMarkdown?: string | null },
+  ): Promise<boolean> {
     if (!this.isShareMode || expectedIds.length === 0) return true;
 
     const deadline = Date.now() + 1500;
@@ -10331,7 +10352,11 @@ class ProofEditorImpl implements ProofEditor {
         const serverMarks = (context.doc?.marks && typeof context.doc.marks === 'object' && !Array.isArray(context.doc.marks))
           ? context.doc.marks as Record<string, unknown>
           : null;
-        if (this.storedMarksContainPendingIds(serverMarks, expectedIds)) {
+        const markdownMatches = this.doShareReviewMutationMarkdownsMatch(
+          typeof context.doc?.markdown === 'string' ? context.doc.markdown : null,
+          options?.expectedMarkdown ?? null,
+        );
+        if (this.storedMarksContainPendingIds(serverMarks, expectedIds) && markdownMatches) {
           this.lastReceivedServerMarks = serverMarks
             ? { ...(serverMarks as Record<string, StoredMark>) }
             : {};
@@ -10355,6 +10380,7 @@ class ProofEditorImpl implements ProofEditor {
     if (!persisted) return false;
     return this.waitForAuthoritativeShareReviewMarks(
       expectedIds.length > 0 ? expectedIds : snapshot.pendingIds,
+      { expectedMarkdown: snapshot.markdown },
     );
   }
 
@@ -10370,12 +10396,16 @@ class ProofEditorImpl implements ProofEditor {
       pendingPersistSucceeded = await pendingPersist.catch(() => false);
     }
 
+    const currentSnapshot = this.getCurrentShareReviewPersistSnapshot();
     const expectedPendingIds = expectedMarkIds.length > 0
       ? expectedMarkIds
-      : (this.getCurrentShareReviewPersistSnapshot()?.pendingIds ?? []);
+      : (currentSnapshot?.pendingIds ?? []);
+    const expectedMarkdown = currentSnapshot?.markdown ?? null;
     if (expectedPendingIds.length > 0) {
       const authoritativeMarksReady = pendingPersistSucceeded
-        ? await this.waitForAuthoritativeShareReviewMarks(expectedPendingIds)
+        ? await this.waitForAuthoritativeShareReviewMarks(expectedPendingIds, {
+            expectedMarkdown,
+          })
         : false;
       if (!authoritativeMarksReady) {
         const forcedPersistSucceeded = await this.forcePersistCurrentShareReviewState(expectedPendingIds);
@@ -10383,6 +10413,7 @@ class ProofEditorImpl implements ProofEditor {
           this.traceShareReview('mutation.preflush-failed', {
             expectedMarkIds: expectedPendingIds,
             pendingPersistSucceeded,
+            expectedMarkdown: this.summarizeTraceMarkdown(expectedMarkdown),
           }, 'error');
           return false;
         }
@@ -10546,11 +10577,12 @@ class ProofEditorImpl implements ProofEditor {
       let success = !shouldPreferCanonicalDeleteResult
         && this.tryResolveShareReviewMutationLocally(markId, 'accept', result);
       if (!success) {
-        // Local resolution failed (markdown comparison mismatch). Collab was already
-        // disconnected by tryResolveShareReviewMutationLocally. Load the canonical
-        // server state directly with marks embedded, re-enable TC (loadDocument
-        // resets it), then reconnect collab with preserve flags so Y.js binding
-        // does not reset the document and overwrite marks.
+        // Local resolution failed (or we intentionally preferred the canonical
+        // delete result). The preserved reconnect path may already have paused the
+        // Milkdown<->Yjs binding; load the canonical server state directly with
+        // marks embedded, re-enable TC (loadDocument resets it), then reconnect
+        // collab with preserve flags so the live provider/Y.Doc can be refreshed
+        // without tearing down editor-local position mappings.
         const markdown = typeof result?.markdown === 'string' ? result.markdown : null;
         const marks = (result?.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
           ? result.marks as Record<string, StoredMark>
@@ -10559,6 +10591,7 @@ class ProofEditorImpl implements ProofEditor {
           this.pendingCollabReconnectTemplateOverride = null;
           this.skipNextCollabTemplateSeed = true;
           this.preserveEditorStateOnNextCollabReconnect = true;
+          this.resetEditorDocOnNextCollabReconnect = true;
           this.loadCanonicalShareDocument(markdown, marks);
           // loadDocument resets the suggestions plugin and module state to disabled
           // (stale-state guard). Re-enable TC so remaining marks render as rails.
@@ -10567,9 +10600,9 @@ class ProofEditorImpl implements ProofEditor {
           this.updateShareEditGate();
           this.releaseDeferredShareMarksFlush();
           // Reconnect collab so save/sync keeps working. The preserve flags above
-          // ensure connectCollabService skips the doc reset, and the sync handler's
-          // applyLatestCollabMarksToEditor will re-anchor any marks that Y.js
-          // binding doesn't preserve.
+          // force the next bind to reset from the freshly synced Y.Doc, and the
+          // sync handler's applyLatestCollabMarksToEditor will re-anchor any marks
+          // that Y.js binding doesn't preserve.
           if (this.collabEnabled && this.activeCollabSession) {
             void this.refreshCollabSessionAndReconnect(false);
           }

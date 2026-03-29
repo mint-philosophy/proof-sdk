@@ -113,11 +113,14 @@ function run(): void {
     flushShareReviewMutationStateBlock.includes('if (this.shareMarksFlushTimer !== null) {')
       && flushShareReviewMutationStateBlock.includes('clearTimeout(this.shareMarksFlushTimer);')
       && !flushShareReviewMutationStateBlock.includes('this.flushShareMarks({ persistContent: false, forcePersistMarks: true });')
-      && flushShareReviewMutationStateBlock.includes('await this.waitForAuthoritativeShareReviewMarks(expectedPendingIds)')
+      && flushShareReviewMutationStateBlock.includes('const currentSnapshot = this.getCurrentShareReviewPersistSnapshot();')
+      && flushShareReviewMutationStateBlock.includes('const expectedMarkdown = currentSnapshot?.markdown ?? null;')
+      && flushShareReviewMutationStateBlock.includes('await this.waitForAuthoritativeShareReviewMarks(expectedPendingIds, {')
+      && flushShareReviewMutationStateBlock.includes('expectedMarkdown,')
       && flushShareReviewMutationStateBlock.includes('await this.forcePersistCurrentShareReviewState(expectedPendingIds)')
       && flushShareReviewMutationStateBlock.includes("this.traceShareReview('mutation.preflush-failed'")
       && flushShareReviewMutationStateBlock.includes('return false;'),
-    'Expected persisted review mutations to cancel any pending async marks-only flush, verify that pending marks are present in authoritative share state, and fall back to a full pushUpdate before accept/reject proceeds',
+    'Expected persisted review mutations to cancel any pending async marks-only flush, verify that pending marks and markdown are present in authoritative share state, and fall back to a full pushUpdate before accept/reject proceeds',
   );
   assert(
     markAcceptAllBlock.includes('const initialIds = this.getSortedPendingSuggestionIdsForShareReview();')
@@ -256,6 +259,34 @@ function run(): void {
   assert(
     editorSource.includes('isSuggestionsEnabled: () => window.proof.isSuggestionsEnabled(),'),
     'Expected __PROOF_EDITOR__ to expose isSuggestionsEnabled so QA can verify the actual suggestions plugin state',
+  );
+
+  const handlePasteBlock = sliceBetween(
+    suggestionsSource,
+    '      handlePaste(view, event, slice) {',
+    '      handleDOMEvents: {',
+  );
+  const dispatchTrackedSuggestionPasteBlock = sliceBetween(
+    suggestionsSource,
+    'function dispatchTrackedSuggestionPaste(',
+    'function detectTextPreservingSuggestionRewrite(',
+  );
+  assert(
+    suggestionsSource.includes('function buildTrackedSuggestionPasteTransaction(')
+      && suggestionsSource.includes('export function __debugBuildTrackedSuggestionPasteTransaction(')
+      && suggestionsSource.includes('function dispatchTrackedSuggestionPaste(')
+      && suggestionsSource.includes('export const suggestionsPasteBridgePlugin = $prose(() => {')
+      && suggestionsSource.includes('baseTr = baseTr.setSelection(')
+      && suggestionsSource.includes('TextSelection.create(')
+      && suggestionsSource.includes("rawTr.setMeta('proof-dom-selection-range', domSelectionRange);")
+      && suggestionsSource.includes("rawTr.setMeta('proof-track-changes-paste', true);")
+      && dispatchTrackedSuggestionPasteBlock.includes('const domSelectionRange = getLiveDomSelectionRange(view);')
+      && dispatchTrackedSuggestionPasteBlock.includes('const trackedPasteTr = buildTrackedSuggestionPasteTransaction(')
+      && dispatchTrackedSuggestionPasteBlock.includes('view.dispatch(trackedPasteTr);')
+      && handlePasteBlock.includes('return dispatchTrackedSuggestionPaste(view, event, slice);')
+      && editorSource.includes('.use(suggestionsPasteBridgePlugin)')
+      && editorSource.indexOf('.use(suggestionsPasteBridgePlugin)') < editorSource.indexOf('.use(clipboard);'),
+    'Expected TC paste handling to capture the live DOM selection in a dedicated shared paste dispatcher, align the raw paste transaction selection to that live DOM range before replaceSelection, and register an early paste bridge before Milkdown clipboard handling so plain-text paste cannot bypass tracked-change wrapping',
   );
 
   const updateShareEditGateBlock = sliceBetween(

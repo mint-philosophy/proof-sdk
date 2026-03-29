@@ -7,7 +7,7 @@
 
 import { $ctx, $prose } from '@milkdown/kit/utils';
 import { Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from '@milkdown/kit/prose/state';
-import type { Mark, MarkType, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
+import type { Mark, MarkType, Node as ProseMirrorNode, Slice as ProseMirrorSlice } from '@milkdown/kit/prose/model';
 import type { EditorView } from '@milkdown/kit/prose/view';
 
 import { marksPluginKey, getMarkMetadata, buildSuggestionMetadata, syncSuggestionMetadataTransaction } from './marks';
@@ -54,6 +54,10 @@ type DisabledSuggestionStripAnalysis = {
   newSummary: SuggestionIdSummary;
   introducedSummary: SuggestionIdSummary;
   shouldStrip: boolean;
+};
+
+type TextSegmentRange = MarkRange & {
+  text: string;
 };
 
 // Word-style track changes should keep a contiguous typing run together even when
@@ -198,6 +202,44 @@ function resolveLiveDeleteSuggestionRange(
 function getLiveInsertSuggestionText(doc: ProseMirrorNode, id: string): string | null {
   const segments = collectSuggestionSegments(doc, id, 'insert');
   return getSuggestionTextFromSegments(segments);
+}
+
+function materializeInsertSuggestionAsSingleTextNode(
+  tr: Transaction,
+  id: string,
+  by: string,
+  suggestionType: MarkType,
+  authoredType: MarkType | null,
+): { tr: Transaction; range: MarkRange | null } {
+  const range = resolveLiveInsertSuggestionRange(tr.doc, id);
+  if (!range || range.to <= range.from) {
+    return { tr, range: null };
+  }
+
+  const text = getLiveInsertSuggestionText(tr.doc, id);
+  if (typeof text !== 'string' || text.length === 0) {
+    return { tr, range };
+  }
+
+  let nextTr = tr;
+  if (authoredType) {
+    nextTr = nextTr.removeMark(range.from, range.to, authoredType);
+  }
+  nextTr = nextTr.replaceWith(
+    range.from,
+    range.to,
+    nextTr.doc.type.schema.text(
+      text,
+      [suggestionType.create({ id, kind: 'insert', by })],
+    ),
+  );
+  return {
+    tr: nextTr,
+    range: {
+      from: range.from,
+      to: range.from + text.length,
+    },
+  };
 }
 
 function stripAuthoredMarksFromPendingInsertRanges(
@@ -831,15 +873,17 @@ function sliceNodeIsWrappedPlainText(node: SliceNode | undefined): boolean {
   if (!node) return false;
   if (node.type === 'text') return true;
   if (typeof node.text === 'string') return true;
+  if (node.type === 'hard_break') return true;
   if (node.type === 'paragraph') {
-    return Array.isArray(node.content) && node.content.length > 0 && node.content.every((child) => sliceNodeIsWrappedPlainText(child));
+    if (!Array.isArray(node.content) || node.content.length === 0) return true;
+    return node.content.every((child) => sliceNodeIsWrappedPlainText(child));
   }
   return false;
 }
 
 function sliceRepresentsWrappedPlainText(nodes?: SliceNode[]): boolean {
-  if (!nodes || nodes.length !== 1) return false;
-  return sliceNodeIsWrappedPlainText(nodes[0]);
+  if (!nodes || nodes.length === 0) return false;
+  return nodes.every((node) => sliceNodeIsWrappedPlainText(node));
 }
 
 function sliceContainsSuggestionMarks(nodes?: SliceNode[]): boolean {
@@ -1044,6 +1088,227 @@ function buildCollapsedInsertAnchorMetadata(pos: number): Pick<StoredMark, 'rang
 
 function setSelectionAfterInsertedText(tr: Transaction, pos: number): void {
   tr.setSelection(TextSelection.create(tr.doc, Math.max(0, Math.min(pos, tr.doc.content.size))));
+}
+
+function collectTextSegmentsInRange(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+): TextSegmentRange[] {
+  if (to <= from) return [];
+
+  const segments: TextSegmentRange[] = [];
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (!node.isText) return true;
+
+    const start = Math.max(from, pos);
+    const end = Math.min(to, pos + node.nodeSize);
+    if (end <= start) return true;
+
+    const sourceText = node.text ?? '';
+    const text = sourceText.slice(start - pos, end - pos);
+    if (!text) return true;
+
+    segments.push({ from: start, to: end, text });
+    return true;
+  });
+
+  return segments;
+}
+
+function applyStructuredPlainTextSuggestion(
+  newTr: Transaction,
+  metadata: Record<string, StoredMark>,
+  from: number,
+  to: number,
+  actor: string,
+  suggestionType: MarkType,
+  slice: unknown,
+): {
+  handled: boolean;
+  metadata: Record<string, StoredMark>;
+  metadataChanged: boolean;
+  writeOffsetDelta: number;
+} {
+  if (!slice) {
+    return { handled: false, metadata, metadataChanged: false, writeOffsetDelta: 0 };
+  }
+
+  const existing = detectSuggestionKinds(newTr.doc, from, to, suggestionType);
+  if (existing.hasDelete || existing.hasInsert || existing.hasReplace) {
+    return { handled: false, metadata, metadataChanged: false, writeOffsetDelta: 0 };
+  }
+
+  let nextMetadata = metadata;
+  let metadataChanged = false;
+  const createdAt = new Date().toISOString();
+  const deletedText = newTr.doc.textBetween(from, to, '');
+
+  if (deletedText) {
+    const deleteSuggestionId = generateMarkId();
+    newTr.addMark(
+      from,
+      to,
+      suggestionType.create({
+        id: deleteSuggestionId,
+        kind: 'delete',
+        by: actor,
+      }),
+    );
+
+    nextMetadata = {
+      ...nextMetadata,
+      [deleteSuggestionId]: {
+        ...buildSuggestionMetadata('delete', actor, null, createdAt),
+        quote: deletedText,
+      },
+    };
+    metadataChanged = true;
+  }
+
+  const docBeforeInsert = newTr.doc;
+  const sizeBeforeInsert = docBeforeInsert.content.size;
+
+  try {
+    (newTr as Transaction & { replace: (fromPos: number, toPos: number, replacement: unknown) => Transaction })
+      .replace(to, to, slice);
+  } catch (error) {
+    console.warn('[suggestions] Could not apply structured plain-text paste as tracked suggestion:', error);
+    return { handled: false, metadata, metadataChanged: false, writeOffsetDelta: 0 };
+  }
+
+  const writeOffsetDelta = newTr.doc.content.size - sizeBeforeInsert;
+  const insertionDiff = detectPlainTextInsertionBetweenDocs(docBeforeInsert, newTr.doc);
+  if (!insertionDiff) {
+    return {
+      handled: true,
+      metadata: nextMetadata,
+      metadataChanged,
+      writeOffsetDelta,
+    };
+  }
+
+  const insertedSegments = collectTextSegmentsInRange(newTr.doc, insertionDiff.from, insertionDiff.to);
+  const insertSuggestionIds: string[] = [];
+
+  for (const segment of insertedSegments) {
+    const insertSuggestionId = generateMarkId();
+    newTr.addMark(
+      segment.from,
+      segment.to,
+      suggestionType.create({
+        id: insertSuggestionId,
+        kind: 'insert',
+        by: actor,
+      }),
+    );
+    nextMetadata = {
+      ...nextMetadata,
+      [insertSuggestionId]: buildSuggestionMetadata('insert', actor, segment.text, createdAt),
+    };
+    metadataChanged = true;
+    insertSuggestionIds.push(insertSuggestionId);
+  }
+
+  if (insertSuggestionIds.length > 0) {
+    const syncedMetadata = syncInsertSuggestionMetadataFromDoc(newTr.doc, nextMetadata, insertSuggestionIds);
+    metadataChanged = metadataChanged || syncedMetadata !== nextMetadata;
+    nextMetadata = syncedMetadata;
+
+    const lastInsertId = insertSuggestionIds[insertSuggestionIds.length - 1];
+    const lastInsertRange = resolveLiveInsertSuggestionRange(newTr.doc, lastInsertId);
+    if (lastInsertRange) {
+      lastInsertByActor.set(actor, {
+        id: lastInsertId,
+        from: lastInsertRange.from,
+        to: lastInsertRange.to,
+        by: actor,
+        updatedAt: Date.now(),
+      });
+    }
+  }
+
+  setSelectionAfterInsertedText(newTr, insertionDiff.to);
+
+  return {
+    handled: true,
+    metadata: nextMetadata,
+    metadataChanged,
+    writeOffsetDelta,
+  };
+}
+
+function buildTrackedSuggestionPasteTransaction(
+  state: EditorState,
+  slice: ProseMirrorSlice,
+  domSelectionRange: MarkRange | null,
+): Transaction | null {
+  const sliceJson = slice.toJSON() as { content?: SliceNode[] };
+  if (!sliceRepresentsWrappedPlainText(sliceJson.content)) return null;
+  if (sliceContainsSuggestionMarks(sliceJson.content)) return null;
+
+  let baseTr = state.tr;
+  if (domSelectionRange && domSelectionRange.from < domSelectionRange.to) {
+    try {
+      baseTr = baseTr.setSelection(
+        TextSelection.create(
+          state.doc,
+          domSelectionRange.from,
+          domSelectionRange.to,
+        ),
+      );
+    } catch (error) {
+      console.warn('[suggestions] Could not align paste transaction selection to live DOM range:', error);
+    }
+  }
+
+  const rawTr = baseTr.replaceSelection(slice);
+  if (!rawTr.docChanged) return null;
+
+  if (domSelectionRange && domSelectionRange.from < domSelectionRange.to) {
+    rawTr.setMeta('proof-dom-selection-range', domSelectionRange);
+  }
+  rawTr.setMeta('proof-track-changes-paste', true);
+  return rawTr;
+}
+
+export function __debugBuildTrackedSuggestionPasteTransaction(
+  state: EditorState,
+  slice: ProseMirrorSlice,
+  domSelectionRange: MarkRange | null,
+): Transaction | null {
+  return buildTrackedSuggestionPasteTransaction(state, slice, domSelectionRange);
+}
+
+function dispatchTrackedSuggestionPaste(
+  view: EditorView,
+  event: ClipboardEvent,
+  slice: ProseMirrorSlice,
+): boolean {
+  if (!isSuggestionsEnabled(view.state)) return false;
+  if (event.defaultPrevented || view.composing) return false;
+
+  const domSelectionRange = getLiveDomSelectionRange(view);
+  const trackedPasteTr = buildTrackedSuggestionPasteTransaction(
+    view.state,
+    slice,
+    domSelectionRange,
+  );
+  console.log('[suggestions.handlePaste]', {
+    enabled: true,
+    domSelectionRange,
+    stateSelection: {
+      from: view.state.selection.from,
+      to: view.state.selection.to,
+      empty: view.state.selection.empty,
+    },
+    plainTextSlice: trackedPasteTr !== null,
+    slice: slice.toJSON(),
+  });
+  if (!trackedPasteTr) return false;
+
+  view.dispatch(trackedPasteTr);
+  return true;
 }
 
 function detectTextPreservingSuggestionRewrite(
@@ -1889,6 +2154,17 @@ export function __debugRememberPendingNativeTextInput(text: string, from: number
   rememberPendingNativeTextInput(text, from, to);
 }
 
+export function __debugRememberResolvedPendingNativeTextInput(
+  state: EditorState,
+  text: string,
+  from: number,
+  to: number,
+): { from: number; to: number } {
+  const resolved = resolveTrackedTextInputRange(state, from, to);
+  rememberPendingNativeTextInput(text, resolved.from, resolved.to);
+  return resolved;
+}
+
 export function __debugShouldPassthroughPendingNativeTextInputTransaction(
   oldState: EditorState,
   tr: Transaction,
@@ -1932,6 +2208,17 @@ export function wrapPendingNativeTextInputTransaction(
 
   const existingInsertIds = collectSuggestionIdsInRange(nextTr.doc, 'insert', diff.from, diff.to);
   if (existingInsertIds.length > 0) {
+    if (existingInsertIds.length === 1) {
+      const insertId = existingInsertIds[0]!;
+      const insertBy = metadata[insertId]?.by ?? actor;
+      ({ tr: nextTr } = materializeInsertSuggestionAsSingleTextNode(
+        nextTr,
+        insertId,
+        insertBy,
+        suggestionType,
+        authoredType,
+      ));
+    }
     const syncedMetadata = syncInsertSuggestionMetadataFromDoc(nextTr.doc, metadata, existingInsertIds);
     metadataChanged = metadataChanged || syncedMetadata !== metadata;
     metadata = syncedMetadata;
@@ -1962,10 +2249,20 @@ export function wrapPendingNativeTextInputTransaction(
         diff.to,
         suggestionType.create({ id: candidate.id, kind: 'insert', by: actor }),
       );
+      const materialized = materializeInsertSuggestionAsSingleTextNode(
+        nextTr,
+        candidate.id,
+        actor,
+        suggestionType,
+        authoredType,
+      );
+      nextTr = materialized.tr;
       const syncedMetadata = syncInsertSuggestionMetadataFromDoc(nextTr.doc, metadata, [candidate.id]);
       metadataChanged = metadataChanged || syncedMetadata !== metadata;
       metadata = syncedMetadata;
-      const updatedRange = resolveLiveInsertSuggestionRange(nextTr.doc, candidate.id) ?? candidate.range;
+      const updatedRange = materialized.range
+        ?? resolveLiveInsertSuggestionRange(nextTr.doc, candidate.id)
+        ?? candidate.range;
       lastInsertByActor.set(actor, {
         id: candidate.id,
         from: updatedRange.from,
@@ -2074,6 +2371,17 @@ function buildPlainInsertionSuggestionFallbackTransaction(
 
   const existingInsertIds = collectSuggestionIdsInRange(newState.doc, 'insert', diff.from, diff.to);
   if (existingInsertIds.length > 0) {
+    if (existingInsertIds.length === 1) {
+      const insertId = existingInsertIds[0]!;
+      const insertBy = metadata[insertId]?.by ?? actor;
+      ({ tr } = materializeInsertSuggestionAsSingleTextNode(
+        tr,
+        insertId,
+        insertBy,
+        suggestionType,
+        authoredType,
+      ));
+    }
     const syncedMetadata = syncInsertSuggestionMetadataFromDoc(tr.doc, metadata, existingInsertIds);
     metadataChanged = metadataChanged || syncedMetadata !== metadata;
     metadata = syncedMetadata;
@@ -2116,10 +2424,20 @@ function buildPlainInsertionSuggestionFallbackTransaction(
       diff.to,
       suggestionType.create({ id: candidate.id, kind: 'insert', by: actor })
     );
+    const materialized = materializeInsertSuggestionAsSingleTextNode(
+      tr,
+      candidate.id,
+      actor,
+      suggestionType,
+      authoredType,
+    );
+    tr = materialized.tr;
     const syncedMetadata = syncInsertSuggestionMetadataFromDoc(tr.doc, metadata, [candidate.id]);
     metadataChanged = metadataChanged || syncedMetadata !== metadata;
     metadata = syncedMetadata;
-    const updatedRange = resolveLiveInsertSuggestionRange(tr.doc, candidate.id) ?? candidate.range;
+    const updatedRange = materialized.range
+      ?? resolveLiveInsertSuggestionRange(tr.doc, candidate.id)
+      ?? candidate.range;
     lastInsertByActor.set(actor, {
       id: candidate.id,
       from: updatedRange.from,
@@ -2559,7 +2877,7 @@ export function wrapTransactionForSuggestions(
   let metadataChanged = false;
 
   // Build a new transaction that converts edits to tracked changes.
-  const newTr = state.tr;
+  let newTr = state.tr;
   let writeOffset = 0;
 
   const selectionReplacement = detectSelectionReplacement(tr, state);
@@ -2747,10 +3065,29 @@ export function wrapTransactionForSuggestions(
 
       const { text: insertedText } = collectSliceText(slice?.content);
       const deletedText = state.doc.textBetween(origFrom, origTo, '');
+      const rawSlice = (step as { slice?: unknown }).slice;
 
       const docSize = newTr.doc.content.size;
       const safeFrom = Math.max(0, Math.min(from, docSize));
       const safeTo = Math.max(safeFrom, Math.min(to, docSize));
+
+      if (sliceRepresentsWrappedPlainText(slice?.content) && rawSlice && slice?.content?.some((node) => node.type === 'paragraph' || node.type === 'hard_break')) {
+        const structuredPlainTextResult = applyStructuredPlainTextSuggestion(
+          newTr,
+          metadata,
+          safeFrom,
+          safeTo,
+          actor,
+          suggestionType,
+          rawSlice,
+        );
+        if (structuredPlainTextResult.handled) {
+          metadataChanged = metadataChanged || structuredPlainTextResult.metadataChanged;
+          metadata = structuredPlainTextResult.metadata;
+          writeOffset += structuredPlainTextResult.writeOffsetDelta;
+          continue;
+        }
+      }
 
       // CASE 1: Pure deletion (no insertion)
       if (deletedText && !insertedText) {
@@ -3035,6 +3372,14 @@ export function wrapTransactionForSuggestions(
               safeFrom + insertedText.length,
               suggestionType.create({ id: editableInsert.id, kind: 'insert', by: actor })
             );
+            const materialized = materializeInsertSuggestionAsSingleTextNode(
+              newTr,
+              editableInsert.id,
+              actor,
+              suggestionType,
+              authoredType,
+            );
+            newTr = materialized.tr;
             writeOffset += insertedText.length;
 
             metadata = {
@@ -3050,7 +3395,7 @@ export function wrapTransactionForSuggestions(
             };
             metadataChanged = true;
 
-            const updatedRange = resolveLiveInsertSuggestionRange(newTr.doc, editableInsert.id) ?? {
+            const updatedRange = materialized.range ?? {
               from: editableInsert.range.from,
               to: editableInsert.range.to + insertedText.length,
             };
@@ -3361,6 +3706,16 @@ export function toggleSuggestions(view: { state: EditorState; dispatch: (tr: Tra
   return !enabled;
 }
 
+export const suggestionsPasteBridgePlugin = $prose(() => {
+  return new Plugin({
+    props: {
+      handlePaste(view, event, slice) {
+        return dispatchTrackedSuggestionPaste(view, event, slice);
+      },
+    },
+  });
+});
+
 /**
  * Create the suggestions plugin
  */
@@ -3643,6 +3998,10 @@ export const suggestionsPlugin = $prose(() => {
     },
 
     props: {
+      handlePaste(view, event, slice) {
+        return dispatchTrackedSuggestionPaste(view, event, slice);
+      },
+
       handleDOMEvents: {
         beforeinput(view, event) {
           const inputEvent = event as InputEvent;
@@ -3752,16 +4111,19 @@ export const suggestionsPlugin = $prose(() => {
 
       handleTextInput(view, from, to, text) {
         const enabled = isSuggestionsEnabled(view.state);
+        const resolvedRange = resolveTrackedTextInputRange(view.state, from, to);
         console.log('[suggestions.handleTextInput]', {
           enabled,
           from,
           to,
+          resolvedFrom: resolvedRange.from,
+          resolvedTo: resolvedRange.to,
           text,
           trackChangesView: view.dom?.dataset?.trackChangesView ?? null,
         });
         if (!enabled) return false;
         if (!text) return false;
-        rememberPendingNativeTextInput(text, from, to);
+        rememberPendingNativeTextInput(text, resolvedRange.from, resolvedRange.to);
         // Do not dispatch tracked inserts from handleTextInput.
         // In the live browser/runtime, this hook fires after the native
         // contenteditable insertion is already in motion, so dispatching here

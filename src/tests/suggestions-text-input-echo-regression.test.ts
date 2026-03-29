@@ -1,7 +1,7 @@
 import { Schema } from '@milkdown/kit/prose/model';
 import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 
-import { marksPluginKey } from '../editor/plugins/marks.js';
+import { getMarks, marksPluginKey } from '../editor/plugins/marks.js';
 import {
   buildNativeTextInputFollowupWrapTransaction,
   __debugBuildPlainInsertionSuggestionFallbackTransaction,
@@ -9,6 +9,7 @@ import {
   __debugRememberHandledTextInputDispatch,
   __debugRememberHandledTextInputCall,
   __debugRememberPendingNativeTextInput,
+  __debugRememberResolvedPendingNativeTextInput,
   __debugResetHandledTextInputEcho,
   __debugShouldPassthroughPendingNativeTextInputTransaction,
   __debugWrapPendingNativeTextInputTransaction,
@@ -25,6 +26,21 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
     throw new Error(`${message}: expected ${String(expected)}, got ${String(actual)}`);
   }
+}
+
+function countSuggestionTextNodes(
+  state: EditorState,
+  kind: 'insert' | 'delete',
+): number {
+  let count = 0;
+  state.doc.descendants((node) => {
+    if (!node.isText) return true;
+    if (node.marks.some((mark) => mark.type.name === 'proofSuggestion' && mark.attrs.kind === kind)) {
+      count += 1;
+    }
+    return true;
+  });
+  return count;
 }
 
 function run(): void {
@@ -340,6 +356,147 @@ function run(): void {
   assert(
     explicitNativeInsertMetadata?.startRel === 'char:17' && explicitNativeInsertMetadata?.endRel === 'char:18',
     'Expected the delayed native typed-insert follow-up wrap to preserve exact relative anchors for the inserted character',
+  );
+
+  let replacementState = createState(7, 11);
+  const firstReplacementTr = replacementState.tr.insertText('F', 7, 11);
+  replacementState = replacementState.apply(
+    wrapTransactionForSuggestions(firstReplacementTr, replacementState, true),
+  );
+
+  for (const char of ['I', 'R', 'S', 'T']) {
+    const insertPos = replacementState.selection.from;
+    const insertedState = replacementState.apply(
+      replacementState.tr.insertText(char, insertPos, insertPos),
+    );
+    const nativeFollowupTr = buildNativeTextInputFollowupWrapTransaction(
+      replacementState,
+      insertedState,
+      { text: char, from: insertPos, to: insertPos + 1 },
+    );
+    assert(
+      nativeFollowupTr !== null,
+      `Expected native follow-up wrap to track replacement character ${char}`,
+    );
+    replacementState = insertedState.apply(nativeFollowupTr!);
+  }
+
+  assertEqual(
+    replacementState.doc.textContent,
+    'Alpha betaFIRST gamma.',
+    'Expected native replacement typing to preserve the deleted text rail plus the full replacement text once',
+  );
+  const replacementMarks = getMarks(replacementState);
+  const replacementInsertMarks = replacementMarks.filter((mark) => mark.kind === 'insert');
+  const replacementDeleteMarks = replacementMarks.filter((mark) => mark.kind === 'delete');
+  assertEqual(
+    replacementDeleteMarks.length,
+    1,
+    'Expected native replacement typing to preserve one delete suggestion for the replaced word',
+  );
+  assertEqual(
+    replacementInsertMarks.length,
+    1,
+    'Expected native replacement typing to keep one logical insert suggestion',
+  );
+  const replacementInsertContent = replacementInsertMarks[0]?.data as { content?: string } | undefined;
+  assertEqual(
+    replacementInsertContent?.content,
+    'FIRST',
+    'Expected native replacement typing to keep the full replacement word inside one insert suggestion',
+  );
+  assertEqual(
+    countSuggestionTextNodes(replacementState, 'insert'),
+    1,
+    'Expected native replacement typing to keep the replacement insert in one contiguous text node',
+  );
+  assertEqual(
+    countSuggestionTextNodes(replacementState, 'delete'),
+    1,
+    'Expected native replacement typing to keep the deleted source word in one delete span',
+  );
+  const replacementInsertRange = replacementInsertMarks[0]?.range;
+  assert(
+    replacementInsertRange,
+    'Expected native replacement typing to expose a live insert range for follow-up stale DOM tests',
+  );
+  const resolvedReplacementNativeRange = __debugRememberResolvedPendingNativeTextInput(
+    replacementState,
+    'X',
+    replacementInsertRange!.from,
+    replacementInsertRange!.from,
+  );
+  assertEqual(
+    resolvedReplacementNativeRange.from,
+    replacementInsertRange!.to,
+    'Expected stale overwrite DOM positions at the insert start to resolve to the live insert end before matching native text input',
+  );
+  assertEqual(
+    resolvedReplacementNativeRange.to,
+    replacementInsertRange!.to,
+    'Expected stale overwrite DOM positions to normalize to a collapsed live insert-end cursor',
+  );
+  const replacementNativeInsertTr = replacementState.tr.insertText(
+    'X',
+    replacementInsertRange!.to,
+    replacementInsertRange!.to,
+  );
+  assert(
+    __debugShouldPassthroughPendingNativeTextInputTransaction(
+      replacementState,
+      replacementNativeInsertTr,
+    ),
+    'Expected resolved pending native text input matching to accept a follow-up overwrite keystroke at the live insert end',
+  );
+
+  let editableInsertState = createState(7, 11);
+  editableInsertState = editableInsertState.apply(
+    wrapTransactionForSuggestions(
+      editableInsertState.tr.insertText('ANCIENT', 7, 11),
+      editableInsertState,
+      true,
+    ),
+  );
+  const editableInsert = getMarks(editableInsertState).find((mark) => mark.kind === 'insert');
+  assert(
+    editableInsert?.range,
+    'Expected initial overwrite to create a live insert suggestion before typing inside it',
+  );
+  const insideInsertPos = editableInsert!.range!.from + 3;
+  editableInsertState = editableInsertState.apply(
+    editableInsertState.tr.setSelection(
+      TextSelection.create(editableInsertState.doc, insideInsertPos, insideInsertPos),
+    ),
+  );
+  const editableInsertedState = editableInsertState.apply(
+    editableInsertState.tr.insertText('XXX', insideInsertPos, insideInsertPos),
+  );
+  const editableFollowupTr = buildNativeTextInputFollowupWrapTransaction(
+    editableInsertState,
+    editableInsertedState,
+    { text: 'XXX', from: insideInsertPos, to: insideInsertPos + 3 },
+  );
+  assert(
+    editableFollowupTr !== null,
+    'Expected typing inside an existing insert suggestion to stay on the native follow-up path',
+  );
+  editableInsertState = editableInsertedState.apply(editableFollowupTr!);
+  const editableInsertMarks = getMarks(editableInsertState).filter((mark) => mark.kind === 'insert');
+  assertEqual(
+    editableInsertMarks.length,
+    1,
+    'Expected typing inside an existing insert suggestion to keep one logical insert mark',
+  );
+  const editableInsertContent = editableInsertMarks[0]?.data as { content?: string } | undefined;
+  assertEqual(
+    editableInsertContent?.content,
+    'ANCXXXIENT',
+    'Expected typing inside an existing insert suggestion to preserve the full edited insert content',
+  );
+  assertEqual(
+    countSuggestionTextNodes(editableInsertState, 'insert'),
+    1,
+    'Expected typing inside an existing insert suggestion to keep one contiguous insert text node',
   );
 
   console.log('suggestions-text-input-echo-regression.test.ts passed');

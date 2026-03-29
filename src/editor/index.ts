@@ -73,6 +73,7 @@ import {
   shouldSuppressHandledTextInputEcho,
   consumePendingNativeTextInputTransactionMatch,
   isSuggestionsModuleEnabled,
+  isSuggestionsDesiredEnabled,
   setSuggestionsDesiredEnabled,
   resetSuggestionsModuleState,
 } from './plugins/suggestions';
@@ -215,6 +216,7 @@ import { proofMarkHandler } from '../formats/remark-proof-marks';
 import { remarkProofMarksPlugin } from './schema/remark-proof-marks-plugin';
 import { getCurrentActor, setCurrentActor as setCurrentActorValue, normalizeActor } from './actor';
 import {
+  shouldAllowShareLocalEditsDuringTransientCollabRecovery,
   shouldKeepalivePersistShareContent,
   shouldKeepalivePersistShareMarks,
   shouldUseLocalKeepaliveBaseToken,
@@ -1379,6 +1381,8 @@ class ProofEditorImpl implements ProofEditor {
   private runtimeTraceSeq: number = 0;
   private runtimeDispatchDepth: number = 0;
   private runtimeUpdateStateDepth: number = 0;
+  private trackChangesDebugEvents: Array<Record<string, unknown>> = [];
+  private lastTrackChangesDebugStateSignature: string = '';
   private runtimeDispatchContextStack: Array<{
     id: number;
     source: string;
@@ -1547,7 +1551,7 @@ class ProofEditorImpl implements ProofEditor {
     (window as any).__editorView = view;
     (window as any).__proofView = view;
     view.dom.dataset.trackChangesView = 'simple';
-    this.updateEditableState(view);
+    this.updateEditableState(view, 'editor-init');
     this.cleanupNavigation = initAgentNavigation(view);
 
     this.installLifecycleHandlers();
@@ -1876,6 +1880,12 @@ class ProofEditorImpl implements ProofEditor {
             }
           }
           this.updateShareBannerSyncDisplay();
+          this.recordTrackChangesDebugStateIfChanged('collab-sync-status', {
+            statusConnection: status.connectionStatus,
+            statusSynced: status.isSynced,
+            statusUnsyncedChanges: status.unsyncedChanges,
+            statusPendingLocalUpdates: status.pendingLocalUpdates,
+          });
         });
         collabClient.onDocumentUpdated(() => {
           this.traceShareReview('collab.document-updated');
@@ -2246,6 +2256,97 @@ class ProofEditorImpl implements ProofEditor {
         ...data,
       },
     });
+  }
+
+  private getTrackChangesDebugStateSnapshot(
+    viewOverride?: import('@milkdown/kit/prose/view').EditorView | null,
+  ): Record<string, unknown> {
+    const buildState = (view: import('@milkdown/kit/prose/view').EditorView | null): Record<string, unknown> => {
+      const pluginEnabled = view ? isSuggestionsPluginEnabledState(view.state) : null;
+      const pendingSuggestionCount = view
+        ? getPendingSuggestions(getMarks(view.state)).length
+        : null;
+      const selection = view ? summarizeSelectionForDebug(view.state.selection) : null;
+      return {
+        desiredSuggestionsEnabled: this.desiredSuggestionsEnabled,
+        moduleSuggestionsEnabled: isSuggestionsModuleEnabled(),
+        globalDesiredSuggestionsEnabled: isSuggestionsDesiredEnabled(),
+        pluginSuggestionsEnabled: pluginEnabled,
+        shareAllowLocalEdits: this.shareAllowLocalEdits,
+        shareContentFilterEnabled: this.shareContentFilterEnabled,
+        suppressTrackChangesDuringCollabReconnect: this.suppressTrackChangesDuringCollabReconnect,
+        pendingCollabRebindOnSync: this.pendingCollabRebindOnSync,
+        pendingCollabRebindResetDoc: this.pendingCollabRebindResetDoc,
+        collabConnectionStatus: this.collabConnectionStatus,
+        collabIsSynced: this.collabIsSynced,
+        collabUnsyncedChanges: this.collabUnsyncedChanges,
+        collabPendingLocalUpdates: this.collabPendingLocalUpdates,
+        collabSessionRefreshInFlight: this.collabSessionRefreshInFlight,
+        hasCompletedInitialCollabHydration: this.hasCompletedInitialCollabHydration,
+        collabHydrationSatisfiedByPreservedState: this.collabHydrationSatisfiedByPreservedState,
+        initialMarksSynced: this.initialMarksSynced,
+        pendingSuggestionCount,
+        selection,
+      };
+    };
+
+    if (viewOverride !== undefined) {
+      return buildState(viewOverride);
+    }
+    if (!this.editor) {
+      return buildState(null);
+    }
+
+    let snapshot: Record<string, unknown> = buildState(null);
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      snapshot = buildState(view);
+    });
+    return snapshot;
+  }
+
+  private recordTrackChangesDebugEvent(
+    type: string,
+    data: Record<string, unknown> = {},
+    viewOverride?: import('@milkdown/kit/prose/view').EditorView | null,
+  ): void {
+    const event = {
+      seq: ++this.runtimeTraceSeq,
+      at: new Date().toISOString(),
+      type,
+      ...this.getTrackChangesDebugStateSnapshot(viewOverride),
+      ...data,
+    };
+    this.trackChangesDebugEvents.push(event);
+    if (this.trackChangesDebugEvents.length > 200) {
+      this.trackChangesDebugEvents.splice(0, this.trackChangesDebugEvents.length - 200);
+    }
+  }
+
+  private recordTrackChangesDebugStateIfChanged(
+    source: string,
+    extra: Record<string, unknown> = {},
+    viewOverride?: import('@milkdown/kit/prose/view').EditorView | null,
+  ): void {
+    const state = this.getTrackChangesDebugStateSnapshot(viewOverride);
+    const signature = JSON.stringify(state);
+    if (signature === this.lastTrackChangesDebugStateSignature) return;
+    this.lastTrackChangesDebugStateSignature = signature;
+    this.recordTrackChangesDebugEvent(source, extra, viewOverride);
+  }
+
+  getTrackChangesDebugState(): Record<string, unknown> {
+    return this.getTrackChangesDebugStateSnapshot();
+  }
+
+  getTrackChangesDebugEvents(limit = 50): Array<Record<string, unknown>> {
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 50;
+    return this.trackChangesDebugEvents.slice(-safeLimit);
+  }
+
+  clearTrackChangesDebugEvents(): void {
+    this.trackChangesDebugEvents = [];
+    this.lastTrackChangesDebugStateSignature = '';
   }
 
   private parseCollabTemplateClaim(value: unknown): { id: string; ts: number } | null {
@@ -3023,17 +3124,26 @@ class ProofEditorImpl implements ProofEditor {
   private updateShareEditGate(): void {
     if (!this.isShareMode) return;
     const awaitingTemplateSeed = Boolean(this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0);
+    const hydratedForEditing = this.hasCompletedInitialCollabHydration
+      && (this.collabHydrationSatisfiedByPreservedState || this.isCollabHydratedForEditing());
+    const allowTransientRecoveryEdits = shouldAllowShareLocalEditsDuringTransientCollabRecovery({
+      collabEnabled: this.collabEnabled,
+      collabCanEdit: this.collabCanEdit,
+      hasCompletedInitialCollabHydration: this.hasCompletedInitialCollabHydration,
+      hydratedForEditing,
+      collabConnectionStatus: this.collabConnectionStatus,
+      collabUnsyncedChanges: this.collabUnsyncedChanges,
+      collabPendingLocalUpdates: this.collabPendingLocalUpdates,
+    });
     const baseAllowLocalEdits = this.collabEnabled
       && this.collabCanEdit
-      && this.collabConnectionStatus === 'connected'
-      && this.collabIsSynced
+      && (this.collabConnectionStatus === 'connected' || allowTransientRecoveryEdits)
       && !awaitingTemplateSeed;
     const collabReconnectStable = !this.pendingCollabRebindOnSync
       && !this.suppressTrackChangesDuringCollabReconnect;
     const hydrated = !baseAllowLocalEdits
       ? true
-      : this.hasCompletedInitialCollabHydration
-        && (this.collabHydrationSatisfiedByPreservedState || this.isCollabHydratedForEditing());
+      : hydratedForEditing;
     if (baseAllowLocalEdits && !hydrated) {
       // Prevent "type into blank doc" races that can overwrite remote Yjs state.
       this.kickCollabHydration();
@@ -3047,9 +3157,18 @@ class ProofEditorImpl implements ProofEditor {
       canComment: this.collabCanComment,
       canEdit: this.collabCanEdit,
     });
-    this.updateEditableState();
+    this.updateEditableState('share-edit-gate');
     this.updateShareBannerTitleDisplay();
     this.updateShareBannerTrackChangesDisplay();
+    this.recordTrackChangesDebugStateIfChanged('share-edit-gate', {
+      awaitingTemplateSeed,
+      hydratedForEditing,
+      allowTransientRecoveryEdits,
+      baseAllowLocalEdits,
+      collabReconnectStable,
+      hydrated,
+      allowLocalEdits,
+    });
     if (allowLocalEdits && this.desiredSuggestionsEnabled) {
       this.scheduleDesiredSuggestionsReapply('share-edit-gate');
     }
@@ -3126,12 +3245,12 @@ class ProofEditorImpl implements ProofEditor {
   }
 
   private shouldSkipForcedCollabRefreshFromPendingEvent(): boolean {
-    // When the live room is already healthy, agent/document updates should arrive
-    // through Yjs. Rebinding from canonical state here can erase a fresh local edit
-    // that has propagated live but has not durably persisted yet.
+    // Only use the polling fallback when the live room is actually unavailable.
+    // A connected or reconnecting room can emit our own agent/document events while
+    // local edits are still settling; forcing a collab refresh in that window can
+    // temporarily flip the editor non-editable and drop the next local edit.
     return this.collabEnabled
-      && this.collabConnectionStatus === 'connected'
-      && this.collabIsSynced;
+      && this.collabConnectionStatus !== 'disconnected';
   }
 
   private isMarksPendingShareEvent(event: SharePendingEvent): boolean {
@@ -3141,13 +3260,52 @@ class ProofEditorImpl implements ProofEditor {
 
   private handlePendingShareEvent(event: SharePendingEvent): void {
     if (this.isMarksPendingShareEvent(event)) {
+      this.recordTrackChangesDebugEvent('pending-share-event', {
+        eventId: event.id,
+        eventType: event.type,
+        action: 'marks-refresh',
+      });
       this.scheduleShareMarksRefresh();
       return;
     }
-    if (!this.shouldForceCollabRefreshFromPendingEvent(event)) return;
-    if (event.id <= this.shareLastForcedCollabEventId) return;
+    if (!this.shouldForceCollabRefreshFromPendingEvent(event)) {
+      this.recordTrackChangesDebugEvent('pending-share-event', {
+        eventId: event.id,
+        eventType: event.type,
+        action: 'ignore-non-refresh',
+      });
+      return;
+    }
+    if (event.id <= this.shareLastForcedCollabEventId) {
+      this.recordTrackChangesDebugEvent('pending-share-event', {
+        eventId: event.id,
+        eventType: event.type,
+        action: 'ignore-stale-refresh',
+      });
+      return;
+    }
     this.shareLastForcedCollabEventId = event.id;
-    if (this.shouldSkipForcedCollabRefreshFromPendingEvent()) return;
+    if (this.shouldSkipForcedCollabRefreshFromPendingEvent()) {
+      this.recordTrackChangesDebugEvent('pending-share-event', {
+        eventId: event.id,
+        eventType: event.type,
+        action: 'skip-forced-refresh',
+        collabConnectionStatus: this.collabConnectionStatus,
+        collabIsSynced: this.collabIsSynced,
+        collabUnsyncedChanges: this.collabUnsyncedChanges,
+        collabPendingLocalUpdates: this.collabPendingLocalUpdates,
+      });
+      return;
+    }
+    this.recordTrackChangesDebugEvent('pending-share-event', {
+      eventId: event.id,
+      eventType: event.type,
+      action: 'schedule-forced-refresh',
+      collabConnectionStatus: this.collabConnectionStatus,
+      collabIsSynced: this.collabIsSynced,
+      collabUnsyncedChanges: this.collabUnsyncedChanges,
+      collabPendingLocalUpdates: this.collabPendingLocalUpdates,
+    });
     this.scheduleShareDocumentUpdatedRefresh(true);
   }
 
@@ -5707,7 +5865,7 @@ class ProofEditorImpl implements ProofEditor {
     document.body.appendChild(banner);
 
     this.readOnlyBanner = banner;
-    this.updateEditableState();
+    this.updateEditableState('read-only-banner');
     this.scheduleBannerLayoutUpdate();
   }
 
@@ -5759,10 +5917,19 @@ class ProofEditorImpl implements ProofEditor {
     editor.style.paddingTop = `${Math.ceil(offset + extraSpacing)}px`;
   }
 
-  private updateEditableState(viewOverride?: EditorView): void {
+  private updateEditableState(viewOverride?: EditorView | string, reason: string = 'unspecified'): void {
+    const view = typeof viewOverride === 'string' ? undefined : viewOverride;
+    const source = typeof viewOverride === 'string' ? viewOverride : reason;
     const isEditable = !this.isReadOnly
       && this.reviewLockCount === 0
       && (!this.isShareMode || this.shareAllowLocalEdits);
+    this.recordTrackChangesDebugStateIfChanged('editable-state', {
+      source,
+      isEditable,
+      isReadOnly: this.isReadOnly,
+      reviewLockCount: this.reviewLockCount,
+      shareAllowLocalEdits: this.shareAllowLocalEdits,
+    });
 
     const applyEditableState = (view: EditorView) => {
       view.setProps({
@@ -5770,8 +5937,8 @@ class ProofEditorImpl implements ProofEditor {
       });
     };
 
-    if (viewOverride) {
-      applyEditableState(viewOverride);
+    if (view) {
+      applyEditableState(view);
       return;
     }
 
@@ -6426,6 +6593,10 @@ class ProofEditorImpl implements ProofEditor {
           // Don't intercept meta transactions (like enabling/disabling suggestions)
           if (tr.getMeta(suggestionsPluginKey) !== undefined) {
             clearPendingDomSuggestionSelection();
+            this.recordTrackChangesDebugEvent('dispatch-meta-passthrough', {
+              reason: 'suggestions-meta',
+              meta: summarizeTransactionMeta(tr),
+            }, view);
             dispatchWithRevision(tr, 'suggestionsMetaPassthrough');
             return;
           }
@@ -6434,6 +6605,12 @@ class ProofEditorImpl implements ProofEditor {
           // These are internal operations that should not be converted to suggestions
           if (marksMeta !== undefined && (marksMetaType !== 'INTERNAL' || !hasReplaceStep)) {
             clearPendingDomSuggestionSelection();
+            this.recordTrackChangesDebugEvent('dispatch-meta-passthrough', {
+              reason: 'marks-meta',
+              meta: summarizeTransactionMeta(tr),
+              marksMetaType,
+              hasReplaceStep,
+            }, view);
             dispatchWithRevision(tr, 'marksMetaPassthrough');
             return;
           }
@@ -6441,18 +6618,27 @@ class ProofEditorImpl implements ProofEditor {
           // Don't intercept document load transactions
           if (tr.getMeta('document-load') !== undefined) {
             clearPendingDomSuggestionSelection();
+            this.recordTrackChangesDebugEvent('dispatch-meta-passthrough', {
+              reason: 'document-load',
+              meta: summarizeTransactionMeta(tr),
+            }, view);
             dispatchWithRevision(tr, 'documentLoadPassthrough');
             return;
           }
 
           if (isSystemTrackChangesSuppressed) {
             clearPendingDomSuggestionSelection();
+            this.recordTrackChangesDebugEvent('dispatch-untracked-passthrough', {
+              reason: 'system-track-changes-suppressed',
+              meta: summarizeTransactionMeta(tr),
+            }, view);
             dispatchWithRevision(tr, 'systemTrackChangesSuppressedPassthrough');
             return;
           }
 
           // Don't intercept Yjs-origin collaborative transactions.
           if (isRemoteContentChange) {
+            const preservedDomSelectionRange = this.captureTrackedReplacementSelectionForRemoteTransaction(view, tr);
             clearPendingDomSuggestionSelection();
             const preserveInsertCoalescing = shouldTreatYjsPlainTextEchoAsRemote
               || this.shouldPreserveSuggestionsInsertCoalescingAfterRemoteContentChange(
@@ -6464,7 +6650,20 @@ class ProofEditorImpl implements ProofEditor {
             if (!preserveInsertCoalescing) {
               resetSuggestionsInsertCoalescing();
             }
+            this.recordTrackChangesDebugEvent('dispatch-meta-passthrough', {
+              reason: 'remote-content',
+              meta: summarizeTransactionMeta(tr),
+              carriesIncomingSuggestionMarks,
+              shouldTreatYjsPlainTextEchoAsRemote,
+              preservedDomSelectionRange,
+            }, view);
             dispatchWithoutRevision(tr, 'remoteContentPassthrough');
+            if (preservedDomSelectionRange && preservedDomSelectionRange.from < preservedDomSelectionRange.to) {
+              this.pendingDomSuggestionSelection = preservedDomSelectionRange;
+              this.recordTrackChangesDebugEvent('remote-content-preserved-selection', {
+                preservedDomSelectionRange,
+              }, view);
+            }
             this.repairRemoteSuggestionBoundaryInheritance(
               view,
               beforeState,
@@ -6476,6 +6675,11 @@ class ProofEditorImpl implements ProofEditor {
           // Don't intercept undo/redo transactions (from history plugin)
           if (tr.getMeta('history$') !== undefined) {
             clearPendingDomSuggestionSelection();
+            this.recordTrackChangesDebugEvent('dispatch-meta-passthrough', {
+              reason: 'history',
+              meta: summarizeTransactionMeta(tr),
+              undo: isUndoHistoryTransaction(tr),
+            }, view);
             dispatchWithRevision(tr, 'historyPassthrough');
             if (isUndoHistoryTransaction(tr)) {
               const historyReconcileTr = buildHistorySuggestionMetadataReconciliationTransaction(
@@ -6501,6 +6705,10 @@ class ProofEditorImpl implements ProofEditor {
             });
             tr.setMeta('proof-native-typed-input', true);
             tr.setMeta('proof-native-typed-input-match', nativeTextInputMatch);
+            this.recordTrackChangesDebugEvent('dispatch-native-text-input-passthrough', {
+              meta: summarizeTransactionMeta(tr),
+              nativeTextInputMatch,
+            }, view);
             dispatchWithRevision(tr, 'nativeTextInputPassthrough');
             const finalNodes = summarizeTransactionDocChangeNodes(
               view.state.doc,
@@ -6595,6 +6803,10 @@ class ProofEditorImpl implements ProofEditor {
             selFrom: tr.selection?.from,
           });
           const wrappedTr = wrapTransactionForSuggestions(tr, view.state, true);
+          this.recordTrackChangesDebugEvent('dispatch-wrapped', {
+            sourceMeta: summarizeTransactionMeta(tr),
+            wrappedMeta: summarizeTransactionMeta(wrappedTr),
+          }, view);
           dispatchWithRevision(wrappedTr, 'suggestionsWrapped');
         } else {
           if (tr?.docChanged) {
@@ -6604,6 +6816,11 @@ class ProofEditorImpl implements ProofEditor {
               selFrom: tr.selection?.from,
             });
             this.pendingDomSuggestionSelection = null;
+            this.recordTrackChangesDebugEvent('dispatch-untracked-passthrough', {
+              reason: 'suggestions-disabled-or-doc-unchanged',
+              suggestionsEnabled,
+              meta: summarizeTransactionMeta(tr),
+            }, view);
           }
           dispatchWithRevision(tr, 'plainPassthrough');
         }
@@ -6645,6 +6862,46 @@ class ProofEditorImpl implements ProofEditor {
     } catch {
       return null;
     }
+  }
+
+  private remapDomSelectionRangeThroughTransaction(
+    range: MarkRange | null,
+    transaction: any,
+    fallbackDocSize: number,
+  ): MarkRange | null {
+    if (!range || range.from >= range.to) return null;
+    const mapping = transaction?.mapping;
+    if (!mapping || typeof mapping.map !== 'function') {
+      return range;
+    }
+
+    try {
+      const mappedFrom = mapping.map(range.from, -1);
+      const mappedTo = mapping.map(range.to, 1);
+      const nextDocSize = typeof transaction?.doc?.content?.size === 'number'
+        ? transaction.doc.content.size
+        : fallbackDocSize;
+      const from = Math.max(0, Math.min(Math.min(mappedFrom, mappedTo), nextDocSize));
+      const to = Math.max(from, Math.min(Math.max(mappedFrom, mappedTo), nextDocSize));
+      return to > from ? { from, to } : null;
+    } catch {
+      return range;
+    }
+  }
+
+  private captureTrackedReplacementSelectionForRemoteTransaction(
+    view: EditorView,
+    transaction: any,
+  ): MarkRange | null {
+    const liveDomSelection = this.getDomSelectionRange(view);
+    const candidate = liveDomSelection && liveDomSelection.from < liveDomSelection.to
+      ? liveDomSelection
+      : this.pendingDomSuggestionSelection;
+    return this.remapDomSelectionRangeThroughTransaction(
+      candidate && candidate.from < candidate.to ? candidate : null,
+      transaction,
+      view.state.doc.content.size,
+    );
   }
 
   private posToLineCol(doc: import('@milkdown/kit/prose/model').Node, pos: number): { line: number; col: number } {
@@ -7998,6 +8255,11 @@ class ProofEditorImpl implements ProofEditor {
       if (!view.hasFocus()) {
         view.focus();
       }
+      this.recordTrackChangesDebugEvent('set-suggestions-enabled', {
+        requested: enabled,
+        updateDesiredState: options?.updateDesiredState !== false,
+        result: currentEnabled,
+      }, view);
     });
     this.updateShareBannerTrackChangesDisplay();
     return currentEnabled;
@@ -10027,6 +10289,7 @@ class ProofEditorImpl implements ProofEditor {
     options?: {
       skipReconnectTemplateSeed?: boolean;
       preserveEditorStateDuringReconnect?: boolean;
+      resetEditorDocOnReconnect?: boolean;
     },
   ): Promise<boolean> {
     const markdown = typeof result?.markdown === 'string' ? result.markdown : null;
@@ -10036,21 +10299,43 @@ class ProofEditorImpl implements ProofEditor {
     const collabStatus = typeof result?.collab?.status === 'string' ? result.collab.status : '';
     const skipReconnectTemplateSeed = options?.skipReconnectTemplateSeed === true;
     const preserveEditorStateDuringReconnect = options?.preserveEditorStateDuringReconnect === true;
+    const resetEditorDocOnReconnect = options?.resetEditorDocOnReconnect === true;
     this.traceShareReview('mutation.apply-result', {
       collabStatus,
       markdown: this.summarizeTraceMarkdown(markdown),
       markCount: Object.keys(marks).length,
       skipReconnectTemplateSeed,
       preserveEditorStateDuringReconnect,
+      resetEditorDocOnReconnect,
     });
     resetSuggestionsInsertCoalescing();
+    if (markdown !== null && collabStatus === 'pending' && preserveEditorStateDuringReconnect) {
+      this.pendingCollabReconnectTemplateOverride = null;
+      this.skipNextCollabTemplateSeed = true;
+      this.preserveEditorStateOnNextCollabReconnect = true;
+      this.resetEditorDocOnNextCollabReconnect = resetEditorDocOnReconnect;
+      if (this.collabEnabled) {
+        this.disconnectCollabService();
+      }
+      this.loadCanonicalShareDocument(markdown, marks);
+      if (this.desiredSuggestionsEnabled || Object.keys(marks).length > 0) {
+        this.setSuggestionsEnabled(true, { updateDesiredState: false });
+      }
+      this.suppressTrackChangesDuringCollabReconnect = false;
+      this.updateShareEditGate();
+      this.releaseDeferredShareMarksFlush();
+      if (this.collabEnabled && this.activeCollabSession) {
+        void this.refreshCollabSessionAndReconnect(false);
+      }
+      return true;
+    }
     if (markdown !== null && collabStatus === 'pending') {
       this.pendingCollabReconnectTemplateOverride = skipReconnectTemplateSeed
         ? null
         : this.normalizeMarkdownForCollab(markdown);
       this.skipNextCollabTemplateSeed = skipReconnectTemplateSeed;
       this.preserveEditorStateOnNextCollabReconnect = preserveEditorStateDuringReconnect;
-      this.resetEditorDocOnNextCollabReconnect = preserveEditorStateDuringReconnect;
+      this.resetEditorDocOnNextCollabReconnect = resetEditorDocOnReconnect;
       this.suppressTrackChangesDuringCollabReconnect = true;
       if (this.collabEnabled) {
         this.collabConnectionStatus = 'connecting';
@@ -10227,7 +10512,7 @@ class ProofEditorImpl implements ProofEditor {
   private async waitForStableShareReviewMutationState(): Promise<void> {
     if (!this.isShareMode || !this.collabEnabled || !this.collabCanEdit) return;
 
-    const deadline = Date.now() + 2500;
+    const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       const awaitingTemplateSeed = Boolean(this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0);
       const collabReconnectStable = !this.pendingCollabRebindOnSync
@@ -11030,7 +11315,7 @@ class ProofEditorImpl implements ProofEditor {
       const serialized = this.serializeMarkdown(view);
       if (!serialized) return;
       const markdown = this.normalizeMarkdownForCollab(serialized);
-      const metadata = this.buildAuthoritativeShareReviewMutationMarks(view);
+      const metadata = this.buildPersistableShareReviewSnapshotMarks(view);
       snapshot = {
         markdown,
         marks: metadata as Record<string, unknown>,
@@ -11052,6 +11337,7 @@ class ProofEditorImpl implements ProofEditor {
       const initialIds = this.getSortedPendingSuggestionIdsForShareReview();
       if (initialIds.length === 0) return 0;
 
+      this.reviewLock('Finalizing accepted changes...');
       void this.runSerializedShareReviewMutation(async () => {
         const ready = await this.flushShareReviewMutationState(initialIds);
         if (!ready) {
@@ -11082,6 +11368,8 @@ class ProofEditorImpl implements ProofEditor {
             this.bridge?.authorshipStatsUpdated?.(stats);
           });
         }
+      }).finally(() => {
+        this.reviewUnlock();
       }).catch((error) => {
         console.error('[markAcceptAll] Failed to persist suggestion acceptance via share mutation:', error);
       });
@@ -11733,7 +12021,7 @@ class ProofEditorImpl implements ProofEditor {
 
     this.reviewLockCount += 1;
     this.ensureReviewLockBanner();
-    this.updateEditableState();
+    this.updateEditableState('review-lock');
     this.updateShareBannerTrackChangesDisplay();
     this.scheduleBannerLayoutUpdate();
 
@@ -11753,7 +12041,7 @@ class ProofEditorImpl implements ProofEditor {
       this.scheduleBannerLayoutUpdate();
     }
 
-    this.updateEditableState();
+    this.updateEditableState('review-unlock');
     this.updateShareBannerTrackChangesDisplay();
     const { locked, lockCount } = this.getReviewLockState();
     return { locked, lockCount };
@@ -12847,6 +13135,9 @@ if (window.location?.pathname?.startsWith('/d/')) {
     insertMarkdown: (markdown: string) => window.proof.insertAtCursor(markdown, 'ai:browser-agent'),
     replaceSelection: (markdown: string) => window.proof.replaceSelection(markdown, 'ai:browser-agent'),
     isSuggestionsEnabled: () => window.proof.isSuggestionsEnabled(),
+    getTrackChangesDebugState: () => (window.proof as ProofEditorImpl).getTrackChangesDebugState(),
+    getTrackChangesDebugEvents: (limit?: number) => (window.proof as ProofEditorImpl).getTrackChangesDebugEvents(limit),
+    clearTrackChangesDebugEvents: () => (window.proof as ProofEditorImpl).clearTrackChangesDebugEvents(),
     getClientIncidentEvents: (limit?: number) => getClientIncidentEvents(limit),
     clearClientIncidentEvents: () => clearClientIncidentEvents(),
     focus: () => {

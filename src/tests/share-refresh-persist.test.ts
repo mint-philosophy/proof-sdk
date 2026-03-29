@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 
 import {
+  shouldAllowShareLocalEditsDuringTransientCollabRecovery,
   shouldKeepalivePersistShareMarks,
   shouldKeepalivePersistShareContent,
   shouldPreserveLocalContentEditMarkerOnRemoteChange,
@@ -155,6 +156,48 @@ assert.equal(
   }),
   false,
   'Expected pending local collab publishes to keep keepalive writes on observed-base preconditions',
+);
+
+assert.equal(
+  shouldAllowShareLocalEditsDuringTransientCollabRecovery({
+    collabEnabled: true,
+    collabCanEdit: true,
+    hasCompletedInitialCollabHydration: true,
+    hydratedForEditing: true,
+    collabConnectionStatus: 'disconnected',
+    collabUnsyncedChanges: 1,
+    collabPendingLocalUpdates: 2,
+  }),
+  true,
+  'Expected hydrated editable share sessions with pending local collab updates to remain editable through a transient disconnect while recovery is in progress',
+);
+
+assert.equal(
+  shouldAllowShareLocalEditsDuringTransientCollabRecovery({
+    collabEnabled: true,
+    collabCanEdit: true,
+    hasCompletedInitialCollabHydration: true,
+    hydratedForEditing: true,
+    collabConnectionStatus: 'connected',
+    collabUnsyncedChanges: 1,
+    collabPendingLocalUpdates: 0,
+  }),
+  false,
+  'Expected the transient recovery editable gate to stay off for healthy connected sessions',
+);
+
+assert.equal(
+  shouldAllowShareLocalEditsDuringTransientCollabRecovery({
+    collabEnabled: true,
+    collabCanEdit: true,
+    hasCompletedInitialCollabHydration: true,
+    hydratedForEditing: false,
+    collabConnectionStatus: 'connecting',
+    collabUnsyncedChanges: 1,
+    collabPendingLocalUpdates: 0,
+  }),
+  false,
+  'Expected transient recovery edits to remain blocked until the preserved local document is hydrated for editing',
 );
 
 assert.equal(

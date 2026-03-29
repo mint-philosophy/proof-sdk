@@ -117,9 +117,10 @@ function run(): void {
     'Expected hard reconnects to preserve bounded buffered/recent local updates and never replay the full previous Y.Doc into a new live room',
   );
   assert(
-    source.includes('this.activeSession.shareState === session.shareState;')
+    source.includes('this.activeSession.shareState === session.shareState')
+      && source.includes('this.activeSession.snapshotVersion === session.snapshotVersion;')
       && !source.includes('this.activeSession.accessEpoch === session.accessEpoch;'),
-    'Expected soft session refresh to treat accessEpoch-only token rotations as the same live room identity',
+    'Expected soft session refresh to treat accessEpoch-only token rotations as the same live room identity while forcing a hard reconnect when the server snapshot version changes',
   );
   assert(
     source.includes('private sessionRole: ShareRole | null = null;')

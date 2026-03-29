@@ -14,29 +14,22 @@ assert(
 );
 
 assert(
-  editorSource.includes('private updateShareEventPollForSocketState(state: ShareSocketState = shareClient.getConnectionState()): void')
-    && editorSource.includes("if (state === 'connected') {")
-    && editorSource.includes('this.pauseShareEventPoll();')
-    && editorSource.includes('void this.catchUpShareEventPollAfterSocketRecovery();')
-    && editorSource.includes('this.startShareEventPoll();'),
-  'Expected share-mode editor startup to adapt the pending-events fallback to WebSocket health',
-);
-
-assert(
-  editorSource.includes('private async runShareEventPollPass(): Promise<void>')
-    && editorSource.includes('private async catchUpShareEventPollAfterSocketRecovery(): Promise<void>')
-    && editorSource.includes('await this.runShareEventPollPass();'),
-  'Expected share-mode event fallback to perform a one-shot catch-up fetch when the socket recovers',
+  editorSource.includes('private startShareEventPoll(): void')
+    && editorSource.includes('if (this.shareEventPollTimer) return;')
+    && editorSource.includes('if (this.shareEventPollInFlight) {')
+    && editorSource.includes('const payload = await shareClient.fetchPendingEvents(this.shareEventCursor, { limit: 100 });')
+    && editorSource.includes('this.handlePendingShareEvent(event);')
+    && editorSource.includes('this.shareEventPollTimer = setTimeout(() => { void tick(); }, this.shareEventPollMs);'),
+  'Expected share-mode editor startup to maintain a debounced pending-events poll fallback that drains events through handlePendingShareEvent',
 );
 
 assert(
   editorSource.includes("event.type === 'agent.edit.v2'")
     && editorSource.includes('private shouldSkipForcedCollabRefreshFromPendingEvent(): boolean')
-    && editorSource.includes("this.collabConnectionStatus === 'connected'")
-    && editorSource.includes('this.collabIsSynced')
-    && editorSource.includes('if (this.shouldSkipForcedCollabRefreshFromPendingEvent()) return;')
+    && editorSource.includes("this.collabConnectionStatus !== 'disconnected'")
+    && editorSource.includes("action: 'skip-forced-refresh'")
     && editorSource.includes('this.scheduleShareDocumentUpdatedRefresh(true);'),
-  'Expected pending event handler to skip forced collab refresh when the live room is already healthy',
+  'Expected pending event handler to skip forced collab refresh whenever the live room is still connected or reconnecting, so local edits cannot trigger a self-refresh fallback mid-sync',
 );
 
 assert(
@@ -52,7 +45,6 @@ assert(
 
 assert(
   editorSource.includes('private stopShareEventPoll(): void')
-    && editorSource.includes('private pauseShareEventPoll(): void')
     && editorSource.includes('private scheduleShareMarksRefresh(): void')
     && editorSource.includes('private shareMarksRefreshTimer: ReturnType<typeof setTimeout> | null = null;')
     && editorSource.includes('private pendingShareMarksRefresh: boolean = false;')

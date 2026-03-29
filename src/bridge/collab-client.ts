@@ -552,7 +552,8 @@ export class CollabClient {
     return this.activeSession.docId === session.docId
       && this.activeSession.slug === session.slug
       && this.activeSession.role === session.role
-      && this.activeSession.shareState === session.shareState;
+      && this.activeSession.shareState === session.shareState
+      && this.activeSession.snapshotVersion === session.snapshotVersion;
   }
 
   requiresHardReconnect(session: CollabSessionInfo): boolean {

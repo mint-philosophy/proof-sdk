@@ -77,6 +77,13 @@ function run(): void {
     'Expected share Accept All to recompute pending suggestion order from the latest server marks after each persisted accept',
   );
   assert(
+    markAcceptAllBlock.includes("this.reviewLock('Finalizing accepted changes...');")
+      && markAcceptAllBlock.includes('await this.waitForStableShareReviewMutationState();')
+      && markAcceptAllBlock.includes('}).finally(() => {')
+      && markAcceptAllBlock.includes('this.reviewUnlock();'),
+    'Expected share Accept All to keep the editor review-locked until the persisted reconnect settle window completes so follow-up edits cannot race a late batch reconnect',
+  );
+  assert(
     sortedServerPendingIdsBlock.includes('private getCurrentShareReviewStoredMark(markId: string): StoredMark | null {')
       && sortedServerPendingIdsBlock.includes('private getAuthoritativePendingSuggestionIdsForShareReview(): string[] {')
       && editorSource.includes('private getAuthoritativeServerMarksForReview(): Record<string, StoredMark> {')
@@ -104,10 +111,10 @@ function run(): void {
       && editorSource.includes('...authoritativeServerMarks,')
       && editorSource.includes('if (Object.keys(authoritativeServerMarks).length > 0) {')
       && editorSource.includes('return authoritativeServerMarks;')
-      && buildShareBatchSuggestionSnapshotBlock.includes('const metadata = this.buildAuthoritativeShareReviewMutationMarks(view);')
+      && buildShareBatchSuggestionSnapshotBlock.includes('const metadata = this.buildPersistableShareReviewSnapshotMarks(view);')
       && buildShareBatchSuggestionSnapshotBlock.includes('marks: metadata as Record<string, unknown>,')
       && !buildShareBatchSuggestionSnapshotBlock.includes('buildCanonicalShareMarkMetadata(view.state, metadata)'),
-    'Expected persisted review mutation snapshots to send the authoritative server mark set when available, while keeping a separate persist snapshot builder that can still merge local and server marks for full pushUpdate recovery',
+    'Expected persisted review mutation snapshots to send the persistable merged mark set so fresh local pending marks survive post-reconnect batch review requests, while still keeping an authoritative-only helper for server-driven mark resolution',
   );
   assert(
     flushShareReviewMutationStateBlock.includes('if (this.shareMarksFlushTimer !== null) {')
@@ -308,9 +315,24 @@ function run(): void {
       && authoredTrackerSource.includes("import { isSuggestionsEnabled } from './suggestions';")
       && authoredTrackerSource.includes('return !isSuggestionsEnabled(state as never);')
       && editorSource.includes("this.scheduleDesiredSuggestionsReapply('load-document');")
+      && !updateShareEditGateBlock.includes('&& this.collabIsSynced')
+      && editorSource.includes("this.updateEditableState('share-edit-gate');")
+      && editorSource.includes("this.updateEditableState('review-lock');")
+      && editorSource.includes("this.updateEditableState('review-unlock');")
+      && editorSource.includes("const source = typeof viewOverride === 'string' ? viewOverride : reason;")
       && updateShareEditGateBlock.includes('if (allowLocalEdits && this.desiredSuggestionsEnabled) {')
       && updateShareEditGateBlock.includes("this.scheduleDesiredSuggestionsReapply('share-edit-gate');"),
-    'Expected loadDocument to reset the module-level TC flag while preserving the latched desired Track Changes state across plugin-side guards, including authored tracking, until share editing is live again',
+    'Expected loadDocument to reset the module-level TC flag while preserving the latched desired Track Changes state across plugin-side guards, including authored tracking, until share editing is live again without disabling edits for routine local unsynced collab updates',
+  );
+
+  assert(
+    editorSource.includes('private remapDomSelectionRangeThroughTransaction(')
+      && editorSource.includes('private captureTrackedReplacementSelectionForRemoteTransaction(')
+      && editorSource.includes('const preservedDomSelectionRange = this.captureTrackedReplacementSelectionForRemoteTransaction(view, tr);')
+      && editorSource.includes('this.pendingDomSuggestionSelection = preservedDomSelectionRange;')
+      && editorSource.includes("this.recordTrackChangesDebugEvent('remote-content-preserved-selection'")
+      && editorSource.includes('preservedDomSelectionRange,'),
+    'Expected remote collab content passthrough to preserve and remap any active replacement selection across the remote transaction so the next local overwrite still has a tracked replacement range',
   );
 
   assert(

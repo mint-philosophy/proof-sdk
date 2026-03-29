@@ -47,6 +47,24 @@ export function shouldUseLocalKeepaliveBaseToken(options: {
   return true;
 }
 
+export function shouldAllowShareLocalEditsDuringTransientCollabRecovery(options: {
+  collabEnabled: boolean;
+  collabCanEdit: boolean;
+  hasCompletedInitialCollabHydration: boolean;
+  hydratedForEditing: boolean;
+  collabConnectionStatus: 'connecting' | 'connected' | 'disconnected';
+  collabUnsyncedChanges: number;
+  collabPendingLocalUpdates: number;
+}): boolean {
+  if (!options.collabEnabled || !options.collabCanEdit) return false;
+  if (!options.hasCompletedInitialCollabHydration) return false;
+  if (!options.hydratedForEditing) return false;
+  if (options.collabConnectionStatus !== 'connecting' && options.collabConnectionStatus !== 'disconnected') {
+    return false;
+  }
+  return options.collabUnsyncedChanges > 0 || options.collabPendingLocalUpdates > 0;
+}
+
 export function shouldKeepalivePersistShareMarks(options: {
   keepalive: boolean;
   collabEnabled: boolean;

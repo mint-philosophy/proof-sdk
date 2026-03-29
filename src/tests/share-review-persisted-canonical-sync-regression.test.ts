@@ -41,18 +41,28 @@ function run(): void {
       && applyResultBlock.includes('resetSuggestionsInsertCoalescing();')
       && applyResultBlock.includes("const skipReconnectTemplateSeed = options?.skipReconnectTemplateSeed === true;")
       && applyResultBlock.includes("const preserveEditorStateDuringReconnect = options?.preserveEditorStateDuringReconnect === true;")
+      && applyResultBlock.includes("const resetEditorDocOnReconnect = options?.resetEditorDocOnReconnect === true;")
+      && applyResultBlock.includes("if (markdown !== null && collabStatus === 'pending' && preserveEditorStateDuringReconnect) {")
+      && applyResultBlock.includes('this.pendingCollabReconnectTemplateOverride = null;')
+      && applyResultBlock.includes('this.skipNextCollabTemplateSeed = true;')
+      && applyResultBlock.includes('this.preserveEditorStateOnNextCollabReconnect = true;')
+      && applyResultBlock.includes('this.loadCanonicalShareDocument(markdown, marks);')
+      && applyResultBlock.includes("this.setSuggestionsEnabled(true, { updateDesiredState: false });")
+      && applyResultBlock.includes('this.suppressTrackChangesDuringCollabReconnect = false;')
+      && applyResultBlock.includes('this.releaseDeferredShareMarksFlush();')
+      && applyResultBlock.includes('void this.refreshCollabSessionAndReconnect(false);')
       && applyResultBlock.includes('this.pendingCollabReconnectTemplateOverride = skipReconnectTemplateSeed')
       && applyResultBlock.includes(': this.normalizeMarkdownForCollab(markdown);')
       && applyResultBlock.includes('this.skipNextCollabTemplateSeed = skipReconnectTemplateSeed;')
       && applyResultBlock.includes('this.preserveEditorStateOnNextCollabReconnect = preserveEditorStateDuringReconnect;')
-      && applyResultBlock.includes('this.resetEditorDocOnNextCollabReconnect = preserveEditorStateDuringReconnect;')
+      && applyResultBlock.includes('this.resetEditorDocOnNextCollabReconnect = resetEditorDocOnReconnect;')
       && applyResultBlock.includes("this.collabConnectionStatus = 'connecting';")
       && applyResultBlock.includes('this.collabIsSynced = false;')
       && applyResultBlock.includes('this.updateShareEditGate();')
       && applyResultBlock.includes('this.disconnectCollabService();')
       && applyResultBlock.includes('collabClient.disconnect();')
-      && applyResultBlock.indexOf('this.updateShareEditGate();') > applyResultBlock.indexOf("this.collabConnectionStatus = 'connecting';"),
-    'Expected share review mutation results with pending collab status to clear tracked-insert coalescing, mark collab as unstable, and flag preserved review reconnects to reset the editor doc from the next synced Y.Doc before editing resumes',
+      && applyResultBlock.lastIndexOf('this.updateShareEditGate();') > applyResultBlock.indexOf("this.collabConnectionStatus = 'connecting';"),
+    'Expected share review mutation results to keep preserved reconnects on the canonical local editor state path, while still distinguishing optional hard editor-doc resets for the fallback disconnect/reconnect branch',
   );
 
   const loadCanonicalShareDocumentBlock = sliceBetween(
@@ -147,10 +157,14 @@ function run(): void {
   assert(
     editGateBlock.includes('const collabReconnectStable = !this.pendingCollabRebindOnSync')
       && editGateBlock.includes('&& !this.suppressTrackChangesDuringCollabReconnect;')
+      && editGateBlock.includes('const hydratedForEditing = this.hasCompletedInitialCollabHydration')
+      && editGateBlock.includes('const allowTransientRecoveryEdits = shouldAllowShareLocalEditsDuringTransientCollabRecovery({')
+      && editGateBlock.includes("&& (this.collabConnectionStatus === 'connected' || allowTransientRecoveryEdits)")
       && editGateBlock.includes('this.hasCompletedInitialCollabHydration')
-      && editGateBlock.includes('(this.collabHydrationSatisfiedByPreservedState || this.isCollabHydratedForEditing())')
+      && editGateBlock.includes(': hydratedForEditing;')
+      && !editGateBlock.includes('&& this.collabIsSynced')
       && editGateBlock.includes('const allowLocalEdits = baseAllowLocalEdits && collabReconnectStable && hydrated;'),
-    'Expected share edit gating to keep the editor locked until post-review collab reconnect is stable, while allowing preserved-state reconnects to bypass a redundant hydration wait once the room is synced again',
+    'Expected share edit gating to keep the editor locked until post-review collab reconnect is stable, while allowing hydrated preserved-state sessions with pending local collab updates to stay editable through transient reconnect churn',
   );
 
   const remotePeerBlock = sliceBetween(
@@ -288,7 +302,7 @@ function run(): void {
     '\n  private getCurrentShareReviewPersistSnapshot(): {',
   );
   assert(
-    settleBlock.includes("const deadline = Date.now() + 2500;")
+    settleBlock.includes("const deadline = Date.now() + 10_000;")
       && settleBlock.includes("const awaitingTemplateSeed = Boolean(this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0);")
       && settleBlock.includes("const collabReconnectStable = !this.pendingCollabRebindOnSync")
       && settleBlock.includes("&& !this.suppressTrackChangesDuringCollabReconnect")

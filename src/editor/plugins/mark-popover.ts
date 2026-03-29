@@ -104,6 +104,7 @@ type InlineTextAccessor = {
 };
 
 type TouchSafeButtonOptions = {
+  debugLabel?: string;
   preventTouchPointerDown?: boolean;
   preventMousePointerDown?: boolean;
   preventMouseDown?: boolean;
@@ -171,6 +172,7 @@ function installTouchSafeButton(
   options: TouchSafeButtonOptions = {}
 ): void {
   const {
+    debugLabel,
     preventTouchPointerDown = true,
     preventMousePointerDown = false,
     preventMouseDown = false,
@@ -183,6 +185,14 @@ function installTouchSafeButton(
   let skipSyntheticClick = false;
 
   button.addEventListener('pointerdown', event => {
+    if (debugLabel) {
+      console.log('[mark-popover.touchSafeButton.pointerdown]', {
+        debugLabel,
+        pointerType: event.pointerType,
+        disabled: button.disabled,
+        skipSyntheticClick,
+      });
+    }
     if (
       (preventTouchPointerDown && event.pointerType === 'touch')
       || (preventMousePointerDown && event.pointerType === 'mouse')
@@ -203,6 +213,13 @@ function installTouchSafeButton(
   });
 
   button.addEventListener('mousedown', event => {
+    if (debugLabel) {
+      console.log('[mark-popover.touchSafeButton.mousedown]', {
+        debugLabel,
+        disabled: button.disabled,
+        skipSyntheticClick,
+      });
+    }
     if (preventMouseDown) {
       event.preventDefault();
     }
@@ -213,6 +230,13 @@ function installTouchSafeButton(
   });
 
   button.addEventListener('click', event => {
+    if (debugLabel) {
+      console.log('[mark-popover.touchSafeButton.click]', {
+        debugLabel,
+        disabled: button.disabled,
+        skipSyntheticClick,
+      });
+    }
     event.preventDefault();
     if (stopClickPropagation) {
       event.stopPropagation();
@@ -1798,6 +1822,12 @@ class MarkPopoverController {
     if (this.popover.contains(target)) return;
     if (this.strip.contains(target)) return;
     if (this.reviewContextMenu.contains(target)) return;
+    console.log('[mark-popover.outsidePointerDown.close]', {
+      mode: this.mode,
+      activeMarkId: this.activeMarkId,
+      transitionPending: this.suggestionReviewTransitionPending,
+      reviewActionInFlight: this.reviewActionInFlight,
+    });
     this.hideReviewContextMenu();
     this.close();
   };
@@ -1808,6 +1838,12 @@ class MarkPopoverController {
     if (this.popover.contains(target)) return;
     if (this.strip.contains(target)) return;
     if (this.reviewContextMenu.contains(target)) return;
+    console.log('[mark-popover.outsideClick.close]', {
+      mode: this.mode,
+      activeMarkId: this.activeMarkId,
+      transitionPending: this.suggestionReviewTransitionPending,
+      reviewActionInFlight: this.reviewActionInFlight,
+    });
     this.hideReviewContextMenu();
     this.close();
   };
@@ -2334,6 +2370,12 @@ class MarkPopoverController {
   }
 
   close(): void {
+    console.log('[mark-popover.close]', {
+      mode: this.mode,
+      activeMarkId: this.activeMarkId,
+      transitionPending: this.suggestionReviewTransitionPending,
+      reviewActionInFlight: this.reviewActionInFlight,
+    });
     if (this.suggestionReviewFollowupTimer !== null) {
       window.clearTimeout(this.suggestionReviewFollowupTimer);
       this.suggestionReviewFollowupTimer = null;
@@ -2928,13 +2970,27 @@ class MarkPopoverController {
     applyButton.textContent = 'Accept & Next';
     applyButton.title = 'Accept change and move to the next one (Shift+click to stay here, Cmd/Ctrl+Alt+A)';
     installTouchSafeButton(applyButton, (event) => {
+      console.log('[mark-popover.acceptButton.handler]', {
+        canEdit,
+        shiftKey: event.shiftKey,
+        controllerActiveMarkId: this.activeMarkId,
+        stateActiveMarkId: getActiveMarkId(this.view.state),
+        transitionPending: this.suggestionReviewTransitionPending,
+        reviewActionInFlight: this.reviewActionInFlight,
+      });
       if (!canEdit) return;
       const target = getActiveSuggestionActionTarget();
+      console.log('[mark-popover.acceptButton.target]', {
+        target,
+        controllerActiveMarkId: this.activeMarkId,
+        stateActiveMarkId: getActiveMarkId(this.view.state),
+      });
       if (!target) return;
       this.runSuggestionReviewAction(target.markId, 'accept', target.nextMarkId, target.kind, {
         followupMode: event.shiftKey ? 'close' : 'advance',
       });
     }, {
+      debugLabel: 'suggestion-accept-next',
       // Keep touch-safe behavior, but let desktop mouse actions fire on click.
       // Otherwise one physical click can accept the current suggestion on
       // pointerdown, then land a trailing synthetic click on the next
@@ -2948,13 +3004,27 @@ class MarkPopoverController {
     rejectButton.textContent = 'Reject & Next';
     rejectButton.title = 'Reject change and move to the next one (Shift+click to stay here, Cmd/Ctrl+Alt+R)';
     installTouchSafeButton(rejectButton, (event) => {
+      console.log('[mark-popover.rejectButton.handler]', {
+        canEdit,
+        shiftKey: event.shiftKey,
+        controllerActiveMarkId: this.activeMarkId,
+        stateActiveMarkId: getActiveMarkId(this.view.state),
+        transitionPending: this.suggestionReviewTransitionPending,
+        reviewActionInFlight: this.reviewActionInFlight,
+      });
       if (!canEdit) return;
       const target = getActiveSuggestionActionTarget();
+      console.log('[mark-popover.rejectButton.target]', {
+        target,
+        controllerActiveMarkId: this.activeMarkId,
+        stateActiveMarkId: getActiveMarkId(this.view.state),
+      });
       if (!target) return;
       this.runSuggestionReviewAction(target.markId, 'reject', target.nextMarkId, target.kind, {
         followupMode: event.shiftKey ? 'close' : 'advance',
       });
     }, {
+      debugLabel: 'suggestion-reject-next',
       preventMousePointerDown: false,
       preventMouseDown: false,
     });

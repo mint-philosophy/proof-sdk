@@ -196,6 +196,13 @@ function run(): void {
       && localResolveEditGateBlock.includes('this.updateShareEditGate();'),
     'Expected the local accept/reject fast path to lock local editing immediately while the post-mutation collab reconnect is still suppressing track changes',
   );
+  assert(
+    editorSource.includes("if (!this.pendingCollabTemplateMarkdown && !this.pendingCollabRebindOnSync) {")
+      && editorSource.includes('this.suppressTrackChangesDuringCollabReconnect = false;')
+      && editorSource.includes('this.updateShareEditGate();')
+      && editorSource.includes('this.releaseDeferredShareMarksFlush();'),
+    'Expected reconnect completion to reopen the share edit gate as soon as reconnect suppression clears, so users can immediately re-edit accepted text while other pending suggestions still remain',
+  );
 
   const acceptPersistedBlock = sliceBetween(
     editorSource,

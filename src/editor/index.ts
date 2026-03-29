@@ -209,7 +209,7 @@ import { initSessionManager, getSessionManager } from '../agent/session-manager'
 import { getTriggerService } from '../agent/trigger-service';
 import { extractEmbeddedProvenance } from '../formats/provenance-sidecar';
 import type { CommentSelector, Comment } from '../formats/provenance-sidecar';
-import { normalizeQuote, extractMarks, embedMarks, getThread, migrateProvenanceToMarks, type OrchestratedMarkMeta } from '../formats/marks';
+import { normalizeQuote, extractMarks, embedMarks, getThread, migrateProvenanceToMarks, canonicalizeStoredMarks, type OrchestratedMarkMeta } from '../formats/marks';
 import { proofMarkHandler } from '../formats/remark-proof-marks';
 import { remarkProofMarksPlugin } from './schema/remark-proof-marks-plugin';
 import { getCurrentActor, setCurrentActor as setCurrentActorValue, normalizeActor } from './actor';
@@ -1864,6 +1864,7 @@ class ProofEditorImpl implements ProofEditor {
             }
             if (!this.pendingCollabTemplateMarkdown && !this.pendingCollabRebindOnSync) {
               this.suppressTrackChangesDuringCollabReconnect = false;
+              this.updateShareEditGate();
               this.releaseDeferredShareMarksFlush();
             }
           }
@@ -10214,9 +10215,7 @@ class ProofEditorImpl implements ProofEditor {
     this.editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
       const serializer = ctx.get(serializerCtx);
-      const localMetadata = getMarkMetadataWithQuotes(view.state);
-      const liveMetadata = mergePendingServerMarks(localMetadata, this.lastReceivedServerMarks);
-      const persistedMetadata = buildCanonicalShareMarkMetadata(view.state, liveMetadata);
+      const persistedMetadata = this.buildAuthoritativeShareReviewSnapshotMarks(view);
       const markdown = this.normalizeMarkdownForRuntime(serializer(view.state.doc));
       const pendingIds = Object.entries(persistedMetadata)
         .filter(([, mark]) => {
@@ -10232,6 +10231,21 @@ class ProofEditorImpl implements ProofEditor {
     });
 
     return snapshot;
+  }
+
+  private buildAuthoritativeShareReviewSnapshotMarks(
+    view: import('@milkdown/kit/prose/view').EditorView,
+  ): Record<string, StoredMark> {
+    const localMetadata = getMarkMetadataWithQuotes(view.state);
+    const localCanonical = buildCanonicalShareMarkMetadata(view.state, localMetadata);
+    const authoritativeServerMarks = canonicalizeStoredMarks(this.lastReceivedServerMarks);
+    if (Object.keys(authoritativeServerMarks).length === 0) {
+      return localCanonical;
+    }
+    return canonicalizeStoredMarks({
+      ...localCanonical,
+      ...authoritativeServerMarks,
+    });
   }
 
   private storedMarksContainPendingIds(marks: Record<string, unknown> | null | undefined, expectedIds: string[]): boolean {
@@ -10918,10 +10932,10 @@ class ProofEditorImpl implements ProofEditor {
       const serialized = this.serializeMarkdown(view);
       if (!serialized) return;
       const markdown = this.normalizeMarkdownForCollab(serialized);
-      const metadata = getMarkMetadataWithQuotes(view.state);
+      const metadata = this.buildAuthoritativeShareReviewSnapshotMarks(view);
       snapshot = {
         markdown,
-        marks: buildCanonicalShareMarkMetadata(view.state, metadata) as Record<string, unknown>,
+        marks: metadata as Record<string, unknown>,
       };
     });
     return snapshot;

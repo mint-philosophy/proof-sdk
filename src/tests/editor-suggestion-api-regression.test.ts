@@ -84,6 +84,23 @@ function run(): void {
       && sortedServerPendingIdsBlock.includes('const score = this.scoreEquivalentShareReviewMark(sourceMark, candidateMark);'),
     'Expected persisted share review actions to remap stale UI suggestion ids onto the latest authoritative pending marks before sending accept/reject mutations',
   );
+  const buildShareBatchSuggestionSnapshotBlock = sliceBetween(
+    editorSource,
+    '  private buildShareBatchSuggestionSnapshot(): { markdown: string; marks: Record<string, unknown> } | null {',
+    '\n  /**\n   * Accept all pending suggestions\n   */',
+  );
+  assert(
+    editorSource.includes('private buildAuthoritativeShareReviewSnapshotMarks(')
+      && editorSource.includes('const localCanonical = buildCanonicalShareMarkMetadata(view.state, localMetadata);')
+      && editorSource.includes('const authoritativeServerMarks = canonicalizeStoredMarks(this.lastReceivedServerMarks);')
+      && editorSource.includes('return canonicalizeStoredMarks({')
+      && editorSource.includes('...localCanonical,')
+      && editorSource.includes('...authoritativeServerMarks,')
+      && buildShareBatchSuggestionSnapshotBlock.includes('const metadata = this.buildAuthoritativeShareReviewSnapshotMarks(view);')
+      && buildShareBatchSuggestionSnapshotBlock.includes('marks: metadata as Record<string, unknown>,')
+      && !buildShareBatchSuggestionSnapshotBlock.includes('buildCanonicalShareMarkMetadata(view.state, metadata)'),
+    'Expected persisted review mutation snapshots to reuse the authoritative server-backed mark metadata instead of rebuilding from raw local mark anchors that may have drifted after prior reloads',
+  );
   assert(
     flushShareReviewMutationStateBlock.includes('if (this.shareMarksFlushTimer !== null) {')
       && flushShareReviewMutationStateBlock.includes('clearTimeout(this.shareMarksFlushTimer);')

@@ -135,8 +135,9 @@ function run(): void {
       && markAcceptPersistedBlock.includes('const result = await shareClient.acceptSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);')
       && markAcceptPersistedBlock.includes('const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));')
       && markAcceptPersistedBlock.includes("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
-      && markAcceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds);'),
-    'Expected persisted single-mark accept to remap stale UI ids onto the latest authoritative mark id, tombstone the resolved ids, and verify that the accepted mark is actually gone locally before treating the share mutation as success',
+      && editorSource.includes('private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {')
+      && markAcceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds, sourceMark);'),
+    'Expected persisted single-mark accept to remap stale UI ids onto the latest authoritative mark id, tombstone the resolved ids, and verify that neither the original ids nor an equivalent pending suggestion survives locally before treating the share mutation as success',
   );
 
   const markRejectPersistedBlock = sliceBetween(editorSource, '  async markRejectPersisted(markId: string): Promise<boolean> {', '\n  private getSortedPendingSuggestionIdsForShareReview(): string[] {');

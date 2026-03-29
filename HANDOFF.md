@@ -21,10 +21,15 @@
   - browser QA on `fix66` showed `Accept & Next` worked for deletions and `Reject & Next` worked for insertions, but `Accept & Next` on insertions could advance the popover while leaving the insert pending
   - the new guard in `markAcceptPersisted(...)` verifies that the resolved insert ids are actually gone from the local pending-suggestion set after the persisted mutation
   - if they are still present, the editor now force-applies the canonical share mutation result instead of silently treating that lane as success
+- `fix68` is the follow-up for the deletion review regression reported after `fix67`:
+  - browser QA showed insertion accepts were fixed, but deletion accepts could still close the popover while leaving an equivalent pending delete mark behind under a remapped id
+  - the local verification step now checks not just the original resolved ids, but also any equivalent pending suggestion that still matches the accepted source mark
+  - if either survives, the editor force-applies the canonical result and rechecks before allowing the review flow to continue
 - Remaining known follow-ups after fix64:
   - warm reload can still revert some overwrite-created inserts from inline to widget
   - formatting changes still bypass TC
 - Last commits in this session:
+  - `fix68` pending commit: verify deletion accepts against equivalent pending marks
   - `fix67` pending commit: verify persisted insert accepts are actually cleared locally
   - `fix66` pending commit: hoist `hasHistoryChange` so TC appendTransaction no longer crashes
   - `fce6f1f` `fix65: reconcile stale delete metadata after undo`

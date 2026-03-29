@@ -153,6 +153,7 @@ function run(): void {
   assert(
     acceptPersistedBlock.includes("const effectiveMarkId = this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);")
       && editorSource.includes('private async ensureShareReviewMutationAppliedLocally(')
+      && editorSource.includes('private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {')
       && acceptPersistedBlock.includes('const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));')
       && acceptPersistedBlock.includes("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
       && acceptPersistedBlock.indexOf("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
@@ -160,11 +161,11 @@ function run(): void {
       && acceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
       && acceptPersistedBlock.includes("let success = this.tryResolveShareReviewMutationLocally(markId, 'accept', result)")
       && acceptPersistedBlock.includes('success = await this.applyShareMutationDocumentResult(result);')
-      && acceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds);')
+      && acceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds, sourceMark);')
       && acceptPersistedBlock.includes('if (this.hasActiveRemoteCollabPeer()) {')
       && acceptPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
       && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to remap stale UI ids to the authoritative pending mark, tombstone both local and remote ids, verify that the accepted mark is actually gone locally, reconcile the mutation, and only block on collab settle when a remote peer is actually connected',
+    'Expected markAcceptPersisted to remap stale UI ids to the authoritative pending mark, tombstone both local and remote ids, verify that the accepted mark or any equivalent pending suggestion is actually gone locally, reconcile the mutation, and only block on collab settle when a remote peer is actually connected',
   );
 
   const rejectPersistedBlock = sliceBetween(

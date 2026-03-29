@@ -10387,7 +10387,7 @@ class ProofEditorImpl implements ProofEditor {
         }
       }
       if (success) {
-        success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds);
+        success = await this.ensureShareReviewMutationAppliedLocally(result, resolvedMarkIds, sourceMark);
       }
       if (success && this.editor) {
         if (this.hasActiveRemoteCollabPeer()) {
@@ -10666,6 +10666,27 @@ class ProofEditorImpl implements ProofEditor {
     return hasPending;
   }
 
+  private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {
+    if (!this.editor || !sourceMark) return [];
+
+    let equivalentIds: string[] = [];
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const metadata = getMarkMetadataWithQuotes(view.state);
+      equivalentIds = Object.entries(metadata)
+        .filter(([, mark]) => {
+          if (!mark) return false;
+          const kind = mark.kind;
+          if (kind !== 'insert' && kind !== 'delete' && kind !== 'replace') return false;
+          if (mark.status !== 'pending') return false;
+          return this.scoreEquivalentShareReviewMark(sourceMark, mark) >= 180;
+        })
+        .map(([markId]) => markId);
+    });
+
+    return equivalentIds;
+  }
+
   private async ensureShareReviewMutationAppliedLocally(
     result: {
       markdown?: string;
@@ -10673,12 +10694,15 @@ class ProofEditorImpl implements ProofEditor {
       collab?: { status?: string; reason?: string };
     },
     resolvedMarkIds: string[],
+    sourceMark: StoredMark | null,
   ): Promise<boolean> {
-    if (resolvedMarkIds.length === 0) return true;
-    if (!this.hasPendingShareReviewMarks(resolvedMarkIds)) return true;
+    const equivalentPendingIds = this.getEquivalentPendingShareReviewMarkIds(sourceMark);
+    const needsRepair = this.hasPendingShareReviewMarks(resolvedMarkIds) || equivalentPendingIds.length > 0;
+    if (!needsRepair) return true;
 
     this.traceShareReview('mutation.local-verify-failed', {
       resolvedMarkIds,
+      equivalentPendingIds,
       collabStatus: typeof result?.collab?.status === 'string' ? result.collab.status : null,
       markdown: this.summarizeTraceMarkdown(typeof result?.markdown === 'string' ? result.markdown : null),
     }, 'warn');
@@ -10689,9 +10713,11 @@ class ProofEditorImpl implements ProofEditor {
     });
     if (!applied) return false;
 
-    const stillPending = this.hasPendingShareReviewMarks(resolvedMarkIds);
+    const stillPending = this.hasPendingShareReviewMarks(resolvedMarkIds)
+      || this.getEquivalentPendingShareReviewMarkIds(sourceMark).length > 0;
     this.traceShareReview('mutation.local-verify-result', {
       resolvedMarkIds,
+      equivalentPendingIds,
       stillPending,
     }, stillPending ? 'warn' : 'info');
     return !stillPending;

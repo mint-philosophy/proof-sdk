@@ -1,10 +1,11 @@
-import { history, redo, undo } from 'prosemirror-history';
+import { history, redo, undo, undoDepth } from 'prosemirror-history';
 import { EditorState, Plugin, TextSelection } from '@milkdown/kit/prose/state';
 import { Schema } from '@milkdown/kit/prose/model';
 
 import {
   marksPluginKey,
   getMarks,
+  accept as acceptMark,
 } from '../editor/plugins/marks';
 import {
   __buildHistorySuggestionMetadataReconciliationTransactionForTests,
@@ -189,6 +190,200 @@ function run(): void {
   state = EditorState.create({
     schema,
     doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text('Important content target here.')]),
+    ]),
+    selection: TextSelection.create(
+      schema.node('doc', null, [
+        schema.node('paragraph', null, [schema.text('Important content target here.')]),
+      ]),
+      19,
+      25,
+    ),
+    plugins: [history(), marksStatePlugin],
+  });
+
+  state = state.apply(wrapTransactionForSuggestions(state.tr.insertText('CHANGED', 19, 25), state, true));
+  assert(undoDepth(state) === 1, 'Expected single-transaction tracked replacement to create one undo history event');
+
+  const singleTransactionOverwritePreUndoState = state;
+  let singleTransactionOverwriteUndoHandled = false;
+  const singleTransactionOverwriteUndoResult = undo(state, (tr) => {
+    assert(isUndoHistoryTransaction(tr), 'Expected single-transaction overwrite undo to be tagged as history undo');
+    singleTransactionOverwriteUndoHandled = true;
+    state = state.apply(tr);
+  });
+  assert(singleTransactionOverwriteUndoResult, 'Expected undo to dispatch for the single-transaction overwrite fixture');
+  assert(singleTransactionOverwriteUndoHandled, 'Expected single-transaction overwrite undo to apply');
+
+  const singleTransactionOverwriteReconcileTr = __buildHistorySuggestionMetadataReconciliationTransactionForTests(
+    singleTransactionOverwritePreUndoState,
+    state,
+  );
+  assert(singleTransactionOverwriteReconcileTr, 'Expected single-transaction overwrite undo reconciliation transaction');
+  state = state.apply(singleTransactionOverwriteReconcileTr);
+  assert(state.doc.textContent === 'Important content target here.', 'Expected single-transaction overwrite undo reconciliation to restore the original text');
+  assert(getMarks(state).length === 0, 'Expected single-transaction overwrite undo reconciliation to clear suggestion marks');
+  assert(undoDepth(state) === 0, 'Expected single-transaction overwrite undo reconciliation to leave no second undo step behind');
+
+  const unexpectedSecondUndo = undo(state, () => {
+    throw new Error('Unexpected second undo dispatch after tracked overwrite reconciliation');
+  });
+  assert(!unexpectedSecondUndo, 'Expected second undo not to walk back into tracked overwrite setup after reconciliation');
+
+  const browserUndoShapeText = 'The climate models predicted substantial warming over the coming decades.';
+  const browserUndoShapeSelectionFrom = browserUndoShapeText.indexOf('warming') + 1;
+  const browserUndoShapeSelectionTo = browserUndoShapeSelectionFrom + 'warming'.length;
+  state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text(browserUndoShapeText)]),
+    ]),
+    selection: TextSelection.create(
+      schema.node('doc', null, [
+        schema.node('paragraph', null, [schema.text(browserUndoShapeText)]),
+      ]),
+      browserUndoShapeSelectionFrom,
+      browserUndoShapeSelectionTo,
+    ),
+    plugins: [history(), marksStatePlugin],
+  });
+
+  state = state.apply(
+    wrapTransactionForSuggestions(
+      state.tr.insertText('heating', browserUndoShapeSelectionFrom, browserUndoShapeSelectionTo),
+      state,
+      true,
+    ),
+  );
+  const browserUndoShapePreReconcileState = state;
+  const browserUndoShapeDeleteMark = getMarks(state).find((mark) => mark.kind === 'delete');
+  assert(browserUndoShapeDeleteMark?.range, 'Expected replacement fixture to expose a delete range before undo-shape reconciliation');
+
+  state = state.apply(
+    state.tr.removeMark(
+      browserUndoShapeDeleteMark!.range!.from,
+      browserUndoShapeDeleteMark!.range!.to,
+      schema.marks.proofSuggestion,
+    ),
+  );
+  const browserUndoShapeInsertOnlyMetadata = Object.fromEntries(
+    Object.entries((marksPluginKey.getState(state) as { metadata?: Record<string, StoredMark> } | undefined)?.metadata ?? {})
+      .filter(([, mark]) => mark.kind === 'insert'),
+  );
+  state = state.apply(state.tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: browserUndoShapeInsertOnlyMetadata,
+  }));
+  assert(
+    state.doc.textContent.includes('warmingheating'),
+    'Expected simulated browser undo shape to preserve the orphaned replacement insert before reconciliation',
+  );
+  assert(
+    getMarks(state).some((mark) => mark.kind === 'insert') && !getMarks(state).some((mark) => mark.kind === 'delete'),
+    'Expected simulated browser undo shape to retain only the insert suggestion before reconciliation',
+  );
+
+  const browserUndoShapeReconcileTr = __buildHistorySuggestionMetadataReconciliationTransactionForTests(
+    browserUndoShapePreReconcileState,
+    state,
+  );
+  assert(
+    browserUndoShapeReconcileTr,
+    'Expected history reconciliation to detect and remove orphaned insert suggestions when the paired delete disappears first',
+  );
+  state = state.apply(browserUndoShapeReconcileTr);
+  assert(
+    state.doc.textContent === browserUndoShapeText,
+    'Expected browser-style overwrite undo reconciliation to remove the orphaned insert and restore the original word',
+  );
+  assert(
+    getMarks(state).length === 0,
+    'Expected browser-style overwrite undo reconciliation to clear the surviving insert suggestion as well',
+  );
+
+  const duplicatedInsertUndoText = 'The research captured several methodological innovations across cohorts.';
+  const duplicatedInsertSelectionFrom = duplicatedInsertUndoText.indexOf('several methodological') + 1;
+  const duplicatedInsertSelectionTo = duplicatedInsertSelectionFrom + 'several methodological'.length;
+  state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [schema.text(duplicatedInsertUndoText)]),
+    ]),
+    selection: TextSelection.create(
+      schema.node('doc', null, [
+        schema.node('paragraph', null, [schema.text(duplicatedInsertUndoText)]),
+      ]),
+      duplicatedInsertSelectionFrom,
+      duplicatedInsertSelectionTo,
+    ),
+    plugins: [history(), marksStatePlugin],
+  });
+
+  state = state.apply(
+    wrapTransactionForSuggestions(
+      state.tr.insertText('many key', duplicatedInsertSelectionFrom, duplicatedInsertSelectionTo),
+      state,
+      true,
+    ),
+  );
+  const duplicatedInsertPreReconcileState = state;
+  const duplicatedInsertMark = getMarks(state).find((mark) => mark.kind === 'insert');
+  const duplicatedDeleteMark = getMarks(state).find((mark) => mark.kind === 'delete');
+  assert(duplicatedInsertMark?.range, 'Expected duplicated-insert undo fixture to expose an insert range before reconciliation');
+  assert(duplicatedDeleteMark?.range, 'Expected duplicated-insert undo fixture to expose a delete range before reconciliation');
+
+  state = state.apply(
+    state.tr
+      .removeMark(
+        duplicatedDeleteMark!.range!.from,
+        duplicatedDeleteMark!.range!.to,
+        schema.marks.proofSuggestion,
+      )
+      .insertText('many', duplicatedInsertMark!.range!.from, duplicatedInsertMark!.range!.from)
+      .addMark(
+        duplicatedInsertMark!.range!.from,
+        duplicatedInsertMark!.range!.to + 4,
+        schema.marks.proofSuggestion.create({
+          id: duplicatedInsertMark!.id,
+          kind: 'insert',
+          by: duplicatedInsertMark!.by,
+        }),
+      ),
+  );
+  const duplicatedInsertOnlyMetadata = Object.fromEntries(
+    Object.entries((marksPluginKey.getState(state) as { metadata?: Record<string, StoredMark> } | undefined)?.metadata ?? {})
+      .filter(([id, mark]) => id === duplicatedInsertMark!.id && mark.kind === 'insert'),
+  );
+  state = state.apply(state.tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: duplicatedInsertOnlyMetadata,
+  }));
+  assert(
+    state.doc.textContent.includes('several methodologicalmanymany key innovations'),
+    'Expected duplicated-insert undo fixture to preserve the browser-style duplicated insert corruption before reconciliation',
+  );
+
+  const duplicatedInsertReconcileTr = __buildHistorySuggestionMetadataReconciliationTransactionForTests(
+    duplicatedInsertPreReconcileState,
+    state,
+  );
+  assert(
+    duplicatedInsertReconcileTr,
+    'Expected history reconciliation to remove a surviving paired insert even when the browser leaves duplicated insert text behind',
+  );
+  state = state.apply(duplicatedInsertReconcileTr);
+  assert(
+    state.doc.textContent === duplicatedInsertUndoText,
+    'Expected duplicated-insert overwrite undo reconciliation to remove the entire surviving insert range and restore the original text',
+  );
+  assert(
+    getMarks(state).length === 0,
+    'Expected duplicated-insert overwrite undo reconciliation to clear the surviving insert suggestion metadata as well',
+  );
+
+  state = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
       schema.node('paragraph', null, [schema.text('Alpha seasonal beta')]),
     ]),
     selection: TextSelection.create(
@@ -227,6 +422,169 @@ function run(): void {
   );
   state = state.apply(droppedInsertMetadataReconcileTr);
   assert(getMarks(state).length === 0, 'Expected overwrite undo reconciliation to still remove the paired delete when insert metadata is already missing');
+
+  let acceptState = EditorState.create({
+    schema,
+    doc: schema.node('doc', null, [
+      schema.node('paragraph', null, [
+        schema.text('beta', [schema.marks.proofSuggestion.create({
+          id: 'accept-insert-mark',
+          kind: 'insert',
+          by: 'human:test',
+        })]),
+      ]),
+    ]),
+    plugins: [history(), marksStatePlugin],
+  });
+  acceptState = acceptState.apply(acceptState.tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      'accept-insert-mark': {
+        kind: 'insert',
+        by: 'human:test',
+        content: 'beta',
+        createdAt: new Date().toISOString(),
+        status: 'pending',
+      },
+    } satisfies Record<string, StoredMark>,
+  }));
+  acceptState = acceptState.apply(acceptState.tr.insertText('!', acceptState.doc.content.size));
+  assert(undoDepth(acceptState) === 1, 'Expected a plain user edit before accept to create one undo step');
+
+  let acceptTr: any = null;
+  const acceptView = {
+    get state() {
+      return acceptState;
+    },
+    dispatch(tr: any) {
+      acceptTr = tr;
+      acceptState = acceptState.apply(tr);
+    },
+  } as const;
+  const acceptHandled = acceptMark(acceptView as any, 'accept-insert-mark');
+  assert(acceptHandled, 'Expected accept to succeed for the pending insert fixture');
+  assert(acceptTr?.getMeta('addToHistory') === false, 'Expected accept to stay out of undo history');
+  assert(undoDepth(acceptState) === 1, 'Expected accept to be transparent to the existing undo stack');
+
+  let acceptPassThroughUndoHandled = false;
+  const acceptPassThroughUndo = undo(acceptState, (tr) => {
+    acceptPassThroughUndoHandled = true;
+    acceptState = acceptState.apply(tr);
+  });
+  assert(acceptPassThroughUndo, 'Expected undo to pass through accept and target the prior user edit');
+  assert(acceptPassThroughUndoHandled, 'Expected pass-through undo to dispatch a history transaction');
+  assert(acceptState.doc.textContent === 'beta', 'Expected pass-through undo to remove only the pre-accept plain user edit');
+  assert(getMarks(acceptState).length === 0, 'Expected accepted insert suggestion to remain plain text after pass-through undo');
+
+  const oldPrefixInsertId = 'history-mismatch-prefix';
+  const oldDeleteId = 'history-mismatch-delete';
+  const oldOverwriteInsertId = 'history-mismatch-overwrite-insert';
+  const oldHistoryMetadata: Record<string, StoredMark> = {
+    [oldPrefixInsertId]: {
+      kind: 'insert',
+      by: 'human:test',
+      content: 'RESULTS: ',
+      createdAt: new Date().toISOString(),
+      status: 'pending',
+    },
+    [oldDeleteId]: {
+      kind: 'delete',
+      by: 'human:test',
+      quote: 'seasonal',
+      createdAt: new Date().toISOString(),
+      status: 'pending',
+    },
+    [oldOverwriteInsertId]: {
+      kind: 'insert',
+      by: 'human:test',
+      content: 'annual',
+      createdAt: new Date().toISOString(),
+      status: 'pending',
+    },
+  };
+  const oldHistoryDoc = schema.node('doc', null, [
+    schema.node('paragraph', null, [
+      schema.text('RESULTS: ', [schema.marks.proofSuggestion.create({
+        id: oldPrefixInsertId,
+        kind: 'insert',
+        by: 'human:test',
+      })]),
+      schema.text('Alpha '),
+      schema.text('seasonal', [schema.marks.proofSuggestion.create({
+        id: oldDeleteId,
+        kind: 'delete',
+        by: 'human:test',
+      })]),
+      schema.text('annual', [schema.marks.proofSuggestion.create({
+        id: oldOverwriteInsertId,
+        kind: 'insert',
+        by: 'human:test',
+      })]),
+      schema.text(' beta'),
+    ]),
+  ]);
+  const corruptedHistoryDoc = schema.node('doc', null, [
+    schema.node('paragraph', null, [
+      schema.text('RERESULTRESULTS: ', [schema.marks.proofSuggestion.create({
+        id: oldPrefixInsertId,
+        kind: 'insert',
+        by: 'human:test',
+      })]),
+      schema.text('Alpha seasonal'),
+      schema.text('annual', [schema.marks.proofSuggestion.create({
+        id: oldOverwriteInsertId,
+        kind: 'insert',
+        by: 'human:test',
+      })]),
+      schema.text(' beta'),
+    ]),
+  ]);
+  let oldHistoryState = EditorState.create({
+    schema,
+    doc: oldHistoryDoc,
+    plugins: [history(), marksStatePlugin],
+  });
+  oldHistoryState = oldHistoryState.apply(oldHistoryState.tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: oldHistoryMetadata,
+  }));
+  let corruptedHistoryState = EditorState.create({
+    schema,
+    doc: corruptedHistoryDoc,
+    plugins: [history(), marksStatePlugin],
+  });
+  corruptedHistoryState = corruptedHistoryState.apply(corruptedHistoryState.tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      [oldPrefixInsertId]: oldHistoryMetadata[oldPrefixInsertId]!,
+      [oldOverwriteInsertId]: oldHistoryMetadata[oldOverwriteInsertId]!,
+    },
+  }));
+  const mismatchedInsertReconcileTr = __buildHistorySuggestionMetadataReconciliationTransactionForTests(
+    oldHistoryState,
+    corruptedHistoryState,
+  );
+  assert(
+    mismatchedInsertReconcileTr,
+    'Expected overwrite-style history reconciliation to generate a cleanup transaction for the mismatched surviving insert',
+  );
+  const reconciledCorruptedHistoryState = corruptedHistoryState.apply(mismatchedInsertReconcileTr);
+  assert(
+    reconciledCorruptedHistoryState.doc.textContent === 'RERESULTRESULTS: Alpha seasonalannual beta',
+    'Expected mismatched surviving insert cleanup to preserve the live text while stripping only the corrupted surviving insert mark',
+  );
+  const reconciledCorruptedMarks = getMarks(reconciledCorruptedHistoryState);
+  const reconciledCorruptedMetadata = (marksPluginKey.getState(reconciledCorruptedHistoryState) as
+    { metadata?: Record<string, StoredMark> }
+    | undefined)?.metadata ?? {};
+  assert(
+    !reconciledCorruptedMarks.some((mark) => mark.id === oldPrefixInsertId),
+    'Expected mismatched surviving insert cleanup to remove the corrupted surviving insert mark from the document',
+  );
+  assert(
+    !reconciledCorruptedMetadata[oldPrefixInsertId],
+    'Expected mismatched surviving insert cleanup to drop the corrupted surviving insert metadata entry as well',
+  );
 
   let redoDispatchApplied = false;
   const redoHandled = redo(state, (tr) => {

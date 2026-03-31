@@ -372,7 +372,7 @@ function renderInlineNodes(nodes?: MdastNode[]): string {
 function renderInlineNode(node: MdastNode): string {
   switch (node.type) {
     case 'text':
-      return node.value ?? '';
+      return escapeHtml(node.value ?? '');
     case 'strong':
       return `**${renderInlineNodes(node.children)}**`;
     case 'emphasis':

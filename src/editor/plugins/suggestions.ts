@@ -9,8 +9,16 @@ import { $ctx, $prose } from '@milkdown/kit/utils';
 import { Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from '@milkdown/kit/prose/state';
 import type { Mark, MarkType, Node as ProseMirrorNode, Slice as ProseMirrorSlice } from '@milkdown/kit/prose/model';
 import type { EditorView } from '@milkdown/kit/prose/view';
+import { undo } from 'prosemirror-history';
 
-import { marksPluginKey, getMarkMetadata, buildSuggestionMetadata, syncSuggestionMetadataTransaction } from './marks';
+import {
+  marksPluginKey,
+  getMarkMetadata,
+  getMarks,
+  buildSuggestionMetadata,
+  syncSuggestionMetadataTransaction,
+  reject as rejectSuggestionMark,
+} from './marks';
 import {
   collectSuggestionSegments,
   getSuggestionClusterRangeFromSegments,
@@ -318,10 +326,10 @@ export function buildHistorySuggestionMetadataReconciliationTransaction(
   newState: EditorState,
 ): Transaction | null {
   const pluginState = marksPluginKey.getState(newState) as { metadata?: Record<string, StoredMark> } | undefined;
-  const currentMetadata = pluginState?.metadata;
+  const currentMetadata = pluginState?.metadata ?? {};
   const oldPluginState = marksPluginKey.getState(oldState) as { metadata?: Record<string, StoredMark> } | undefined;
   const oldMetadata = oldPluginState?.metadata ?? {};
-  if (Object.keys(oldMetadata).length === 0 && (!currentMetadata || Object.keys(currentMetadata).length === 0)) return null;
+  if (Object.keys(oldMetadata).length === 0 && Object.keys(currentMetadata).length === 0) return null;
 
   const oldIds = collectActualSuggestionIdsInDoc(oldState.doc);
   if (oldIds.size === 0) return null;
@@ -335,17 +343,20 @@ export function buildHistorySuggestionMetadataReconciliationTransaction(
     removedIds,
     newIds,
   );
-  const reconciledIds = [...new Set([...removedIds, ...overwriteDeleteIds])];
-  if (reconciledIds.length === 0) return null;
-
-  const nextMetadata: Record<string, StoredMark> = { ...(currentMetadata ?? {}) };
-  for (const id of reconciledIds) {
-    delete nextMetadata[id];
-  }
+  const overwriteInsertIds = collectOverwriteInsertIdsForHistoryUndo(
+    oldState,
+    newState,
+    oldMetadata,
+    currentMetadata,
+    removedIds,
+    newIds,
+  );
+  const baseReconciledIds = [...new Set([...removedIds, ...overwriteDeleteIds, ...overwriteInsertIds])];
+  if (baseReconciledIds.length === 0) return null;
 
   let tr = newState.tr;
+  const suggestionType = newState.schema.marks.proofSuggestion;
   if (overwriteDeleteIds.length > 0) {
-    const suggestionType = newState.schema.marks.proofSuggestion;
     if (suggestionType) {
       for (const deleteId of overwriteDeleteIds) {
         const deleteRange = resolveLiveDeleteSuggestionRange(newState.doc, deleteId);
@@ -361,6 +372,42 @@ export function buildHistorySuggestionMetadataReconciliationTransaction(
       }
     }
   }
+  if (overwriteInsertIds.length > 0) {
+    const insertRangesToRemove = overwriteInsertIds
+      .map((insertId) => {
+        const insertRange = resolveLiveInsertSuggestionRange(newState.doc, insertId);
+        if (!insertRange || insertRange.to <= insertRange.from) return null;
+        return { insertId, insertRange };
+      })
+      .filter((entry): entry is { insertId: string; insertRange: MarkRange } => Boolean(entry))
+      .sort((a, b) => b.insertRange.from - a.insertRange.from);
+
+    for (const { insertRange } of insertRangesToRemove) {
+      tr = tr.delete(insertRange.from, insertRange.to);
+    }
+  }
+
+  const mismatchedInsertIds = collectMismatchedInsertSuggestionIdsAfterHistoryReconciliation(
+    oldState,
+    tr.doc,
+    oldMetadata,
+  );
+  if (mismatchedInsertIds.length > 0 && suggestionType) {
+    tr = removeSuggestionIdsFromRange(
+      tr,
+      tr.doc,
+      0,
+      tr.doc.content.size,
+      suggestionType,
+      mismatchedInsertIds,
+    );
+  }
+
+  const reconciledIds = [...new Set([...baseReconciledIds, ...mismatchedInsertIds])];
+  const nextMetadata: Record<string, StoredMark> = { ...currentMetadata };
+  for (const id of reconciledIds) {
+    delete nextMetadata[id];
+  }
 
   tr = syncSuggestionMetadataTransaction(newState, tr, nextMetadata)
     .setMeta('addToHistory', false);
@@ -368,11 +415,55 @@ export function buildHistorySuggestionMetadataReconciliationTransaction(
   console.log('[suggestions.appendTransaction.historyMetadataReconcile]', {
     removedIds,
     overwriteDeleteIds,
+    overwriteInsertIds,
+    mismatchedInsertIds,
     reconciledIds,
     oldAnchoredIds: [...oldIds].sort(),
     newAnchoredIds: [...newIds].sort(),
   });
   return tr;
+}
+
+function collectMismatchedInsertSuggestionIdsAfterHistoryReconciliation(
+  oldState: EditorState,
+  reconciledDoc: ProseMirrorNode,
+  oldMetadata: Record<string, StoredMark>,
+): string[] {
+  const oldInsertIds = new Set(
+    collectSuggestionIdsInRange(oldState.doc, 'insert', 0, oldState.doc.content.size),
+  );
+  if (oldInsertIds.size === 0) return [];
+
+  const mismatchedIds = new Set<string>();
+  const liveInsertIds = collectSuggestionIdsInRange(
+    reconciledDoc,
+    'insert',
+    0,
+    reconciledDoc.content.size,
+  );
+
+  for (const insertId of liveInsertIds) {
+    if (!oldInsertIds.has(insertId)) continue;
+
+    const oldLiveText = getLiveInsertSuggestionText(oldState.doc, insertId);
+    if (typeof oldLiveText !== 'string' || oldLiveText.length === 0) continue;
+
+    const oldEntry = oldMetadata[insertId];
+    const expectedText = oldEntry?.kind === 'insert'
+      && typeof oldEntry.content === 'string'
+      && oldEntry.content.length > 0
+      ? oldEntry.content
+      : oldLiveText;
+    if (oldLiveText !== expectedText) continue;
+
+    const liveText = getLiveInsertSuggestionText(reconciledDoc, insertId);
+    if (typeof liveText !== 'string' || liveText.length === 0) continue;
+    if (liveText !== expectedText) {
+      mismatchedIds.add(insertId);
+    }
+  }
+
+  return [...mismatchedIds];
 }
 
 function collectOverwriteDeleteIdsForHistoryUndo(
@@ -442,11 +533,280 @@ function collectOverwriteDeleteIdsForHistoryUndo(
   return [...pairedDeleteIds];
 }
 
+function collectOverwriteInsertIdsForHistoryUndo(
+  oldState: EditorState,
+  newState: EditorState,
+  oldMetadata: Record<string, StoredMark>,
+  currentMetadata: Record<string, StoredMark>,
+  removedIds: string[],
+  newIds: Set<string>,
+): string[] {
+  if (removedIds.length === 0) return [];
+
+  const pairedInsertIds = new Set<string>();
+
+  for (const deleteId of removedIds) {
+    const deleteMeta = oldMetadata[deleteId] ?? currentMetadata[deleteId];
+    if (!deleteMeta || deleteMeta.kind !== 'delete') continue;
+    if (deleteMeta.status === 'accepted' || deleteMeta.status === 'rejected') continue;
+
+    const deleteRange = resolveLiveDeleteSuggestionRange(oldState.doc, deleteId);
+    if (!deleteRange || deleteRange.to <= deleteRange.from) continue;
+
+    const adjacentInsertIds = collectSuggestionIdsInRange(
+      oldState.doc,
+      'insert',
+      deleteRange.to,
+      Math.min(oldState.doc.content.size, deleteRange.to + 1),
+    );
+    if (adjacentInsertIds.length === 0) continue;
+
+    const deleteCreatedAt = parseStoredMarkTimestamp(deleteMeta.createdAt);
+    const deleteBy = typeof deleteMeta.by === 'string' ? deleteMeta.by : null;
+    const expectedDeletedText = typeof deleteMeta.quote === 'string' && deleteMeta.quote.length > 0
+      ? deleteMeta.quote
+      : oldState.doc.textBetween(deleteRange.from, deleteRange.to, '\n', '\n');
+    const restoredText = newState.doc.textBetween(deleteRange.from, deleteRange.to, '\n', '\n');
+    if (expectedDeletedText.length > 0 && restoredText !== expectedDeletedText) continue;
+
+    for (const insertId of adjacentInsertIds) {
+      if (pairedInsertIds.has(insertId)) continue;
+      if (!newIds.has(insertId)) continue;
+
+      const insertMeta = currentMetadata[insertId] ?? oldMetadata[insertId];
+      if (!insertMeta || insertMeta.kind !== 'insert') continue;
+      if (insertMeta.status === 'accepted' || insertMeta.status === 'rejected') continue;
+      if (typeof insertMeta.content !== 'string' || insertMeta.content.length === 0) continue;
+
+      const insertRange = resolveLiveInsertSuggestionRange(oldState.doc, insertId);
+      if (!insertRange || insertRange.from !== deleteRange.to || insertRange.to <= insertRange.from) continue;
+
+      const insertBy = typeof insertMeta.by === 'string' ? insertMeta.by : null;
+      if (insertBy && deleteBy && insertBy !== deleteBy) continue;
+
+      const insertCreatedAt = parseStoredMarkTimestamp(insertMeta.createdAt);
+      if (
+        insertCreatedAt !== null
+        && deleteCreatedAt !== null
+        && Math.abs(insertCreatedAt - deleteCreatedAt) > COALESCE_WINDOW_MS
+      ) {
+        continue;
+      }
+
+      pairedInsertIds.add(insertId);
+    }
+  }
+
+  return [...pairedInsertIds];
+}
+
 export function __buildHistorySuggestionMetadataReconciliationTransactionForTests(
   oldState: EditorState,
   newState: EditorState,
 ): Transaction | null {
   return buildHistorySuggestionMetadataReconciliationTransaction(oldState, newState);
+}
+
+type PendingSuggestionUndoCandidate = {
+  id: string;
+  createdAt: string;
+  createdAtMs: number;
+  from: number;
+  to: number;
+};
+
+function isPendingTrackedSuggestionForUndo(mark: Mark, metadata: StoredMark | undefined): boolean {
+  if (mark.kind !== 'insert' && mark.kind !== 'delete' && mark.kind !== 'replace') return false;
+  const metadataStatus = typeof metadata?.status === 'string' ? metadata.status : null;
+  const dataStatus = typeof (mark.data as { status?: unknown } | undefined)?.status === 'string'
+    ? (mark.data as { status: string }).status
+    : null;
+  const status = metadataStatus ?? dataStatus ?? 'pending';
+  return status === 'pending';
+}
+
+function resolveLatestPendingSuggestionUndoMarkIds(
+  state: EditorState,
+  actor: string | null = getCurrentActor(),
+): string[] {
+  const metadata = getMarkMetadata(state);
+  const groups = new Map<string, PendingSuggestionUndoCandidate[]>();
+
+  for (const mark of getMarks(state)) {
+    const stored = metadata[mark.id];
+    if (!isPendingTrackedSuggestionForUndo(mark, stored)) continue;
+
+    const by = typeof stored?.by === 'string' && stored.by.trim().length > 0 ? stored.by : mark.by;
+    if (actor && by !== actor) continue;
+
+    const range = mark.range;
+    if (!range || range.to < range.from) continue;
+
+    const createdAt = typeof stored?.createdAt === 'string' && stored.createdAt.trim().length > 0
+      ? stored.createdAt
+      : mark.at;
+    const key = createdAt.trim().length > 0 ? createdAt : `fallback:${mark.id}`;
+    const createdAtMs = Date.parse(key);
+    const bucket = groups.get(key) ?? [];
+    bucket.push({
+      id: mark.id,
+      createdAt: key,
+      createdAtMs: Number.isFinite(createdAtMs) ? createdAtMs : 0,
+      from: range.from,
+      to: range.to,
+    });
+    groups.set(key, bucket);
+  }
+
+  const latestGroup = [...groups.values()]
+    .sort((left, right) => {
+      const leftTime = Math.max(...left.map((candidate) => candidate.createdAtMs));
+      const rightTime = Math.max(...right.map((candidate) => candidate.createdAtMs));
+      if (leftTime !== rightTime) return rightTime - leftTime;
+
+      const leftPos = Math.max(...left.map((candidate) => candidate.from));
+      const rightPos = Math.max(...right.map((candidate) => candidate.from));
+      if (leftPos !== rightPos) return rightPos - leftPos;
+
+      const leftKey = left[0]?.createdAt ?? '';
+      const rightKey = right[0]?.createdAt ?? '';
+      return rightKey.localeCompare(leftKey);
+    })[0];
+
+  if (!latestGroup) return [];
+
+  return [...latestGroup]
+    .sort((left, right) => {
+      if (left.from !== right.from) return right.from - left.from;
+      if (left.to !== right.to) return right.to - left.to;
+      return left.id.localeCompare(right.id);
+    })
+    .map((candidate) => candidate.id);
+}
+
+function resolveLatestPendingSuggestionUndoFallbackMarkIds(
+  state: EditorState,
+  actor: string | null = getCurrentActor(),
+): string[] {
+  const actorScopedIds = resolveLatestPendingSuggestionUndoMarkIds(state, actor);
+  if (actorScopedIds.length > 0) return actorScopedIds;
+  if (actor === null) return actorScopedIds;
+  return resolveLatestPendingSuggestionUndoMarkIds(state, null);
+}
+
+function rejectSuggestionGroupWithoutHistory(view: EditorView, markIds: readonly string[]): boolean {
+  let handled = false;
+  for (const markId of markIds) {
+    if (rejectSuggestionMark(view, markId, { addToHistory: false })) {
+      handled = true;
+    }
+  }
+  return handled;
+}
+
+function undoLatestPendingSuggestionEdit(
+  view: EditorView,
+  actor: string | null = getCurrentActor(),
+): boolean {
+  const markIds = resolveLatestPendingSuggestionUndoFallbackMarkIds(view.state, actor);
+  if (markIds.length === 0) return false;
+  return rejectSuggestionGroupWithoutHistory(view, markIds);
+}
+
+function storedMarkMetadataEqual(
+  left: Record<string, StoredMark>,
+  right: Record<string, StoredMark>,
+): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+
+  for (const key of leftKeys) {
+    if (!(key in right)) return false;
+    if (JSON.stringify(left[key]) !== JSON.stringify(right[key])) return false;
+  }
+
+  return true;
+}
+
+function didTrackChangesUndoChangeState(
+  oldState: EditorState,
+  newState: EditorState,
+): boolean {
+  if (!oldState.doc.eq(newState.doc)) return true;
+  return !storedMarkMetadataEqual(
+    getMarkMetadata(oldState),
+    getMarkMetadata(newState),
+  );
+}
+
+function attemptTrackChangesUndo(view: EditorView, source: 'beforeinput' | 'keydown'): boolean {
+  const initialState = view.state;
+  let historyDispatched = false;
+
+  const historyHandled = undo(initialState, (tr) => {
+    historyDispatched = true;
+    view.dispatch(tr);
+  });
+
+  const historyChangedState = didTrackChangesUndoChangeState(initialState, view.state);
+  if (historyHandled && historyChangedState) {
+    console.log('[suggestions.undo.dispatch]', {
+      source,
+      path: 'history',
+      historyDispatched,
+    });
+    return true;
+  }
+
+  const markIds = resolveLatestPendingSuggestionUndoFallbackMarkIds(view.state);
+  const fallbackHandled = markIds.length > 0
+    ? rejectSuggestionGroupWithoutHistory(view, markIds)
+    : false;
+  if (fallbackHandled) {
+    console.log('[suggestions.undo.dispatch]', {
+      source,
+      path: historyHandled
+        ? 'history-noop-fallback-reject-suggestion-group'
+        : 'fallback-reject-suggestion-group',
+      historyDispatched,
+      markIds,
+    });
+    return true;
+  }
+
+  if (historyHandled) {
+    console.log('[suggestions.undo.dispatch]', {
+      source,
+      path: 'history-noop-consumed',
+      historyDispatched,
+      markIds,
+    });
+    return true;
+  }
+
+  return false;
+}
+
+export function __debugResolveLatestPendingSuggestionUndoMarkIds(
+  state: EditorState,
+  actor: string | null = getCurrentActor(),
+): string[] {
+  return resolveLatestPendingSuggestionUndoMarkIds(state, actor);
+}
+
+export function __debugResolveLatestPendingSuggestionUndoFallbackMarkIds(
+  state: EditorState,
+  actor: string | null = getCurrentActor(),
+): string[] {
+  return resolveLatestPendingSuggestionUndoFallbackMarkIds(state, actor);
+}
+
+export function __debugUndoLatestPendingSuggestionEdit(
+  view: EditorView,
+  actor: string | null = getCurrentActor(),
+): boolean {
+  return undoLatestPendingSuggestionEdit(view, actor);
 }
 
 function summarizeTextMarksInRange(
@@ -684,19 +1044,9 @@ function resolveTrackedTextInputRange(
   // Skip past delete marks at cursor position so new text appears after
   // the deletion rather than being trapped before it.
   if (from === to) {
-    const $pos = state.doc.resolve(from);
-    const nodeAfter = $pos.nodeAfter;
-    if (nodeAfter?.isText) {
-      const deleteMark = nodeAfter.marks.find((m) =>
-        m.type.name === 'proofSuggestion'
-        && normalizeSuggestionKind(m.attrs.kind) === 'delete'
-      );
-      if (deleteMark && typeof deleteMark.attrs.id === 'string') {
-        const deleteRange = resolveLiveDeleteSuggestionRange(state.doc, deleteMark.attrs.id);
-        if (deleteRange && deleteRange.from === from) {
-          return { from: deleteRange.to, to: deleteRange.to };
-        }
-      }
+    const skipTo = resolveLeadingDeleteSuggestionRunEnd(state.doc, from);
+    if (skipTo !== from) {
+      return { from: skipTo, to: skipTo };
     }
   }
 
@@ -709,6 +1059,33 @@ export function __debugResolveTrackedTextInputRange(
   to: number,
 ): { from: number; to: number } {
   return resolveTrackedTextInputRange(state, from, to);
+}
+
+function resolveLeadingDeleteSuggestionRunEnd(
+  doc: ProseMirrorNode,
+  pos: number,
+): number {
+  let cursor = Math.max(0, Math.min(pos, doc.content.size));
+  let hops = 0;
+
+  while (cursor < doc.content.size && hops < 1000) {
+    hops += 1;
+    const $pos = doc.resolve(cursor);
+    const nodeAfter = $pos.nodeAfter;
+    if (!nodeAfter?.isText) break;
+
+    const deleteMark = nodeAfter.marks.find((mark) =>
+      mark.type.name === 'proofSuggestion'
+      && normalizeSuggestionKind(mark.attrs.kind) === 'delete'
+    );
+    if (!deleteMark || typeof deleteMark.attrs.id !== 'string') break;
+
+    const deleteRange = resolveLiveDeleteSuggestionRange(doc, deleteMark.attrs.id);
+    if (!deleteRange || deleteRange.from !== cursor || deleteRange.to <= cursor) break;
+    cursor = deleteRange.to;
+  }
+
+  return cursor;
 }
 
 function findTrailingDeleteRangeForInsert(
@@ -1075,6 +1452,96 @@ function applyMixedInsertDeletion(
   if (firstPlainSegment) {
     newTr.setSelection(TextSelection.create(newTr.doc, Math.min(firstPlainSegment.from, newTr.doc.content.size)));
   }
+
+  return { handled: true, metadata: nextMetadata, metadataChanged };
+}
+
+function applyMixedSuggestionReplacement(
+  newTr: Transaction,
+  metadata: Record<string, StoredMark>,
+  from: number,
+  to: number,
+  actor: string,
+  suggestionType: MarkType,
+  insertedText: string,
+): { handled: boolean; metadata: Record<string, StoredMark>; metadataChanged: boolean } {
+  const segments = collectDeleteRangeSegments(newTr.doc, from, to, suggestionType);
+  const hasInsert = segments.some((segment) => segment.kind === 'insert');
+  const hasDelete = segments.some((segment) => segment.kind === 'delete');
+  const hasReplace = segments.some((segment) => segment.kind === 'replace');
+  const hasPlain = segments.some((segment) => segment.kind === 'plain');
+  if (!hasPlain || (!hasInsert && !hasDelete && !hasReplace)) {
+    return { handled: false, metadata, metadataChanged: false };
+  }
+
+  const createdAt = new Date().toISOString();
+  const touchedInsertIds = new Set<string>();
+  let nextMetadata = metadata;
+  let metadataChanged = false;
+
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (segment.kind === 'insert') {
+      for (const id of segment.insertIds) touchedInsertIds.add(id);
+      newTr.delete(segment.from, segment.to);
+      continue;
+    }
+    if (segment.kind === 'delete' || segment.kind === 'replace') {
+      continue;
+    }
+    if (segment.kind !== 'plain') continue;
+
+    const suggestionId = generateMarkId();
+    newTr.addMark(
+      segment.from,
+      segment.to,
+      suggestionType.create({
+        id: suggestionId,
+        kind: 'delete',
+        by: actor,
+      }),
+    );
+
+    nextMetadata = {
+      ...nextMetadata,
+      [suggestionId]: {
+        ...buildSuggestionMetadata('delete', actor, null, createdAt),
+        quote: segment.text,
+      },
+    };
+    metadataChanged = true;
+  }
+
+  const syncedMetadata = syncInsertSuggestionMetadataFromDoc(newTr.doc, nextMetadata, [...touchedInsertIds]);
+  metadataChanged = metadataChanged || syncedMetadata !== nextMetadata;
+  nextMetadata = syncedMetadata;
+
+  const insertPos = Math.max(0, Math.min(newTr.mapping.map(to, -1), newTr.doc.content.size));
+  const insertSuggestionId = generateMarkId();
+  newTr.insertText(insertedText, insertPos);
+  newTr.addMark(
+    insertPos,
+    insertPos + insertedText.length,
+    suggestionType.create({ id: insertSuggestionId, kind: 'insert', by: actor }),
+  );
+
+  nextMetadata = {
+    ...nextMetadata,
+    [insertSuggestionId]: {
+      ...buildSuggestionMetadata('insert', actor, insertedText, createdAt),
+      ...buildCollapsedInsertAnchorMetadata(insertPos),
+    },
+  };
+  metadataChanged = true;
+
+  lastInsertByActor.set(actor, {
+    id: insertSuggestionId,
+    from: insertPos,
+    to: insertPos + insertedText.length,
+    by: actor,
+    updatedAt: Date.now(),
+  });
+  setSelectionAfterInsertedText(newTr, insertPos + insertedText.length);
 
   return { handled: true, metadata: nextMetadata, metadataChanged };
 }
@@ -2211,13 +2678,30 @@ export function wrapPendingNativeTextInputTransaction(
     if (existingInsertIds.length === 1) {
       const insertId = existingInsertIds[0]!;
       const insertBy = metadata[insertId]?.by ?? actor;
-      ({ tr: nextTr } = materializeInsertSuggestionAsSingleTextNode(
-        nextTr,
-        insertId,
-        insertBy,
-        suggestionType,
-        authoredType,
-      ));
+      const existingRange = resolveLiveInsertSuggestionRange(nextTr.doc, insertId);
+      const cursorOffsetWithinInsert = existingRange
+        ? Math.max(0, diff.from - existingRange.from) + diff.insertedText.length
+        : diff.insertedText.length;
+      nextTr = nextTr.addMark(
+        diff.from,
+        diff.to,
+        suggestionType.create({ id: insertId, kind: 'insert', by: insertBy }),
+      );
+      const updatedRange = resolveLiveInsertSuggestionRange(nextTr.doc, insertId) ?? existingRange;
+      if (updatedRange) {
+        lastInsertByActor.set(actor, {
+          id: insertId,
+          from: updatedRange.from,
+          to: updatedRange.to,
+          by: insertBy,
+          updatedAt: now,
+        });
+        const cursorPos = Math.max(
+          updatedRange.from,
+          Math.min(updatedRange.from + cursorOffsetWithinInsert, updatedRange.to),
+        );
+        setSelectionAfterInsertedText(nextTr, cursorPos);
+      }
     }
     const syncedMetadata = syncInsertSuggestionMetadataFromDoc(nextTr.doc, metadata, existingInsertIds);
     metadataChanged = metadataChanged || syncedMetadata !== metadata;
@@ -2249,19 +2733,10 @@ export function wrapPendingNativeTextInputTransaction(
         diff.to,
         suggestionType.create({ id: candidate.id, kind: 'insert', by: actor }),
       );
-      const materialized = materializeInsertSuggestionAsSingleTextNode(
-        nextTr,
-        candidate.id,
-        actor,
-        suggestionType,
-        authoredType,
-      );
-      nextTr = materialized.tr;
       const syncedMetadata = syncInsertSuggestionMetadataFromDoc(nextTr.doc, metadata, [candidate.id]);
       metadataChanged = metadataChanged || syncedMetadata !== metadata;
       metadata = syncedMetadata;
-      const updatedRange = materialized.range
-        ?? resolveLiveInsertSuggestionRange(nextTr.doc, candidate.id)
+      const updatedRange = resolveLiveInsertSuggestionRange(nextTr.doc, candidate.id)
         ?? candidate.range;
       lastInsertByActor.set(actor, {
         id: candidate.id,
@@ -2374,13 +2849,30 @@ function buildPlainInsertionSuggestionFallbackTransaction(
     if (existingInsertIds.length === 1) {
       const insertId = existingInsertIds[0]!;
       const insertBy = metadata[insertId]?.by ?? actor;
-      ({ tr } = materializeInsertSuggestionAsSingleTextNode(
-        tr,
-        insertId,
-        insertBy,
-        suggestionType,
-        authoredType,
-      ));
+      const existingRange = resolveLiveInsertSuggestionRange(newState.doc, insertId);
+      const cursorOffsetWithinInsert = existingRange
+        ? Math.max(0, diff.from - existingRange.from) + diff.insertedText.length
+        : diff.insertedText.length;
+      tr = tr.addMark(
+        diff.from,
+        diff.to,
+        suggestionType.create({ id: insertId, kind: 'insert', by: insertBy }),
+      );
+      const updatedRange = resolveLiveInsertSuggestionRange(tr.doc, insertId) ?? existingRange;
+      if (updatedRange) {
+        lastInsertByActor.set(actor, {
+          id: insertId,
+          from: updatedRange.from,
+          to: updatedRange.to,
+          by: insertBy,
+          updatedAt: now,
+        });
+        const cursorPos = Math.max(
+          updatedRange.from,
+          Math.min(updatedRange.from + cursorOffsetWithinInsert, updatedRange.to),
+        );
+        setSelectionAfterInsertedText(tr, cursorPos);
+      }
     }
     const syncedMetadata = syncInsertSuggestionMetadataFromDoc(tr.doc, metadata, existingInsertIds);
     metadataChanged = metadataChanged || syncedMetadata !== metadata;
@@ -2424,19 +2916,10 @@ function buildPlainInsertionSuggestionFallbackTransaction(
       diff.to,
       suggestionType.create({ id: candidate.id, kind: 'insert', by: actor })
     );
-    const materialized = materializeInsertSuggestionAsSingleTextNode(
-      tr,
-      candidate.id,
-      actor,
-      suggestionType,
-      authoredType,
-    );
-    tr = materialized.tr;
     const syncedMetadata = syncInsertSuggestionMetadataFromDoc(tr.doc, metadata, [candidate.id]);
     metadataChanged = metadataChanged || syncedMetadata !== metadata;
     metadata = syncedMetadata;
-    const updatedRange = materialized.range
-      ?? resolveLiveInsertSuggestionRange(tr.doc, candidate.id)
+    const updatedRange = resolveLiveInsertSuggestionRange(tr.doc, candidate.id)
       ?? candidate.range;
     lastInsertByActor.set(actor, {
       id: candidate.id,
@@ -2582,6 +3065,114 @@ function detectSelectionReplacement(
   return { from, to, deletedText, insertedText };
 }
 
+type BlockedTrackChangesMarkMutation = {
+  reason: 'mark-step' | 'stored-mark-toggle';
+  markNames: string[];
+  stepTypes: string[];
+};
+
+function isProofTrackChangesMarkName(name: string | null | undefined): boolean {
+  return typeof name === 'string' && name.startsWith('proof');
+}
+
+function summarizeNonProofMarkNames(marks: readonly Mark[] | null | undefined): string[] {
+  if (!marks || marks.length === 0) return [];
+
+  const names = new Set<string>();
+  for (const mark of marks) {
+    const name = mark.type?.name;
+    if (!isProofTrackChangesMarkName(name)) {
+      names.add(name || 'unknown');
+    }
+  }
+
+  return [...names].sort();
+}
+
+function summarizeNonProofMarkKeys(marks: readonly Mark[] | null | undefined): string[] {
+  if (!marks || marks.length === 0) return [];
+
+  const keys = new Set<string>();
+  for (const mark of marks) {
+    const name = mark.type?.name;
+    if (isProofTrackChangesMarkName(name)) continue;
+    keys.add(`${name || 'unknown'}:${JSON.stringify(mark.attrs ?? {})}`);
+  }
+
+  return [...keys].sort();
+}
+
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return false;
+  }
+  return true;
+}
+
+export function getBlockedTrackChangesMarkMutation(
+  tr: Transaction,
+  state: EditorState,
+): BlockedTrackChangesMarkMutation | null {
+  let sawMarkStep = false;
+  let sawNonMarkStep = false;
+  const stepTypes: string[] = [];
+  const markNames = new Set<string>();
+
+  for (const step of tr.steps) {
+    const stepJson = step.toJSON() as { stepType?: string; mark?: { type?: string } };
+    const stepType = stepJson.stepType ?? step.constructor?.name ?? 'unknown';
+    stepTypes.push(stepType);
+
+    if (stepType === 'addMark' || stepType === 'removeMark') {
+      sawMarkStep = true;
+      const markName = (step as { mark?: Mark }).mark?.type?.name ?? stepJson.mark?.type ?? 'unknown';
+      if (!isProofTrackChangesMarkName(markName)) {
+        markNames.add(markName);
+      }
+      continue;
+    }
+
+    sawNonMarkStep = true;
+  }
+
+  if (sawMarkStep && !sawNonMarkStep && markNames.size > 0) {
+    return {
+      reason: 'mark-step',
+      markNames: [...markNames].sort(),
+      stepTypes,
+    };
+  }
+
+  if (!tr.docChanged && tr.storedMarksSet) {
+    const currentMarks = state.storedMarks ?? state.selection.$from.marks();
+    const nextMarks = tr.storedMarks ?? [];
+    const currentNonProofKeys = summarizeNonProofMarkKeys(currentMarks);
+    const nextNonProofKeys = summarizeNonProofMarkKeys(nextMarks);
+    if (!sameStringArray(currentNonProofKeys, nextNonProofKeys)) {
+      const currentNames = summarizeNonProofMarkNames(currentMarks);
+      const nextNames = summarizeNonProofMarkNames(nextMarks);
+      const changedNames = [...new Set([...currentNames, ...nextNames])].sort();
+      if (changedNames.length > 0) {
+        return {
+          reason: 'stored-mark-toggle',
+          markNames: changedNames,
+          stepTypes,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+export function __debugDetectBlockedTrackChangesMarkMutation(
+  tr: Transaction,
+  state: EditorState,
+): BlockedTrackChangesMarkMutation | null {
+  return getBlockedTrackChangesMarkMutation(tr, state);
+}
+
 function resolveContainingTextblockRange(
   state: EditorState,
   pos: number,
@@ -2600,6 +3191,52 @@ function resolveContainingTextblockRange(
   }
 
   return null;
+}
+
+function shouldSuppressStructuralParagraphSplit(state: EditorState): boolean {
+  const { $from } = state.selection;
+  return $from.parent.type.name !== 'code_block';
+}
+
+export function __debugShouldSuppressStructuralParagraphSplit(state: EditorState): boolean {
+  return shouldSuppressStructuralParagraphSplit(state);
+}
+
+function shouldSuppressStructuralBoundaryDelete(
+  state: EditorState,
+  key: 'Backspace' | 'Delete',
+  modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean },
+  selectionOverride?: MarkRange | null,
+): boolean {
+  const overriddenSelection = selectionOverride && selectionOverride.to > selectionOverride.from
+    ? {
+        from: Math.min(selectionOverride.from, selectionOverride.to),
+        to: Math.max(selectionOverride.from, selectionOverride.to),
+      }
+    : null;
+  if (overriddenSelection) return false;
+
+  const selection = state.selection;
+  if (!selection.empty) return false;
+  if (modifiers?.altKey || modifiers?.metaKey || modifiers?.ctrlKey) return false;
+
+  const textblock = resolveContainingTextblockRange(state, selection.from);
+  if (!textblock) return false;
+
+  if (key === 'Backspace') {
+    return selection.from <= textblock.from;
+  }
+
+  return selection.from >= textblock.to;
+}
+
+export function __debugShouldSuppressStructuralBoundaryDelete(
+  state: EditorState,
+  key: 'Backspace' | 'Delete',
+  modifiers?: { altKey?: boolean; metaKey?: boolean; ctrlKey?: boolean },
+  selectionOverride?: MarkRange | null,
+): boolean {
+  return shouldSuppressStructuralBoundaryDelete(state, key, modifiers, selectionOverride);
 }
 
 function resolveBackwardWordOffset(text: string): number {
@@ -2737,16 +3374,30 @@ export function __debugResolveTrackedDeleteRange(
     return finish('backspace-char', cursor > 0 ? { from: cursor - 1, to: cursor } : null);
   }
 
-  if (modifiers?.metaKey && textblock) {
-    return finish('delete-line', cursor < textblock.to ? { from: cursor, to: textblock.to } : null);
+  const deleteCursor = resolveLeadingDeleteSuggestionRunEnd(state.doc, cursor);
+  const deleteTextblock = deleteCursor === cursor
+    ? textblock
+    : resolveContainingTextblockRange(state, deleteCursor);
+
+  if (modifiers?.metaKey && deleteTextblock) {
+    return finish(
+      deleteCursor !== cursor ? 'delete-line-skip-delete-suggestion' : 'delete-line',
+      deleteCursor < deleteTextblock.to ? { from: deleteCursor, to: deleteTextblock.to } : null,
+    );
   }
-  if ((modifiers?.altKey || modifiers?.ctrlKey) && textblock) {
-    const suffix = state.doc.textBetween(cursor, textblock.to, '', '');
+  if ((modifiers?.altKey || modifiers?.ctrlKey) && deleteTextblock) {
+    const suffix = state.doc.textBetween(deleteCursor, deleteTextblock.to, '', '');
     const endOffset = resolveForwardWordOffset(suffix);
-    const to = cursor + endOffset;
-    return finish('delete-word', to > cursor ? { from: cursor, to } : null);
+    const to = deleteCursor + endOffset;
+    return finish(
+      deleteCursor !== cursor ? 'delete-word-skip-delete-suggestion' : 'delete-word',
+      to > deleteCursor ? { from: deleteCursor, to } : null,
+    );
   }
-  return finish('delete-char', cursor < state.doc.content.size ? { from: cursor, to: cursor + 1 } : null);
+  return finish(
+    deleteCursor !== cursor ? 'delete-char-skip-delete-suggestion' : 'delete-char',
+    deleteCursor < state.doc.content.size ? { from: deleteCursor, to: deleteCursor + 1 } : null,
+  );
 }
 
 function getLiveDomSelectionRange(view: EditorView): MarkRange | null {
@@ -2857,6 +3508,16 @@ export function wrapTransactionForSuggestions(
     return tr;
   }
 
+  const blockedMarkMutation = getBlockedTrackChangesMarkMutation(tr, state);
+  if (blockedMarkMutation?.reason === 'mark-step') {
+    console.log('[suggestions.wrapForSuggestions.blockUnsupportedMarkMutation]', {
+      reason: blockedMarkMutation.reason,
+      markNames: blockedMarkMutation.markNames,
+      stepTypes: blockedMarkMutation.stepTypes,
+    });
+    return state.tr.setMeta('addToHistory', false);
+  }
+
   // Check for structural changes (paragraph splits, etc). Pass through unchanged.
   for (const step of tr.steps) {
     const stepJson = step.toJSON() as { stepType?: string; slice?: { content?: SliceNode[] } };
@@ -2929,7 +3590,19 @@ export function wrapTransactionForSuggestions(
     } else if (deletedText && insertedText) {
       lastInsertByActor.delete(actor);
 
-      if (existing.hasDelete) {
+      const mixedReplacementResult = applyMixedSuggestionReplacement(
+        newTr,
+        metadata,
+        safeFrom,
+        safeTo,
+        actor,
+        suggestionType,
+        insertedText,
+      );
+      if (mixedReplacementResult.handled) {
+        metadataChanged = metadataChanged || mixedReplacementResult.metadataChanged;
+        metadata = mixedReplacementResult.metadata;
+      } else if (existing.hasDelete) {
         newTr.delete(safeFrom, safeTo);
 
         const suggestionId = generateMarkId();
@@ -2955,17 +3628,47 @@ export function wrapTransactionForSuggestions(
           const suggestionId = touchedInsertIds[0];
           const existingMeta = metadata[suggestionId];
           const insertBy = existingMeta?.by ?? actor;
+          const existingRange = resolveLiveInsertSuggestionRange(newTr.doc, suggestionId);
+          const cursorOffsetWithinInsert = existingRange
+            ? Math.max(0, safeFrom - existingRange.from) + insertedText.length
+            : insertedText.length;
 
-          newTr.replaceWith(safeFrom, safeTo, state.schema.text(insertedText));
-          newTr.addMark(
+          newTr.replaceWith(
             safeFrom,
-            safeFrom + insertedText.length,
-            suggestionType.create({ id: suggestionId, kind: 'insert', by: insertBy })
+            safeTo,
+            state.schema.text(insertedText, [
+              suggestionType.create({ id: suggestionId, kind: 'insert', by: insertBy }),
+            ]),
           );
+          const materialized = materializeInsertSuggestionAsSingleTextNode(
+            newTr,
+            suggestionId,
+            insertBy,
+            suggestionType,
+            authoredType,
+          );
+          newTr = materialized.tr;
 
           const syncedMetadata = syncInsertSuggestionMetadataFromDoc(newTr.doc, metadata, touchedInsertIds);
           metadataChanged = metadataChanged || syncedMetadata !== metadata;
           metadata = syncedMetadata;
+          const updatedRange = materialized.range
+            ?? resolveLiveInsertSuggestionRange(newTr.doc, suggestionId)
+            ?? existingRange;
+          if (updatedRange) {
+            lastInsertByActor.set(actor, {
+              id: suggestionId,
+              from: updatedRange.from,
+              to: updatedRange.to,
+              by: insertBy,
+              updatedAt: Date.now(),
+            });
+            const cursorPos = Math.max(
+              updatedRange.from,
+              Math.min(updatedRange.from + cursorOffsetWithinInsert, updatedRange.to),
+            );
+            setSelectionAfterInsertedText(newTr, cursorPos);
+          }
         } else {
           const suggestionId = generateMarkId();
           const createdAt = new Date().toISOString();
@@ -4006,15 +4709,24 @@ export const suggestionsPlugin = $prose(() => {
         beforeinput(view, event) {
           const inputEvent = event as InputEvent;
 
-          // Handle insertParagraph (Enter key) regardless of TC state.
-          // ProseMirror's default Enter→splitBlock path does not fire for all
-          // input methods (CDP dispatchKeyEvent, programmatic input). Catching
-          // insertParagraph in beforeinput ensures paragraph breaks work
-          // regardless of how Enter arrives.
+          if (inputEvent.inputType === 'historyUndo') {
+            if (!isSuggestionsEnabled(view.state)) return false;
+            if (attemptTrackChangesUndo(view, 'beforeinput')) {
+              event.preventDefault();
+              event.stopPropagation();
+              return true;
+            }
+            return false;
+          }
+
+          // Handle insertParagraph (Enter key) regardless of TC state so the
+          // track changes guard can block unsupported structural splits before
+          // ProseMirror's default splitBlock path runs.
           if (inputEvent.inputType === 'insertParagraph') {
             const { state } = view;
             const { from } = state.selection;
             const $from = state.doc.resolve(from);
+            const enabled = isSuggestionsEnabled(state);
 
             // Code blocks: insert literal newline
             if ($from.parent.type.name === 'code_block') {
@@ -4023,28 +4735,29 @@ export const suggestionsPlugin = $prose(() => {
               return true;
             }
 
-            const tr = state.tr.split(from);
-            if (tr.docChanged) {
-              // If TC is on, strip suggestion marks from stored marks so the
-              // new paragraph starts clean — handleTextInput adds fresh marks.
-              const enabled = isSuggestionsEnabled(state);
-              if (enabled) {
-                const suggestionType = state.schema.marks.proofSuggestion;
-                if (suggestionType) {
-                  const currentStored = tr.storedMarks ?? $from.marks();
-                  const clean = currentStored.filter((m: Mark) => m.type !== suggestionType);
-                  tr.setStoredMarks(clean);
-                }
-              }
-              console.log('[suggestions.beforeinput.insertParagraph.split]', {
+            if (enabled && shouldSuppressStructuralParagraphSplit(state)) {
+              console.log('[suggestions.beforeinput.insertParagraph.suppressed]', {
                 from,
                 enabled,
                 depth: $from.depth,
+                reason: 'structural-paragraph-split',
               });
-              view.dispatch(tr);
               event.preventDefault();
+              event.stopPropagation();
               return true;
             }
+
+            const tr = state.tr.split(from);
+            if (!tr.docChanged) return false;
+
+            console.log('[suggestions.beforeinput.insertParagraph.split]', {
+              from,
+              enabled,
+              depth: $from.depth,
+            });
+            view.dispatch(tr);
+            event.preventDefault();
+            return true;
           }
 
           if (!isSuggestionsEnabled(view.state)) return false;
@@ -4067,6 +4780,21 @@ export const suggestionsPlugin = $prose(() => {
           }
 
           const domSelectionRange = getLiveDomSelectionRange(view);
+          if (shouldSuppressStructuralBoundaryDelete(view.state, intent.key, intent.modifiers, domSelectionRange)) {
+            console.log('[suggestions.beforeinput.delete.suppressed]', {
+              inputType: inputEvent.inputType ?? null,
+              intent,
+              reason: 'structural-boundary-delete',
+              stateSelection: {
+                from: view.state.selection.from,
+                to: view.state.selection.to,
+                empty: view.state.selection.empty,
+              },
+            });
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
+          }
           console.log('[suggestions.beforeinput.delete]', {
             inputType: inputEvent.inputType ?? null,
             pendingIntent: pendingIntent?.intent ?? null,
@@ -4169,11 +4897,18 @@ export const suggestionsPlugin = $prose(() => {
         if (!isSuggestionsEnabled(view.state)) return false;
         if (event.defaultPrevented || event.isComposing || view.composing) return false;
 
-        // Handle Enter explicitly when TC is on to create paragraph breaks.
-        // ProseMirror's default Enter→splitBlock path does not fire reliably
-        // under all input methods (CGEvent keystrokes, programmatic input).
-        // Handling Enter here guarantees a clean paragraph split with proper
-        // mark cleanup — the new paragraph starts without suggestion marks.
+        const normalizedKey = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+        if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && normalizedKey === 'z') {
+          if (attemptTrackChangesUndo(view, 'keydown')) {
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
+          }
+          return false;
+        }
+
+        // Block unsupported paragraph splits while TC is enabled. Code blocks
+        // still receive literal newline insertion.
         if (event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey) {
           const { state } = view;
           const { from } = state.selection;
@@ -4185,29 +4920,24 @@ export const suggestionsPlugin = $prose(() => {
             return true;
           }
 
-          // Create the paragraph split
-          const tr = state.tr.split(from);
-          if (!tr.docChanged) {
-            // Split not possible at this position — fall through to default
-            return false;
+          if (shouldSuppressStructuralParagraphSplit(state)) {
+            console.log('[suggestions.handleKeyDown.enter.suppressed]', {
+              from,
+              depth: $from.depth,
+              parentType: $from.parent.type.name,
+              reason: 'structural-paragraph-split',
+            });
+            event.preventDefault();
+            event.stopPropagation();
+            return true;
           }
 
-          // Strip suggestion marks from stored marks so the new paragraph
-          // starts without them. handleTextInput will add fresh marks when
-          // the user types the next character.
-          const suggestionType = state.schema.marks.proofSuggestion;
-          if (suggestionType) {
-            const currentStored = tr.storedMarks ?? $from.marks();
-            const clean = currentStored.filter((m: Mark) => m.type !== suggestionType);
-            tr.setStoredMarks(clean);
-          }
           console.log('[suggestions.handleKeyDown.enter.split]', {
             from,
             depth: $from.depth,
             parentType: $from.parent.type.name,
           });
-          view.dispatch(tr);
-          return true;
+          return false;
         }
 
         if (event.key !== 'Backspace' && event.key !== 'Delete') return false;
@@ -4217,6 +4947,19 @@ export const suggestionsPlugin = $prose(() => {
             reason: 'guarded-modifier-delete',
           });
           rememberModifiedDeleteIntent(view, event, { handled: true });
+          event.preventDefault();
+          event.stopPropagation();
+          return true;
+        }
+        if (shouldSuppressStructuralBoundaryDelete(view.state, event.key, {
+          altKey: event.altKey,
+          metaKey: event.metaKey,
+          ctrlKey: event.ctrlKey,
+        })) {
+          console.log('[suggestions.handleKeyDown.delete.suppressed]', {
+            key: event.key,
+            reason: 'structural-boundary-delete',
+          });
           event.preventDefault();
           event.stopPropagation();
           return true;

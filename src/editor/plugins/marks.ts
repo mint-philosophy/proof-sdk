@@ -12,6 +12,7 @@ import type { EditorState, Transaction } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { Fragment } from '@milkdown/kit/prose/model';
 import type { Node as ProseMirrorNode, MarkType } from '@milkdown/kit/prose/model';
+import { closeHistory } from 'prosemirror-history';
 import { ySyncPluginKey } from 'y-prosemirror';
 import { buildTextIndex, getTextForRange, mapTextOffsetsToRange, resolveQuoteRange } from '../utils/text-range';
 import { SHARE_CONTENT_FILTER_ALLOW_META } from './share-content-filter';
@@ -296,6 +297,27 @@ function resolveRangeFromQuote(doc: ProseMirrorNode, quote: string): MarkRange |
   return resolveQuoteRange(doc, quote);
 }
 
+function resolveRangeFromStoredQuote(
+  doc: ProseMirrorNode,
+  quote: string,
+  scope?: MarkRange | null,
+): MarkRange | null {
+  return resolveQuoteRange(doc, quote, scope)
+    ?? resolveQuoteRange(doc, quote, scope, '', '');
+}
+
+function doesStoredQuoteMatchRange(
+  doc: ProseMirrorNode,
+  range: MarkRange,
+  normalizedStoredQuote: string,
+): boolean {
+  if (!normalizedStoredQuote) return false;
+  const visibleQuote = normalizeQuote(getTextForRange(doc, range));
+  if (visibleQuote === normalizedStoredQuote) return true;
+  const flattenedBlockQuote = normalizeQuote(getTextForRange(doc, range, '', ''));
+  return flattenedBlockQuote === normalizedStoredQuote;
+}
+
 function resolveRangeFromNearbyQuote(
   doc: ProseMirrorNode,
   quote: string,
@@ -309,7 +331,7 @@ function resolveRangeFromNearbyQuote(
     from: Math.max(0, candidateRange.from - padding),
     to: Math.min(doc.content.size, candidateRange.to + padding),
   };
-  return resolveQuoteRange(doc, normalizedQuote, scope);
+  return resolveRangeFromStoredQuote(doc, normalizedQuote, scope);
 }
 
 function parseRelativeCharOffset(value: unknown): number | null {
@@ -347,8 +369,7 @@ function resolveStoredMarkRange(doc: ProseMirrorNode, stored: StoredMark): MarkR
         return relativeRange;
       }
     } else {
-      const actualRelativeQuote = normalizeQuote(getTextForRange(doc, relativeRange));
-      if (actualRelativeQuote === normalizedStoredQuote) {
+      if (doesStoredQuoteMatchRange(doc, relativeRange, normalizedStoredQuote)) {
         return relativeRange;
       }
       const nearbyRelativeRange = resolveRangeFromNearbyQuote(doc, normalizedStoredQuote, relativeRange);
@@ -391,8 +412,7 @@ function resolveStoredMarkRange(doc: ProseMirrorNode, stored: StoredMark): MarkR
         return candidateRange;
       }
     } else {
-      const actualQuote = normalizeQuote(getTextForRange(doc, candidateRange));
-      if (actualQuote === normalizedStoredQuote) {
+      if (doesStoredQuoteMatchRange(doc, candidateRange, normalizedStoredQuote)) {
         return candidateRange;
       }
       const nearbyStoredRange = resolveRangeFromNearbyQuote(doc, normalizedStoredQuote, candidateRange);
@@ -403,7 +423,7 @@ function resolveStoredMarkRange(doc: ProseMirrorNode, stored: StoredMark): MarkR
   }
 
   if (!normalizedStoredQuote) return null;
-  return resolveRangeFromQuote(doc, normalizedStoredQuote);
+  return resolveRangeFromStoredQuote(doc, normalizedStoredQuote);
 }
 
 function addRelativeAnchorsToMetadata(
@@ -1009,7 +1029,7 @@ function finalizeMarkTransaction(
   view: EditorView,
   tr: Transaction,
   metadata: Record<string, StoredMark>,
-  options?: { isRemote?: boolean; skipDocStamp?: boolean; syncToYjs?: boolean }
+  options?: { isRemote?: boolean; skipDocStamp?: boolean; syncToYjs?: boolean; addToHistory?: boolean }
 ): void {
   const normalized = normalizeMetadata(metadata, tr.doc);
   if (!options?.skipDocStamp) {
@@ -1023,6 +1043,8 @@ function finalizeMarkTransaction(
     if (!options?.syncToYjs) {
       tr = tr.setMeta(ySyncPluginKey, { isChangeOrigin: true });
     }
+    tr = tr.setMeta('addToHistory', false);
+  } else if (options?.addToHistory === false) {
     tr = tr.setMeta('addToHistory', false);
   }
   view.dispatch(tr);
@@ -1954,6 +1976,27 @@ export function mergePendingServerMarks(
       if (Object.prototype.hasOwnProperty.call(canonicalServer, id)) continue;
       delete merged[id];
     }
+  }
+
+  return canonicalizeStoredMarks(merged);
+}
+
+export function buildReviewMutationSnapshotMarks(
+  localMetadata: Record<string, StoredMark>,
+  serverMarks: Record<string, StoredMark>,
+): Record<string, StoredMark> {
+  const canonicalLocal = canonicalizeStoredMarks(localMetadata);
+  const merged = mergePendingServerMarks(canonicalLocal, serverMarks);
+  const localPendingSuggestionIds = new Set(
+    Object.entries(canonicalLocal)
+      .filter(([, mark]) => isPendingSuggestionMark(mark))
+      .map(([id]) => id),
+  );
+
+  for (const [id, mark] of Object.entries(merged)) {
+    if (!isPendingSuggestionMark(mark)) continue;
+    if (localPendingSuggestionIds.has(id)) continue;
+    delete merged[id];
   }
 
   return canonicalizeStoredMarks(merged);
@@ -3282,7 +3325,8 @@ function applyMarkdownInsert(
   by: string,
   parser: MarkdownParser | undefined
 ): MarkdownApplyResult {
-  if (range.from === range.to && !isStructuralMarkdown(markdown, parser)) {
+  const needsMaterialization = insertAcceptNeedsMaterialization(markdown, parser);
+  if (range.from === range.to && !isStructuralMarkdown(markdown, parser) && !needsMaterialization) {
     tr = tr.insertText(markdown, range.from, range.to);
     const appliedRange: MarkRange = {
       from: range.from,
@@ -3404,6 +3448,23 @@ function insertAcceptNeedsMaterialization(
   return needsMaterialization;
 }
 
+function getMaterializedInsertText(
+  markdown: string,
+  parser: MarkdownParser | undefined,
+): string {
+  const parsedFragment = parseMarkdownFragment(parser, markdown);
+  if (!parsedFragment || parsedFragment.childCount === 0) {
+    return '';
+  }
+
+  const parsedFragmentForInsert = unwrapSingleParagraph(parsedFragment) ?? parsedFragment;
+  if (fragmentHasBlockNodes(parsedFragmentForInsert)) {
+    return '';
+  }
+
+  return normalizeQuote(parsedFragmentForInsert.textBetween(0, parsedFragmentForInsert.size, '\n', '\n'));
+}
+
 function isAnchorBasedInsertSuggestion(mark: Mark, existingText: string): boolean {
   if (mark.kind !== 'insert') return false;
   const data = mark.data as InsertData | undefined;
@@ -3430,7 +3491,11 @@ function isAnchorBasedInsertSuggestion(mark: Mark, existingText: string): boolea
     && normalizedExisting !== normalizedContent;
 }
 
-function insertAcceptShouldPreserveExistingText(mark: Mark, existingText: string): boolean {
+function insertAcceptShouldPreserveExistingText(
+  mark: Mark,
+  existingText: string,
+  parser: MarkdownParser | undefined,
+): boolean {
   if (mark.kind !== 'insert') return false;
   const data = mark.data as InsertData | undefined;
   const content = typeof data?.content === 'string' ? data.content : '';
@@ -3439,11 +3504,20 @@ function insertAcceptShouldPreserveExistingText(mark: Mark, existingText: string
   const normalizedExisting = normalizeQuote(existingText);
   const normalizedQuote = normalizeQuote(mark.quote);
   const normalizedContent = normalizeQuote(content);
+  const normalizedMaterializedContent = getMaterializedInsertText(content, parser);
+  if (normalizedExisting.length === 0 || normalizedContent.length === 0) {
+    return false;
+  }
+
   if (
-    normalizedExisting.length === 0
-    || normalizedQuote.length === 0
-    || normalizedContent.length === 0
+    normalizedMaterializedContent.length > 0
+    && normalizedMaterializedContent !== normalizedContent
+    && normalizedExisting === normalizedMaterializedContent
   ) {
+    return true;
+  }
+
+  if (normalizedQuote.length === 0) {
     return false;
   }
 
@@ -3472,7 +3546,7 @@ export function accept(view: EditorView, markId: string, parser?: MarkdownParser
       for (const range of ranges) {
         const existingText = getTextForRange(view.state.doc, range);
         const content = data?.content ?? existingText;
-        if (insertAcceptShouldPreserveExistingText(mark, existingText)) {
+        if (insertAcceptShouldPreserveExistingText(mark, existingText, effectiveParser)) {
           tr = removeSuggestionAnchors(tr, new Set([mark.id]));
           applied = true;
           continue;
@@ -3561,13 +3635,13 @@ export function accept(view: EditorView, markId: string, parser?: MarkdownParser
 
   if (!applied) return false;
   const updatedMetadata = removeMetadataEntries(metadata, [markId]);
-  finalizeMarkTransaction(view, tr, updatedMetadata);
+  finalizeMarkTransaction(view, closeHistory(tr), updatedMetadata, { addToHistory: false });
   markResolvedMarkIds([markId], Date.now(), RESOLVED_MARK_TOMBSTONE_TTL_MS, 'deleted');
   emitMarkEvent('suggestion.accepted', { markId, kind: mark.kind, by: mark.by });
   return true;
 }
 
-export function reject(view: EditorView, markId: string): boolean {
+export function reject(view: EditorView, markId: string, options?: { addToHistory?: boolean }): boolean {
   const marks = getMarks(view.state);
   const mark = marks.find(item => item.id === markId);
   if (!mark) return false;
@@ -3622,7 +3696,7 @@ export function reject(view: EditorView, markId: string): boolean {
   }
 
   const updatedMetadata = removeMetadataEntries(metadata, [markId]);
-  finalizeMarkTransaction(view, tr, updatedMetadata);
+  finalizeMarkTransaction(view, tr, updatedMetadata, { addToHistory: options?.addToHistory });
   markResolvedMarkIds([markId], Date.now(), RESOLVED_MARK_TOMBSTONE_TTL_MS, 'deleted');
   emitMarkEvent('suggestion.rejected', { markId, kind: mark.kind, by: mark.by });
   return true;

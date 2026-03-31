@@ -86,6 +86,61 @@ function run(): void {
     'Expected snapshot target rewrite to refuse unrelated pending suggestions',
   );
 
+  const batchResolved = __markMutationSnapshotTargetsForTests.resolveEquivalentBatchMutationPayloadMarkIds(
+    {
+      markIds: ['delete-old', 'insert-old'],
+      by: 'human:Anonymous',
+      markdown: '# Untitled\n\nReplacement text.\n',
+      marks: {
+        'delete-old': {
+          kind: 'delete',
+          by: 'human:Anonymous',
+          status: 'pending',
+          quote: 'Untitled\n\nBaseline.',
+          range: { from: 0, to: 18 },
+          startRel: 'char:0',
+          endRel: 'char:18',
+        },
+        'insert-old': {
+          kind: 'insert',
+          by: 'human:Anonymous',
+          status: 'pending',
+          content: 'Replacement text.',
+          quote: 'Replacement text.',
+          range: { from: 20, to: 20 },
+          startRel: 'char:19',
+          endRel: 'char:36',
+        },
+      },
+    },
+    {
+      'delete-healed': {
+        kind: 'delete',
+        by: 'human:Anonymous',
+        status: 'pending',
+        quote: 'Untitled Baseline.',
+        range: { from: 1, to: 18 },
+        startRel: 'char:0',
+        endRel: 'char:18',
+      },
+      'insert-healed': {
+        kind: 'insert',
+        by: 'human:Anonymous',
+        status: 'pending',
+        content: 'Replacement text.',
+        quote: 'Replacement text.',
+        range: { from: 18, to: 18 },
+        startRel: 'char:18',
+        endRel: 'char:35',
+      },
+    },
+  );
+  assert.deepEqual(
+    batchResolved,
+    ['delete-healed', 'insert-healed'],
+    'Expected batch snapshot target resolution to remap whole-document replacement mark ids onto equivalent authoritative marks',
+  );
+
   console.log('mark-mutation-snapshot-targets.test.ts passed');
 }
 

@@ -31,6 +31,17 @@ function run(): void {
     'Expected share mark mutations to unwrap coordinator success and recoverable error payloads so canonical markdown survives persisted review actions',
   );
 
+  const refreshCollabSessionBlock = sliceBetween(
+    shareClientSource,
+    '  async refreshCollabSession(): Promise<CollabSessionPayload | CollabUnavailablePayload | ShareRequestError | null> {',
+    '\n  async createAccessLink(',
+  );
+  assert(
+    refreshCollabSessionBlock.includes('this.rememberAccessEpoch(payload.session.accessEpoch);')
+      && refreshCollabSessionBlock.includes('this.rememberObservedMutationBase(payload as unknown as Record<string, unknown>);'),
+    'Expected collab-refresh responses to advance the local access epoch and observed mutation base so repeated review reconnect cycles stay aligned with the newest session state',
+  );
+
   const applyResultBlock = sliceBetween(
     editorSource,
     '  private async applyShareMutationDocumentResult(',
@@ -42,16 +53,28 @@ function run(): void {
       && applyResultBlock.includes("const skipReconnectTemplateSeed = options?.skipReconnectTemplateSeed === true;")
       && applyResultBlock.includes("const preserveEditorStateDuringReconnect = options?.preserveEditorStateDuringReconnect === true;")
       && applyResultBlock.includes("const resetEditorDocOnReconnect = options?.resetEditorDocOnReconnect === true;")
+      && applyResultBlock.includes("const lockLocalEditsUntilStable = options?.lockLocalEditsUntilStable === true;")
+      && applyResultBlock.includes("const localReviewAction = options?.localReviewAction ?? null;")
+      && applyResultBlock.includes("const localReviewMarkIds = Array.from(new Set(")
       && applyResultBlock.includes("if (markdown !== null && collabStatus === 'pending' && preserveEditorStateDuringReconnect) {")
       && applyResultBlock.includes('this.armShareReviewRefreshCooldown();')
+      && applyResultBlock.includes('if (localReviewAction && localReviewMarkIds.length > 0) {')
+      && applyResultBlock.includes('const locallyResolved = this.tryResolveShareReviewMutationLocallyMany(')
+      && applyResultBlock.includes('if (locallyResolved) {')
+      && applyResultBlock.includes('return true;')
       && applyResultBlock.includes('this.pendingCollabReconnectTemplateOverride = null;')
       && applyResultBlock.includes('this.skipNextCollabTemplateSeed = true;')
       && applyResultBlock.includes('this.preserveEditorStateOnNextCollabReconnect = true;')
+      && applyResultBlock.includes('this.setShareReviewReconnectEditLock(')
+      && applyResultBlock.includes('lockLocalEditsUntilStable')
+      && applyResultBlock.includes('&& this.collabEnabled')
+      && applyResultBlock.includes('&& Boolean(this.activeCollabSession),')
       && applyResultBlock.includes('this.loadCanonicalShareDocument(markdown, marks);')
       && applyResultBlock.includes("this.setSuggestionsEnabled(true, { updateDesiredState: false });")
       && applyResultBlock.includes('this.suppressTrackChangesDuringCollabReconnect = false;')
       && applyResultBlock.includes('this.releaseDeferredShareMarksFlush();')
       && applyResultBlock.includes('void this.refreshCollabSessionAndReconnect(false);')
+      && applyResultBlock.includes('this.loadCanonicalShareDocument(markdown, marks);')
       && applyResultBlock.includes('this.pendingCollabReconnectTemplateOverride = skipReconnectTemplateSeed')
       && applyResultBlock.includes(': this.normalizeMarkdownForCollab(markdown);')
       && applyResultBlock.includes('this.skipNextCollabTemplateSeed = skipReconnectTemplateSeed;')
@@ -63,7 +86,7 @@ function run(): void {
       && applyResultBlock.includes('this.disconnectCollabService();')
       && applyResultBlock.includes('collabClient.disconnect();')
       && applyResultBlock.lastIndexOf('this.updateShareEditGate();') > applyResultBlock.indexOf("this.collabConnectionStatus = 'connecting';"),
-    'Expected share review mutation results to keep preserved reconnects on the canonical local editor state path, while still distinguishing optional hard editor-doc resets for the fallback disconnect/reconnect branch',
+    'Expected share review mutation results to try the history-safe local review fast path before falling back to the canonical reload/reconnect branch, while still distinguishing optional hard editor-doc resets for the fallback path',
   );
 
   const loadCanonicalShareDocumentBlock = sliceBetween(
@@ -91,15 +114,34 @@ function run(): void {
   assert(
     reconnectBlock.includes('if (this.pendingCollabReconnectTemplateOverride && this.pendingCollabReconnectTemplateOverride.trim().length > 0) {')
       && reconnectBlock.includes('reconnectTemplate = this.pendingCollabReconnectTemplateOverride;')
-      && reconnectBlock.includes('this.pendingCollabReconnectTemplateOverride = null;'),
-    'Expected collab reconnect to prefer the authoritative share mutation template over a stale fetchDocument fallback',
+      && reconnectBlock.includes('this.pendingCollabReconnectTemplateOverride = null;')
+      && reconnectBlock.includes('this.pendingCollabSessionRefreshRetry = true;')
+      && reconnectBlock.includes('this.pendingCollabSessionRefreshPreserveLocalState = this.pendingCollabSessionRefreshPreserveLocalState || preserveLocalState;')
+      && reconnectBlock.includes('this.collabSessionRefreshInFlight = false;')
+      && reconnectBlock.includes('const retryQueued = this.pendingCollabSessionRefreshRetry;')
+      && reconnectBlock.includes('const retryPreserveLocalState = this.pendingCollabSessionRefreshPreserveLocalState;')
+      && reconnectBlock.includes('const authFailureStillPending = this.collabEnabled')
+      && reconnectBlock.includes('const retryStillNeeded = retryQueued')
+      && reconnectBlock.includes("void Promise.resolve().then(() => this.refreshCollabSessionAndReconnect(nextPreserveLocalState));")
+      && reconnectBlock.includes('this.updateShareEditGate();'),
+    'Expected collab reconnect to prefer the authoritative share mutation template over a stale fetchDocument fallback and to queue missed auth-failure refresh retries that arrive while a session refresh is already in flight',
   );
   assert(
     reconnectBlock.includes('const forcePreserveEditorState = this.preserveEditorStateOnNextCollabReconnect;')
       && reconnectBlock.includes('const forceResetEditorDoc = this.resetEditorDocOnNextCollabReconnect;')
       && reconnectBlock.includes('this.resetEditorDocOnNextCollabReconnect = false;')
-      && reconnectBlock.includes('const shouldPreserveLocalState = forcePreserveEditorState')
-      && reconnectBlock.includes('const canUseSoftRefresh = shouldPreserveLocalState && !collabClient.requiresHardReconnect(refreshed.session);')
+      && reconnectBlock.includes('const shouldPreserveBufferedLocalState = !forcePreserveEditorState')
+      && reconnectBlock.includes('&& preserveLocalState')
+      && reconnectBlock.includes('&& this.shouldPreservePendingLocalCollabState();')
+      && reconnectBlock.includes('const shouldPreserveLocalState = forcePreserveEditorState || shouldPreserveBufferedLocalState;')
+      && reconnectBlock.includes('const forceHardReconnect = forcePreserveEditorState')
+      && reconnectBlock.includes('|| forceResetEditorDoc')
+      && reconnectBlock.includes('|| this.shareReviewReconnectEditLock')
+      && reconnectBlock.includes('|| this.suppressTrackChangesDuringCollabReconnect')
+      && reconnectBlock.includes('|| Boolean(this.pendingCollabReconnectTemplateOverride')
+      && reconnectBlock.includes('const canUseSoftRefresh = shouldPreserveLocalState')
+      && reconnectBlock.includes('&& !forceHardReconnect')
+      && reconnectBlock.includes('&& !collabClient.requiresHardReconnect(refreshed.session);')
       && reconnectBlock.includes('if (canUseSoftRefresh) {')
       && reconnectBlock.includes('this.pendingCollabRebindOnSync = forceResetEditorDoc;')
       && reconnectBlock.includes('this.pendingCollabRebindResetDoc = forceResetEditorDoc;')
@@ -114,9 +156,12 @@ function run(): void {
       && reconnectBlock.includes('if (this.skipNextCollabTemplateSeed) {')
       && reconnectBlock.includes('reconnectTemplate = null;')
       && reconnectBlock.includes('this.skipNextCollabTemplateSeed = false;')
+      && reconnectBlock.includes('forceHardReconnect,')
+      && reconnectBlock.includes('shouldPreserveBufferedLocalState,')
+      && reconnectBlock.includes('preserveBufferedLocalState: shouldPreserveBufferedLocalState,')
       && reconnectBlock.includes('if (!canUseSoftRefresh) {')
       && reconnectBlock.includes('this.pendingCollabTemplateMarkdown = this.shouldAllowCollabTemplateSeed(refreshed.session)'),
-    'Expected collab reconnect to treat access-epoch token refreshes as a soft same-room reconnect while still allowing persisted review reconnects to force a clean editor-doc reset from the synced Y.Doc before editing resumes',
+    'Expected collab reconnect to keep access-epoch token refreshes eligible for soft reconnects in general, while forcing persisted review reconnects through a clean provider reset before editing resumes',
   );
 
   const refreshLoopBlock = sliceBetween(
@@ -134,10 +179,12 @@ function run(): void {
 
   assert(
     editorSource.includes("const authFailed = collabClient.lastAuthenticationFailureReason !== null;")
+      && editorSource.includes('const authFailureRefreshSuppressed = this.collabAuthFailureRefreshSuppressionUntilMs > Date.now();')
       && editorSource.includes("collabClient.terminalCloseReason === 'permission-denied'")
       && editorSource.includes('|| authFailed')
+      && editorSource.includes('&& !authFailureRefreshSuppressed')
       && editorSource.includes('void this.refreshCollabSessionAndReconnect(this.shouldPreservePendingLocalCollabState());'),
-    'Expected collab auth-failure disconnects to trigger a session refresh/reconnect instead of leaving persisted review actions stuck offline',
+    'Expected collab auth-failure disconnects to trigger a session refresh/reconnect only when they are not stale closes from a just-started reconnect attempt',
   );
 
   assert(
@@ -146,7 +193,8 @@ function run(): void {
       && collabClientSource.includes("normalized === 'document-revoked'")
       && collabClientSource.includes("normalized === 'document-paused'")
       && collabClientSource.includes("normalized === 'permission-denied'")
-      && collabClientSource.includes('this.terminalCloseReason = classifyAuthenticationFailureReason(reason);'),
+      && collabClientSource.includes('this.terminalCloseReason = classifyAuthenticationFailureReason(reason);')
+      && collabClientSource.includes("if (this.lastAuthenticationFailureReason !== null || this.terminalCloseReason === 'permission-denied') {"),
     'Expected collab-client authentication failures to classify terminal close reasons so the editor can distinguish refreshable auth expiry from permanent unshare/revoke cases',
   );
 
@@ -156,8 +204,24 @@ function run(): void {
     '\n  private ensureShareWebSocketConnection(): void {',
   );
   assert(
+    editorSource.includes('private readonly shareReviewReconnectEditLockMinHoldMs: number = 6_000;')
+      && editorSource.includes('private shareReviewReconnectEditLockSetAtMs: number = 0;')
+      && editorSource.includes('private shareReviewReconnectEditLockReleaseTimer: ReturnType<typeof setTimeout> | null = null;')
+      && editorSource.includes('private scheduleShareReviewReconnectEditLockReleaseCheck(): void {')
+      && editorSource.includes('const remainingMs = this.shareReviewReconnectEditLockMinHoldMs - elapsedMs;')
+      && editorSource.includes('this.shareReviewReconnectEditLockReleaseTimer = setTimeout(() => {')
+      && editorSource.includes('this.setShareReviewReconnectEditLock(false);')
+      && editorSource.includes('const heldForMs = Date.now() - this.shareReviewReconnectEditLockSetAtMs;')
+      && editorSource.includes('if (heldForMs < this.shareReviewReconnectEditLockMinHoldMs) {')
+      && editorSource.includes('this.scheduleShareReviewReconnectEditLockReleaseCheck();'),
+    'Expected the share review reconnect edit lock to keep a timed minimum hold and schedule a gate recompute instead of releasing immediately on an incidental updateShareEditGate call',
+  );
+
+  assert(
     editGateBlock.includes('const collabReconnectStable = !this.pendingCollabRebindOnSync')
-      && editGateBlock.includes('&& !this.suppressTrackChangesDuringCollabReconnect;')
+      && editGateBlock.includes('&& !this.suppressTrackChangesDuringCollabReconnect')
+      && editGateBlock.includes('&& !this.shareReviewReconnectEditLock;')
+      && editGateBlock.includes('this.maybeFinalizePendingCollabReconnect();')
       && editGateBlock.includes('const hydratedForEditing = this.hasCompletedInitialCollabHydration')
       && editGateBlock.includes('const allowTransientRecoveryEdits = shouldAllowShareLocalEditsDuringTransientCollabRecovery({')
       && editGateBlock.includes("&& (this.collabConnectionStatus === 'connected' || allowTransientRecoveryEdits)")
@@ -165,7 +229,20 @@ function run(): void {
       && editGateBlock.includes(': hydratedForEditing;')
       && !editGateBlock.includes('&& this.collabIsSynced')
       && editGateBlock.includes('const allowLocalEdits = baseAllowLocalEdits && collabReconnectStable && hydrated;'),
-    'Expected share edit gating to keep the editor locked until post-review collab reconnect is stable, while allowing hydrated preserved-state sessions with pending local collab updates to stay editable through transient reconnect churn',
+    'Expected share edit gating to keep the editor locked until post-review collab reconnect is stable, while allowing a hydration-based fallback to finalize pending rebinds when the provider is connected but the normal synced callback path stalled',
+  );
+
+  assert(
+    editorSource.includes('private maybeFinalizePendingCollabReconnect(): void {')
+      && editorSource.includes("if (!(this.collabConnectionStatus === 'connected' || collabClient.isConnected())) return;")
+      && editorSource.includes('if (!this.isCollabHydratedForEditing()) return;')
+      && editorSource.includes("this.collabConnectionStatus = 'connected';")
+      && editorSource.includes('this.markInitialCollabHydrationComplete();')
+      && editorSource.includes('this.ensureCollabCursorsInstalled();')
+      && editorSource.includes('this.applyPendingCollabTemplate();')
+      && editorSource.includes('this.applyLatestCollabMarksToEditor();')
+      && editorSource.includes('this.collabAuthFailureRefreshSuppressionUntilMs = Date.now() + this.collabAuthFailureRefreshGraceMs;'),
+    'Expected stalled review reconnects to get a hydration-based fallback rebind path and to suppress stale auth-failure refresh churn immediately after a fresh reconnect attempt is started',
   );
 
   const remotePeerBlock = sliceBetween(
@@ -242,36 +319,34 @@ function run(): void {
   const acceptPersistedBlock = sliceBetween(
     editorSource,
     '  async markAcceptPersisted(markId: string): Promise<boolean> {',
+    '\n  async markAcceptManyPersisted(markIds: string[]): Promise<boolean> {',
+  );
+  const acceptManyPersistedBlock = sliceBetween(
+    editorSource,
+    '  async markAcceptManyPersisted(markIds: string[]): Promise<boolean> {',
     '\n  /**\n   * Reject a suggestion without changing the document\n   */',
   );
   assert(
-    acceptPersistedBlock.includes("const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);")
+    acceptPersistedBlock.includes('return this.markAcceptManyPersisted([markId]);')
+      && editorSource.includes('markAcceptManyPersisted(markIds: string[]): Promise<boolean>;')
       && editorSource.includes('private resolveShareReviewMutationRequestMarkId(markId: string, sourceMark: StoredMark | null): string {')
       && editorSource.includes('return this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);')
-      && editorSource.includes('private async ensureShareReviewMutationAppliedLocally(')
-      && editorSource.includes('private getMissingPendingShareReviewMarkIds(expectedIds: string[]): string[] {')
-      && editorSource.includes('private shouldAwaitShareReviewMutationSettle(): boolean {')
-      && editorSource.includes('private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {')
-      && acceptPersistedBlock.includes('const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));')
-      && acceptPersistedBlock.includes("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
-      && acceptPersistedBlock.indexOf("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
-        < acceptPersistedBlock.indexOf("let success = !shouldPreferCanonicalDeleteResult")
-      && acceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
-      && acceptPersistedBlock.includes('const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;')
-      && acceptPersistedBlock.includes("let success = !shouldPreferCanonicalDeleteResult")
-      && acceptPersistedBlock.includes('success = await this.applyShareMutationDocumentResult(result, {')
-      && acceptPersistedBlock.includes('skipReconnectTemplateSeed: true,')
-      && acceptPersistedBlock.includes('preserveEditorStateDuringReconnect: true,')
-      && acceptPersistedBlock.includes('resetEditorDocOnReconnect: true,')
-      && acceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally(')
-      && acceptPersistedBlock.includes('const shouldAwaitStableState = this.shouldAwaitShareReviewMutationSettle();')
-      && acceptPersistedBlock.includes('if (shouldAwaitStableState) {')
-      && acceptPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
-      && editorSource.includes('const authoritativePendingIds = (result?.marks && typeof result.marks === \'object\' && !Array.isArray(result.marks))')
-      && editorSource.includes('const missingAuthoritativePendingIds = this.getMissingPendingShareReviewMarkIds(authoritativePendingIds);')
-      && editorSource.includes('|| missingAuthoritativePendingIds.length > 0')
-      && !acceptPersistedBlock.includes('acceptMark(view, markId, parser);'),
-    'Expected markAcceptPersisted to resolve the request id against the authoritative pending server marks, tombstone both local and remote ids, verify that the accepted mark or any equivalent pending suggestion is actually gone locally, reconcile the mutation, and re-verify after any pending collab reconnect before treating the persisted accept as settled',
+      && acceptManyPersistedBlock.includes('const uniqueMarkIds = Array.from(new Set(markIds.filter((markId) => typeof markId === \'string\' && markId.length > 0)));')
+      && acceptManyPersistedBlock.includes('const ready = await this.flushShareReviewMutationState(uniqueMarkIds);')
+      && acceptManyPersistedBlock.includes('const requestedIds = Array.from(new Set(')
+      && acceptManyPersistedBlock.includes('this.resolveShareReviewMutationRequestMarkId(markId, this.getCurrentShareReviewStoredMark(markId))')
+      && acceptManyPersistedBlock.includes('const result = await shareClient.acceptSuggestions(requestedIds, actor, undefined, snapshot ?? undefined);')
+      && acceptManyPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([...uniqueMarkIds, ...requestedIds])), { reason: 'deleted' });")
+      && acceptManyPersistedBlock.includes('const success = await this.applyShareMutationDocumentResult(result, {')
+      && acceptManyPersistedBlock.includes('skipReconnectTemplateSeed: true,')
+      && acceptManyPersistedBlock.includes('preserveEditorStateDuringReconnect: true,')
+      && acceptManyPersistedBlock.includes("localReviewAction: 'accept',")
+      && acceptManyPersistedBlock.includes('localReviewMarkIds: uniqueMarkIds,')
+      && acceptManyPersistedBlock.includes('if (this.hasActiveRemoteCollabPeer()) {')
+      && acceptManyPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
+      && !acceptManyPersistedBlock.includes("this.tryResolveShareReviewMutationLocallyMany(uniqueMarkIds, 'accept', result)")
+      && !acceptManyPersistedBlock.includes('if (this.shouldAwaitShareReviewMutationSettle()) {'),
+    'Expected persisted per-item accept to delegate into a batch share mutation helper, use the canonical acceptSuggestions reconnect path, pass the local accept ids into applyShareMutationDocumentResult for the history-safe fast path, and only block on post-mutation settle when a remote peer is actually present',
   );
 
   const rejectPersistedBlock = sliceBetween(
@@ -284,35 +359,32 @@ function run(): void {
       && rejectPersistedBlock.includes("const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);")
       && rejectPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
       && rejectPersistedBlock.indexOf("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
-        < rejectPersistedBlock.indexOf("const success = (")
-      && rejectPersistedBlock.includes('const preserveRejectResultAcrossReconnect = this.hasActiveRemoteCollabPeer();')
-      && rejectPersistedBlock.includes('const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;')
-      && rejectPersistedBlock.includes("const success = (")
-      && rejectPersistedBlock.includes("!shouldPreferCanonicalDeleteResult")
-      && rejectPersistedBlock.includes('|| await this.applyShareMutationDocumentResult(')
-      && rejectPersistedBlock.includes('preserveRejectResultAcrossReconnect')
-      && rejectPersistedBlock.includes('preserveRejectResultAcrossReconnect')
+        < rejectPersistedBlock.indexOf("const success = await this.applyShareMutationDocumentResult(result, {")
+      && rejectPersistedBlock.includes("const success = await this.applyShareMutationDocumentResult(result, {")
       && rejectPersistedBlock.includes('skipReconnectTemplateSeed: true,')
       && rejectPersistedBlock.includes('preserveEditorStateDuringReconnect: true,')
+      && rejectPersistedBlock.includes('lockLocalEditsUntilStable: true,')
       && rejectPersistedBlock.includes('if (this.hasActiveRemoteCollabPeer()) {')
       && rejectPersistedBlock.includes('await this.waitForStableShareReviewMutationState();')
+      && !rejectPersistedBlock.includes("this.tryResolveShareReviewMutationLocally(markId, 'reject', result)")
       && !rejectPersistedBlock.includes('rejectMark(view, markId);'),
-    'Expected markRejectPersisted to preserve the current local pending mark id when it is still valid, tombstone the resolved suggestion, preserve the authoritative reject result through collab reconnect only when a remote peer is present, and only block on collab settle when a remote peer is actually connected',
+    'Expected markRejectPersisted to preserve the current local pending mark id when it is still valid, tombstone the resolved suggestion, and always route the canonical reject result through the full reconnect path before follow-up edits are allowed',
   );
 
-  const settleBlock = sliceBetween(
+  const stableSettleBlock = sliceBetween(
     editorSource,
     '  private async waitForStableShareReviewMutationState(): Promise<void> {',
     '\n  private getCurrentShareReviewPersistSnapshot(): {',
   );
   assert(
-    settleBlock.includes("const deadline = Date.now() + 10_000;")
-      && settleBlock.includes("const awaitingTemplateSeed = Boolean(this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0);")
-      && settleBlock.includes("const collabReconnectStable = !this.pendingCollabRebindOnSync")
-      && settleBlock.includes("&& !this.suppressTrackChangesDuringCollabReconnect")
-      && settleBlock.includes("&& !this.collabSessionRefreshInFlight;")
-      && settleBlock.includes("const synced = this.collabConnectionStatus === 'connected'")
-      && settleBlock.includes("this.traceShareReview('mutation.settle-timeout'"),
+    stableSettleBlock.includes("const deadline = Date.now() + 10_000;")
+      && stableSettleBlock.includes("const awaitingTemplateSeed = Boolean(this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0);")
+      && stableSettleBlock.includes("const collabReconnectStable = !this.pendingCollabRebindOnSync")
+      && stableSettleBlock.includes("&& !this.suppressTrackChangesDuringCollabReconnect")
+      && stableSettleBlock.includes("&& !this.collabSessionRefreshInFlight")
+      && stableSettleBlock.includes("&& !this.shareReviewReconnectEditLock;")
+      && stableSettleBlock.includes("const synced = this.collabConnectionStatus === 'connected'")
+      && stableSettleBlock.includes("this.traceShareReview('mutation.settle-timeout'"),
     'Expected persisted review mutations to wait for the post-mutation collab reconnect to become stable before another accept/reject can start',
   );
 
@@ -320,6 +392,26 @@ function run(): void {
     editorSource,
     '  private async flushShareReviewMutationState(expectedMarkIds: string[] = []): Promise<boolean> {',
     '\n  async markAcceptPersisted(markId: string): Promise<boolean> {',
+  );
+  const storedPendingIdsBlock = sliceBetween(
+    editorSource,
+    '  private storedMarksContainPendingIds(',
+    '\n  private doShareReviewMutationMarkdownsMatch(',
+  );
+  const authoritativeWaitBlock = sliceBetween(
+    editorSource,
+    '  private async waitForAuthoritativeShareReviewMarks(',
+    '\n  private async forcePersistCurrentShareReviewState(expectedIds: string[]): Promise<boolean> {',
+  );
+  const forcePersistBlock = sliceBetween(
+    editorSource,
+    '  private async forcePersistCurrentShareReviewState(expectedIds: string[]): Promise<boolean> {',
+    '\n  private async flushShareReviewMutationState(expectedMarkIds: string[] = []): Promise<boolean> {',
+  );
+  const shareReviewMarkdownMatchBlock = sliceBetween(
+    editorSource,
+    '  private doShareReviewMutationMarkdownsMatch(',
+    '\n  private async waitForAuthoritativeShareReviewMarks(',
   );
   assert(
     editorSource.includes('private shareReviewMutationDepth: number = 0;')
@@ -340,8 +432,25 @@ function run(): void {
       && flushReviewMutationStateBlock.includes('await pendingPersist.catch(() => false);')
       && flushReviewMutationStateBlock.includes('const expectedMarkdown = currentSnapshot?.markdown ?? null;')
       && flushReviewMutationStateBlock.includes('await this.waitForAuthoritativeShareReviewMarks(expectedPendingIds, {')
-      && flushReviewMutationStateBlock.includes('expectedMarkdown,'),
-    'Expected persisted review mutations to defer queued share mark flushes while a review mutation or post-mutation reconnect is active, and to wait for authoritative pending marks plus matching markdown before issuing share accept/reject mutations',
+      && flushReviewMutationStateBlock.includes('expectedMarkdown,')
+      && flushReviewMutationStateBlock.includes('expectedMarks: currentSnapshot?.marks ?? null,')
+      && forcePersistBlock.includes('const shouldPersistMarksOnly = snapshot.markdown.trim().length === 0;')
+      && forcePersistBlock.includes('? await shareClient.pushMarks(snapshot.marks, getCurrentActor())')
+      && forcePersistBlock.includes(': await shareClient.pushUpdate(snapshot.markdown, snapshot.marks, getCurrentActor());')
+      && forcePersistBlock.includes('expectedMarkdown: shouldPersistMarksOnly ? null : snapshot.markdown,')
+      && forcePersistBlock.includes('expectedMarks: snapshot.marks,')
+      && storedPendingIdsBlock.includes('expectedMarks?: Record<string, StoredMark> | null,')
+      && storedPendingIdsBlock.includes('const expectedMark = expectedMarks?.[markId];')
+      && storedPendingIdsBlock.includes('const score = this.scoreEquivalentShareReviewMark(expectedMark, candidateMark);')
+      && storedPendingIdsBlock.includes('if (!bestCandidateId || bestScore < 180) return false;')
+      && authoritativeWaitBlock.includes('this.storedMarksContainPendingIds(serverMarks, expectedIds, options?.expectedMarks) && markdownMatches')
+      && shareReviewMarkdownMatchBlock.includes('const normalizedActual = normalizeMarkdownForComparison(this.normalizeMarkdownForCollab(actualMarkdown));')
+      && shareReviewMarkdownMatchBlock.includes('const normalizedExpected = normalizeMarkdownForComparison(this.normalizeMarkdownForCollab(expectedMarkdown));')
+      && shareReviewMarkdownMatchBlock.includes('const normalizedActualVisible = canonicalizeVisibleTextBlockSeparators(')
+      && shareReviewMarkdownMatchBlock.includes('stripMarkdownVisibleText(normalizedActual)')
+      && shareReviewMarkdownMatchBlock.includes('const visibleMatch = normalizedActualVisible === normalizedExpectedVisible;')
+      && shareReviewMarkdownMatchBlock.includes("this.logReviewWhitespaceDebug('preflush.markdown-match-visible-fallback'"),
+    'Expected persisted review mutations to defer queued share mark flushes while a review mutation or post-mutation reconnect is active, and to wait for authoritative pending marks plus matching markdown before issuing share accept/reject mutations, tolerating equivalent authoritative mark ids when the server reanchors whole-document selections',
   );
 
   const serializedMutationBlock = sliceBetween(
@@ -363,14 +472,20 @@ function run(): void {
   );
   assert(
     localResolveBlock.includes("if (markdown === null || collabStatus !== 'pending') return false;")
+      && localResolveBlock.includes('private tryResolveShareReviewMutationLocallyMany(')
+      && localResolveBlock.includes("return this.tryResolveShareReviewMutationLocally(uniqueMarkIds[0]!, action, result);")
       && localResolveBlock.includes('this.resetEditorDocOnNextCollabReconnect = true;')
       && localResolveBlock.includes("this.traceShareReview('mutation.local-resolve.disconnect-old-room'")
+      && localResolveBlock.includes("this.traceShareReview('mutation.local-resolve-many.start'")
+      && localResolveBlock.includes("this.traceShareReview('mutation.local-resolve-many.disconnect-old-room'")
       && localResolveBlock.indexOf('this.disconnectCollabService();') < localResolveBlock.indexOf("acceptMark(view, markId, parser)")
       && localResolveBlock.includes("resolved = action === 'accept'")
       && localResolveBlock.includes("acceptMark(view, markId, parser)")
       && localResolveBlock.includes(': rejectMark(view, markId);')
       && localResolveBlock.includes('const liveMarkdown = this.normalizeMarkdownForCollab(serializer(view.state.doc));')
       && localResolveBlock.includes("matchedServerResult = liveMarkdown === expectedMarkdown && !Object.prototype.hasOwnProperty.call(liveMetadata, markId);")
+      && localResolveBlock.includes('uniqueMarkIds.every((markId) => !Object.prototype.hasOwnProperty.call(liveMetadata, markId))')
+      && localResolveBlock.includes("this.traceShareReview('mutation.local-resolve-many.result'")
       && localResolveBlock.includes('this.applyAuthoritativeShareMarks(serverMarks);')
       && localResolveBlock.includes('this.pendingCollabReconnectTemplateOverride = expectedMarkdown;')
       && localResolveBlock.includes("const shouldPreserveMatchedResultAcrossReconnect = action === 'accept'")
@@ -378,10 +493,11 @@ function run(): void {
       && localResolveBlock.includes('if (shouldPreserveMatchedResultAcrossReconnect) {')
       && localResolveBlock.includes('this.skipNextCollabTemplateSeed = true;')
       && localResolveBlock.includes('this.preserveEditorStateOnNextCollabReconnect = true;')
+      && localResolveBlock.includes('this.resetEditorDocOnNextCollabReconnect = false;')
       && localResolveBlock.includes('this.disconnectCollabService();')
       && localResolveBlock.includes('collabClient.disconnect();')
       && localResolveBlock.includes('void this.refreshCollabSessionAndReconnect(false);'),
-    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response, immediately reapply authoritative remaining marks, and force the next collab bind to reset from the synced Y.Doc so editor mappings stay fresh after review',
+    'Expected persisted review mutations to use the direct local accept/reject path when it matches the authoritative pending-collab server response, immediately reapply authoritative remaining marks, and clear forced editor-doc resets once the local state is already authoritative',
   );
 
   console.log('share-review-persisted-canonical-sync-regression.test.ts passed');

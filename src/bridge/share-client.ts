@@ -9,6 +9,10 @@ import {
   createShareBatchMutationIdempotencyKey,
   createShareMutationIdempotencyKey,
 } from './share-mutation-idempotency.js';
+import {
+  summarizeReviewWhitespaceMarkdown,
+  summarizeReviewWhitespaceMarks,
+} from '../shared/review-whitespace-debug.js';
 
 export interface ShareDocument {
   slug: string;
@@ -84,6 +88,7 @@ export type ShareRequestError = {
     retryAfterMs?: number | null;
     requestId?: string | null;
     retryWithState?: string | null;
+    details?: Record<string, unknown> | null;
   };
 };
 
@@ -148,6 +153,29 @@ const MARK_MUTATION_RETRY_ATTEMPTS = 3;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldDebugReviewWhitespaceClient(): boolean {
+  try {
+    const runtime = globalThis as typeof globalThis & {
+      __PROOF_DEBUG_REVIEW_WHITESPACE__?: unknown;
+      localStorage?: Storage;
+    };
+    const globalFlag = runtime.__PROOF_DEBUG_REVIEW_WHITESPACE__;
+    if (globalFlag === true || globalFlag === '1' || globalFlag === 'true') return true;
+    const stored = runtime.localStorage?.getItem('proof:debug:review-whitespace')?.trim().toLowerCase();
+    return stored === '1' || stored === 'true' || stored === 'yes' || stored === 'on';
+  } catch {
+    return false;
+  }
+}
+
+function logReviewWhitespaceClient(
+  event: string,
+  payload: Record<string, unknown>,
+): void {
+  if (!shouldDebugReviewWhitespaceClient()) return;
+  console.info(`[review-whitespace][share-client] ${event}`, payload);
 }
 
 export class ShareClient {
@@ -332,11 +360,7 @@ export class ShareClient {
 
   private async parseRequestError(response: Response): Promise<ShareRequestError> {
     const requestId = this.readRequestId(response);
-    const body = await response.json().catch(() => ({} as {
-      error?: unknown;
-      code?: unknown;
-      retryAfterMs?: unknown;
-    }));
+    const body = await response.json().catch(() => null) as Record<string, unknown> | null;
     return this.buildRequestError(response.status, response.statusText, requestId, body);
   }
 
@@ -344,23 +368,18 @@ export class ShareClient {
     status: number,
     statusText: string,
     requestId: string | null,
-    body: {
-      error?: unknown;
-      code?: unknown;
-      retryAfterMs?: unknown;
-      retryWithState?: unknown;
-    },
+    body: Record<string, unknown> | null,
   ): ShareRequestError {
-    const code = typeof body.code === 'string' && body.code.trim().length > 0
+    const code = typeof body?.code === 'string' && body.code.trim().length > 0
       ? body.code
       : 'unknown';
-    const message = typeof body.error === 'string' && body.error.trim().length > 0
+    const message = typeof body?.error === 'string' && body.error.trim().length > 0
       ? body.error
       : statusText || 'Request failed';
-    const retryAfterMs = typeof body.retryAfterMs === 'number' && Number.isFinite(body.retryAfterMs)
+    const retryAfterMs = typeof body?.retryAfterMs === 'number' && Number.isFinite(body.retryAfterMs)
       ? Math.max(0, Math.trunc(body.retryAfterMs))
       : null;
-    const retryWithState = typeof body.retryWithState === 'string' && body.retryWithState.trim().length > 0
+    const retryWithState = typeof body?.retryWithState === 'string' && body.retryWithState.trim().length > 0
       ? body.retryWithState.trim()
       : null;
     return {
@@ -371,6 +390,7 @@ export class ShareClient {
         retryAfterMs,
         requestId,
         retryWithState,
+        details: body,
       },
     };
   }
@@ -616,34 +636,77 @@ export class ShareClient {
     };
   }): Promise<ShareMarkMutationResponse | ShareRequestError | null> {
     const submit = async (base: ShareMutationBase): Promise<ShareMarkMutationResponse | ShareRequestError> => {
-      const response = await fetch(`${this.getApiBase()}/agent/${encodeURIComponent(this.slug as string)}/marks/${args.path}`, {
+      const url = `${this.getApiBase()}/agent/${encodeURIComponent(this.slug as string)}/marks/${args.path}`;
+      const requestBody = {
+        markIds: args.markIds,
+        by: args.by,
+        ...(args.snapshot
+          ? {
+              markdown: args.snapshot.markdown,
+              marks: args.snapshot.marks,
+            }
+          : {}),
+        ...base,
+      };
+      logReviewWhitespaceClient('accept-all.request', {
+        slug: this.slug,
+        markIds: args.markIds,
+        base,
+        snapshotMarkdown: summarizeReviewWhitespaceMarkdown(args.snapshot?.markdown ?? null),
+        snapshotMarks: summarizeReviewWhitespaceMarks(args.snapshot?.marks ?? null),
+      });
+      console.log('[shareClient.acceptSuggestions] POST /marks/accept-all', {
+        url,
+        markIds: [...args.markIds],
+        by: args.by,
+        base: JSON.parse(JSON.stringify(base)),
+        snapshotMarks: args.snapshot?.marks ? JSON.parse(JSON.stringify(args.snapshot.marks)) as Record<string, unknown> : null,
+      });
+      const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Idempotency-Key': args.idempotencyKey,
           ...this.getShareAuthHeaders(args.options?.token),
         },
-        body: JSON.stringify({
-          markIds: args.markIds,
-          by: args.by,
-          ...(args.snapshot
-            ? {
-                markdown: args.snapshot.markdown,
-                marks: args.snapshot.marks,
-              }
-            : {}),
-          ...base,
-        }),
+        body: JSON.stringify(requestBody),
       });
       const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+      console.log('[shareClient.acceptSuggestions] response /marks/accept-all', {
+        url,
+        status: response.status,
+        ok: response.ok,
+        payload: payload ? JSON.parse(JSON.stringify(payload)) as Record<string, unknown> : null,
+      });
       if (!response.ok) {
-        return this.buildRequestError(
-          response.status,
-          response.statusText,
-          this.readRequestId(response),
-          payload ?? {},
-        );
+        const requestError = this.buildRequestError(response.status, response.statusText, this.readRequestId(response), payload);
+        console.log('[shareClient.acceptSuggestions] error /marks/accept-all', {
+          url,
+          status: requestError.error.status,
+          code: requestError.error.code,
+          message: requestError.error.message,
+          requestId: requestError.error.requestId ?? null,
+          retryWithState: requestError.error.retryWithState ?? null,
+          details: requestError.error.details ?? null,
+        });
+        return requestError;
       }
+      logReviewWhitespaceClient('accept-all.response', {
+        slug: this.slug,
+        status: response.status,
+        ok: response.ok,
+        markdown: summarizeReviewWhitespaceMarkdown(
+          typeof payload?.markdown === 'string' ? payload.markdown : null,
+        ),
+        marks: summarizeReviewWhitespaceMarks(
+          payload?.marks && typeof payload.marks === 'object' && !Array.isArray(payload.marks)
+            ? payload.marks as Record<string, unknown>
+            : null,
+        ),
+        collab: payload?.collab && typeof payload.collab === 'object' && !Array.isArray(payload.collab)
+          ? payload.collab
+          : null,
+      });
       this.rememberObservedDocument(payload);
       this.rememberObservedMutationBase(payload);
       return this.parseShareMarkMutationResponse(payload);
@@ -944,6 +1007,8 @@ export class ShareClient {
       };
     }
     if (!this.isCollabSessionInfo(payload.session) || !payload.capabilities) return null;
+    this.rememberAccessEpoch(payload.session.accessEpoch);
+    this.rememberObservedMutationBase(payload as unknown as Record<string, unknown>);
     return payload as {
       session: CollabSessionInfo;
       capabilities: { canRead: boolean; canComment: boolean; canEdit: boolean };
@@ -1228,15 +1293,44 @@ export class ShareClient {
     if (!this.slug) return false;
 
     try {
-      const response = await fetch(`${this.getApiBase()}/documents/${this.slug}`, {
+      const url = `${this.getApiBase()}/documents/${this.slug}`;
+      const requestBody = { marks, actor, clientId: this.clientId };
+      console.log('[shareClient.pushMarks] PUT /documents', {
+        url,
+        actor,
+        keepalive: Boolean(options?.keepalive),
+        marks: summarizeReviewWhitespaceMarks(marks),
+      });
+      const response = await fetch(url, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           ...this.getShareAuthHeaders(),
         },
         keepalive: Boolean(options?.keepalive),
-        body: JSON.stringify({ marks, actor, clientId: this.clientId }),
+        body: JSON.stringify(requestBody),
       });
+      const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+      console.log('[shareClient.pushMarks] response /documents', {
+        url,
+        status: response.status,
+        ok: response.ok,
+        payload: payload ? JSON.parse(JSON.stringify(payload)) as Record<string, unknown> : null,
+      });
+      if (!response.ok) {
+        const requestError = this.buildRequestError(response.status, response.statusText, this.readRequestId(response), payload);
+        console.log('[shareClient.pushMarks] error /documents', {
+          url,
+          status: requestError.error.status,
+          code: requestError.error.code,
+          message: requestError.error.message,
+          requestId: requestError.error.requestId ?? null,
+          retryWithState: requestError.error.retryWithState ?? null,
+          details: requestError.error.details ?? null,
+        });
+      }
+      this.rememberObservedDocument(payload);
+      this.rememberObservedMutationBase(payload);
       return response.ok;
     } catch (error) {
       console.error('[ShareClient] Failed to push marks:', error);
@@ -1263,16 +1357,44 @@ export class ShareClient {
           allowLocalBaseToken: options.allowLocalKeepaliveBaseToken,
         })
         : { base: null, reusedObservedBase: false };
-      const response = await fetch(`${this.getApiBase()}/documents/${this.slug}`, {
+      const url = `${this.getApiBase()}/documents/${this.slug}`;
+      const requestBody = { markdown, marks, actor, clientId: this.clientId, ...keepaliveBase.base };
+      console.log('[shareClient.pushUpdate] PUT /documents', {
+        url,
+        actor,
+        keepalive: Boolean(options?.keepalive),
+        base: keepaliveBase.base ? JSON.parse(JSON.stringify(keepaliveBase.base)) as Record<string, unknown> : null,
+        markdown: summarizeReviewWhitespaceMarkdown(markdown),
+        marks: summarizeReviewWhitespaceMarks(marks),
+      });
+      const response = await fetch(url, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           ...this.getShareAuthHeaders(),
         },
         keepalive: Boolean(options?.keepalive),
-        body: JSON.stringify({ markdown, marks, actor, clientId: this.clientId, ...keepaliveBase.base }),
+        body: JSON.stringify(requestBody),
       });
       const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+      console.log('[shareClient.pushUpdate] response /documents', {
+        url,
+        status: response.status,
+        ok: response.ok,
+        payload: payload ? JSON.parse(JSON.stringify(payload)) as Record<string, unknown> : null,
+      });
+      if (!response.ok) {
+        const requestError = this.buildRequestError(response.status, response.statusText, this.readRequestId(response), payload);
+        console.log('[shareClient.pushUpdate] error /documents', {
+          url,
+          status: requestError.error.status,
+          code: requestError.error.code,
+          message: requestError.error.message,
+          requestId: requestError.error.requestId ?? null,
+          retryWithState: requestError.error.retryWithState ?? null,
+          details: requestError.error.details ?? null,
+        });
+      }
       this.rememberObservedDocument(payload);
       this.rememberObservedMutationBase(payload);
       if (response.ok && keepaliveBase.reusedObservedBase) {

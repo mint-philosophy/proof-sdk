@@ -65,6 +65,7 @@ import {
   getMarkMetadataForDisk,
   getMarkMetadataWithQuotes,
   mergePendingServerMarks,
+  buildReviewMutationSnapshotMarks,
   __debugDescribeDecorations,
   reply as replyMark,
   resolve as resolveMark,
@@ -2601,6 +2602,72 @@ test('mergePendingServerMarks drops stale local suggestion metadata when server 
   });
 
   assert(!merged.s1, 'Finalized server suggestions should evict stale local pending metadata');
+});
+
+test('buildReviewMutationSnapshotMarks drops stale authoritative pending suggestions that are no longer in the local review doc', () => {
+  const snapshotMarks = buildReviewMutationSnapshotMarks(
+    {
+      'm-charlie-delete': {
+        kind: 'delete',
+        by: 'human:test',
+        createdAt: '2026-03-30T00:00:00.000Z',
+        status: 'pending',
+        quote: 'charlie',
+        range: { from: 10, to: 17 },
+        startRel: 'char:10',
+        endRel: 'char:17',
+      },
+      'm-charlie-insert': {
+        kind: 'insert',
+        by: 'human:test',
+        createdAt: '2026-03-30T00:00:00.000Z',
+        status: 'pending',
+        content: 'C3',
+        quote: 'C3',
+        range: { from: 17, to: 19 },
+        startRel: 'char:17',
+        endRel: 'char:19',
+      },
+    },
+    {
+      'm-alpha-delete': {
+        kind: 'delete',
+        by: 'human:test',
+        createdAt: '2026-03-29T23:59:00.000Z',
+        status: 'pending',
+        quote: 'alpha',
+        range: { from: 6, to: 11 },
+        startRel: 'char:6',
+        endRel: 'char:11',
+      },
+      'm-alpha-insert': {
+        kind: 'insert',
+        by: 'human:test',
+        createdAt: '2026-03-29T23:59:00.000Z',
+        status: 'pending',
+        content: 'A1',
+        quote: 'A1',
+        range: { from: 11, to: 13 },
+        startRel: 'char:11',
+        endRel: 'char:13',
+      },
+      comment1: {
+        kind: 'comment',
+        by: 'human:test',
+        createdAt: '2026-03-29T23:59:30.000Z',
+        text: 'Keep this thread',
+        threadId: 'comment1',
+        thread: [],
+        resolved: false,
+      },
+    },
+  );
+
+  assert(!snapshotMarks['m-alpha-delete'], 'Stale authoritative delete suggestions should not be reintroduced into review mutation snapshots');
+  assert(!snapshotMarks['m-alpha-insert'], 'Stale authoritative insert suggestions should not be reintroduced into review mutation snapshots');
+  assert(snapshotMarks['m-charlie-delete'], 'Current local pending delete suggestions should remain in the review mutation snapshot');
+  assert(snapshotMarks['m-charlie-insert'], 'Current local pending insert suggestions should remain in the review mutation snapshot');
+  assert(snapshotMarks.comment1, 'Non-suggestion authoritative marks should still be preserved in the review mutation snapshot');
 });
 
 test('mergePendingServerMarks preserves locally resolved comments when tombstoned', () => {
@@ -5200,6 +5267,480 @@ test('acceptAll applies multiple replacements without duplicating characters', (
     'How an bot did what years of performance reviews could not',
     'acceptAll should not duplicate or corrupt surrounding characters',
   );
+});
+
+test('acceptAll materializes inline markdown insert suggestions without leaving raw syntax behind', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'inline*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'insert' },
+          by: { default: 'unknown' },
+          status: { default: 'pending' },
+          content: { default: null },
+          createdAt: { default: null },
+          updatedAt: { default: null },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      proofAuthored: {
+        attrs: {
+          by: { default: 'unknown' },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      strong: {
+        parseDOM: [{ tag: 'strong' }],
+        toDOM: () => ['strong', 0],
+      },
+    },
+  });
+
+  const markId = 'm-accept-all-inline-markdown';
+  const suggestionMark = schema.marks.proofSuggestion.create({
+    id: markId,
+    kind: 'insert',
+    by: 'human:test',
+  });
+
+  const initialDoc = schema.node('doc', null, [
+    schema.node('paragraph', null, [
+      schema.text('Before '),
+      schema.text('**bold text**', [suggestionMark]),
+      schema.text(' after'),
+    ]),
+  ]);
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema,
+    doc: initialDoc,
+    plugins: [marksStatePlugin],
+  });
+
+  state = state.apply(state.tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      [markId]: {
+        kind: 'insert' as const,
+        by: 'human:test',
+        createdAt: new Date('2026-03-30T00:00:00.000Z').toISOString(),
+        quote: '**bold text**',
+        content: '**bold text**',
+        status: 'pending' as const,
+      },
+    },
+  }));
+
+  const parser = (_markdown: string) => schema.node('doc', null, [
+    schema.node('paragraph', null, [
+      schema.text('bold text', [schema.marks.strong.create()]),
+    ]),
+  ]);
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  const acceptedCount = acceptAllMarks(view, parser as any);
+  assertEqual(acceptedCount, 1, 'acceptAll should accept the markdown insert suggestion');
+
+  const docText = state.doc.textBetween(0, state.doc.content.size, '\n', '\n');
+  assertEqual(docText, 'Before bold text after', 'acceptAll should materialize inline markdown once');
+  assert(!docText.includes('**'), 'acceptAll should not leave raw markdown syntax in the document text');
+
+  let hasStrong = false;
+  let hasSuggestion = false;
+  state.doc.descendants((node) => {
+    if (!node.isText) return true;
+    for (const mark of node.marks) {
+      if (mark.type.name === 'strong') hasStrong = true;
+      if (mark.type.name === 'proofSuggestion') hasSuggestion = true;
+    }
+    return true;
+  });
+
+  assert(hasStrong, 'acceptAll should keep the parsed strong formatting');
+  assert(!hasSuggestion, 'acceptAll should clear the suggestion mark after accepting inline markdown');
+});
+
+test('acceptAll preserves already-materialized inline markdown inserts instead of reinserting content', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'inline*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'insert' },
+          by: { default: 'unknown' },
+          status: { default: 'pending' },
+          content: { default: null },
+          createdAt: { default: null },
+          updatedAt: { default: null },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      proofAuthored: {
+        attrs: {
+          by: { default: 'unknown' },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      strong: {
+        parseDOM: [{ tag: 'strong' }],
+        toDOM: () => ['strong', 0],
+      },
+    },
+  });
+
+  const markId = 'm-accept-all-materialized-inline-markdown';
+  const suggestionMark = schema.marks.proofSuggestion.create({
+    id: markId,
+    kind: 'insert',
+    by: 'human:test',
+  });
+
+  const initialDoc = schema.node('doc', null, [
+    schema.node('paragraph', null, [
+      schema.text('Before '),
+      schema.text('bold text', [suggestionMark, schema.marks.strong.create()]),
+      schema.text(' after'),
+    ]),
+  ]);
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema,
+    doc: initialDoc,
+    plugins: [marksStatePlugin],
+  });
+
+  state = state.apply(state.tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      [markId]: {
+        kind: 'insert' as const,
+        by: 'human:test',
+        createdAt: new Date('2026-03-30T00:00:00.000Z').toISOString(),
+        quote: 'bold text',
+        content: '**bold text**',
+        status: 'pending' as const,
+      },
+    },
+  }));
+
+  const parser = (_markdown: string) => schema.node('doc', null, [
+    schema.node('paragraph', null, [
+      schema.text('bold text', [schema.marks.strong.create()]),
+    ]),
+  ]);
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  const acceptedCount = acceptAllMarks(view, parser as any);
+  assertEqual(acceptedCount, 1, 'acceptAll should accept the already-materialized markdown insert suggestion');
+
+  const docText = state.doc.textBetween(0, state.doc.content.size, '\n', '\n');
+  assertEqual(docText, 'Before bold text after', 'acceptAll should not duplicate already-materialized inline markdown text');
+
+  let strongTextCount = 0;
+  let hasSuggestion = false;
+  state.doc.descendants((node) => {
+    if (!node.isText) return true;
+    if (node.text === 'bold text' && node.marks.some((mark) => mark.type.name === 'strong')) {
+      strongTextCount += 1;
+    }
+    if (node.marks.some((mark) => mark.type.name === 'proofSuggestion')) {
+      hasSuggestion = true;
+    }
+    return true;
+  });
+
+  assertEqual(strongTextCount, 1, 'acceptAll should keep a single strong-formatted text run');
+  assert(!hasSuggestion, 'acceptAll should clear the suggestion mark after preserving materialized markdown');
+});
+
+test('acceptAll materializes anchor-based inline markdown insert suggestions at the insertion point', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'inline*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'insert' },
+          by: { default: 'unknown' },
+          status: { default: 'pending' },
+          content: { default: null },
+          createdAt: { default: null },
+          updatedAt: { default: null },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      proofAuthored: {
+        attrs: {
+          by: { default: 'unknown' },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      strong: {
+        parseDOM: [{ tag: 'strong' }],
+        toDOM: () => ['strong', 0],
+      },
+    },
+  });
+
+  const markId = 'm-accept-all-anchor-markdown';
+  const suggestionMark = schema.marks.proofSuggestion.create({
+    id: markId,
+    kind: 'insert',
+    by: 'human:test',
+  });
+
+  const initialDoc = schema.node('doc', null, [
+    schema.node('paragraph', null, [
+      schema.text('Before '),
+      schema.text('anchor', [suggestionMark]),
+      schema.text(' after'),
+    ]),
+  ]);
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema,
+    doc: initialDoc,
+    plugins: [marksStatePlugin],
+  });
+
+  state = state.apply(state.tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      [markId]: {
+        kind: 'insert' as const,
+        by: 'human:test',
+        createdAt: new Date('2026-03-30T00:00:00.000Z').toISOString(),
+        quote: 'anchor',
+        content: ' **bold text**',
+        status: 'pending' as const,
+      },
+    },
+  }));
+
+  const parser = (_markdown: string) => schema.node('doc', null, [
+    schema.node('paragraph', null, [
+      schema.text(' '),
+      schema.text('bold text', [schema.marks.strong.create()]),
+    ]),
+  ]);
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  const acceptedCount = acceptAllMarks(view, parser as any);
+  assertEqual(acceptedCount, 1, 'acceptAll should accept the anchor-based markdown insert suggestion');
+
+  const docText = state.doc.textBetween(0, state.doc.content.size, '\n', '\n');
+  assertEqual(docText, 'Before anchor bold text after', 'acceptAll should materialize anchor-based inline markdown exactly once');
+  assert(!docText.includes('**'), 'acceptAll should not leave raw markdown syntax for anchor-based inserts');
+
+  let hasStrong = false;
+  let hasSuggestion = false;
+  state.doc.descendants((node) => {
+    if (!node.isText) return true;
+    for (const mark of node.marks) {
+      if (mark.type.name === 'strong') hasStrong = true;
+      if (mark.type.name === 'proofSuggestion') hasSuggestion = true;
+    }
+    return true;
+  });
+
+  assert(hasStrong, 'acceptAll should materialize strong marks for anchor-based inline markdown inserts');
+  assert(!hasSuggestion, 'acceptAll should clear the anchor-based suggestion mark after accepting');
+});
+
+test('acceptAll clears fragmented delete suggestions spanning multiple text nodes', () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: 'block+' },
+      paragraph: { content: 'inline*', group: 'block' },
+      text: { group: 'inline' },
+    },
+    marks: {
+      proofSuggestion: {
+        attrs: {
+          id: { default: null },
+          kind: { default: 'delete' },
+          by: { default: 'unknown' },
+          status: { default: 'pending' },
+          content: { default: null },
+          createdAt: { default: null },
+          updatedAt: { default: null },
+        },
+        inclusive: false,
+        spanning: true,
+      },
+      em: {
+        parseDOM: [{ tag: 'em' }],
+        toDOM: () => ['em', 0],
+      },
+    },
+  });
+
+  const deleteId = 'm-accept-all-fragmented-delete';
+  const deleteMark = schema.marks.proofSuggestion.create({
+    id: deleteId,
+    kind: 'delete',
+    by: 'human:test',
+  });
+
+  const initialDoc = schema.node('doc', null, [
+    schema.node('paragraph', null, [
+      schema.text('Keep '),
+      schema.text('Delete this', [deleteMark]),
+      schema.text(' sentence', [deleteMark, schema.marks.em.create()]),
+      schema.text(' now', [deleteMark]),
+      schema.text('.'),
+    ]),
+  ]);
+
+  const marksStatePlugin = new Plugin({
+    key: marksPluginKey,
+    state: {
+      init: () => ({ metadata: {}, activeMarkId: null }),
+      apply: (tr, value) => {
+        const meta = tr.getMeta(marksPluginKey);
+        if (meta?.type === 'SET_METADATA') {
+          return { ...value, metadata: meta.metadata };
+        }
+        if (meta?.type === 'SET_ACTIVE') {
+          return { ...value, activeMarkId: meta.markId ?? null };
+        }
+        return value;
+      },
+    },
+  });
+
+  let state = EditorState.create({
+    schema,
+    doc: initialDoc,
+    plugins: [marksStatePlugin],
+  });
+
+  state = state.apply(state.tr.setMeta(marksPluginKey, {
+    type: 'SET_METADATA',
+    metadata: {
+      [deleteId]: {
+        kind: 'delete' as const,
+        by: 'human:test',
+        createdAt: new Date('2026-03-30T00:00:00.000Z').toISOString(),
+        quote: 'Delete this sentence now',
+        status: 'pending' as const,
+      },
+    },
+  }));
+
+  const view = {
+    get state() {
+      return state;
+    },
+    dispatch(tr: any) {
+      state = state.apply(tr);
+    },
+  } as any;
+
+  const acceptedCount = acceptAllMarks(view);
+  assertEqual(acceptedCount, 1, 'acceptAll should accept the fragmented delete suggestion');
+
+  const docText = state.doc.textBetween(0, state.doc.content.size, '\n', '\n');
+  assertEqual(docText, 'Keep .', 'acceptAll should remove the full fragmented delete range');
+
+  const remainingSuggestions = getPendingSuggestions(getMarks(state));
+  assertEqual(remainingSuggestions.length, 0, 'acceptAll should not leave a fragmented delete suggestion pending');
 });
 
 // ============================================================================

@@ -106,15 +106,13 @@ function run(): void {
       && editorSource.includes('private getAuthoritativeServerMarksForReview(): Record<string, StoredMark> {')
       && editorSource.includes('const localCanonical = buildCanonicalShareMarkMetadata(view.state, localMetadata);')
       && editorSource.includes('const authoritativeServerMarks = this.getAuthoritativeServerMarksForReview();')
-      && editorSource.includes('return canonicalizeStoredMarks({')
-      && editorSource.includes('...localCanonical,')
-      && editorSource.includes('...authoritativeServerMarks,')
+      && editorSource.includes('return buildReviewMutationSnapshotMarks(localCanonical, authoritativeServerMarks);')
       && editorSource.includes('if (Object.keys(authoritativeServerMarks).length > 0) {')
       && editorSource.includes('return authoritativeServerMarks;')
       && buildShareBatchSuggestionSnapshotBlock.includes('const metadata = this.buildPersistableShareReviewSnapshotMarks(view);')
       && buildShareBatchSuggestionSnapshotBlock.includes('marks: metadata as Record<string, unknown>,')
       && !buildShareBatchSuggestionSnapshotBlock.includes('buildCanonicalShareMarkMetadata(view.state, metadata)'),
-    'Expected persisted review mutation snapshots to send the persistable merged mark set so fresh local pending marks survive post-reconnect batch review requests, while still keeping an authoritative-only helper for server-driven mark resolution',
+    'Expected persisted review mutation snapshots to prefer live local pending mark metadata over stale authoritative cache entries while still keeping an authoritative-only helper for server-driven mark resolution',
   );
   assert(
     flushShareReviewMutationStateBlock.includes('if (this.shareMarksFlushTimer !== null) {')
@@ -127,7 +125,7 @@ function run(): void {
       && flushShareReviewMutationStateBlock.includes('await this.forcePersistCurrentShareReviewState(expectedPendingIds)')
       && flushShareReviewMutationStateBlock.includes("this.traceShareReview('mutation.preflush-failed'")
       && flushShareReviewMutationStateBlock.includes('return false;'),
-    'Expected persisted review mutations to cancel any pending async marks-only flush, verify that pending marks and markdown are present in authoritative share state, and fall back to a full pushUpdate before accept/reject proceeds',
+    'Expected persisted review mutations to cancel any pending async marks-only flush, verify that pending marks and markdown are present in authoritative share state, and fall back to a forced persist before accept/reject proceeds',
   );
   assert(
     markAcceptAllBlock.includes('const initialIds = this.getSortedPendingSuggestionIdsForShareReview();')
@@ -136,16 +134,22 @@ function run(): void {
       && markAcceptAllBlock.includes('if (!ready) {')
       && markAcceptAllBlock.includes('const snapshot = this.buildShareBatchSuggestionSnapshot();')
       && markAcceptAllBlock.includes('const authoritativeIds = this.getAuthoritativePendingSuggestionIdsForShareReview();')
+      && markAcceptAllBlock.includes('const snapshotPendingIds = snapshot')
+      && markAcceptAllBlock.includes("? this.getSortedPendingSuggestionIdsFromStoredMarks(snapshot.marks as Record<string, StoredMark>)")
       && editorSource.includes('private getRequestedShareReviewBatchMarkIds(localPendingIds: string[], authoritativePendingIds: string[]): string[] {')
-      && markAcceptAllBlock.includes('const requestedIds = this.getRequestedShareReviewBatchMarkIds(initialIds, authoritativeIds);')
+      && markAcceptAllBlock.includes('const requestedIds = snapshotPendingIds.length > 0')
+      && markAcceptAllBlock.includes('? snapshotPendingIds')
+      && markAcceptAllBlock.includes(': this.getRequestedShareReviewBatchMarkIds(initialIds, authoritativeIds);')
       && markAcceptAllBlock.includes('const result = await shareClient.acceptSuggestions(requestedIds, actor, undefined, snapshot ?? undefined);')
       && markAcceptAllBlock.includes('const success = await this.applyShareMutationDocumentResult(result, {')
       && markAcceptAllBlock.includes('skipReconnectTemplateSeed: true,')
       && markAcceptAllBlock.includes('preserveEditorStateDuringReconnect: true,')
       && markAcceptAllBlock.includes("tombstoneResolvedMarkIds(requestedIds, { reason: 'deleted' });")
+      && markAcceptAllBlock.includes('await this.waitForStableShareReviewMutationState();')
+      && !markAcceptAllBlock.includes('ensureShareReviewBatchMutationAppliedLocally(')
       && !markAcceptAllBlock.includes('await this.markAcceptPersisted(suggestionId);')
       && !markAcceptAllBlock.includes('await shareClient.acceptSuggestion(suggestionId, actor);'),
-    'Expected share-mode markAcceptAll to resolve stale batch targets against the post-flush authoritative mark set and perform a single final authoritative apply/reconnect without replaying the reconnect template over accepted content',
+    'Expected share-mode markAcceptAll to resolve stale batch targets against the post-flush authoritative mark set and perform a single final authoritative apply/reconnect without any post-settle local verification replay',
   );
   const markRejectAllBlock = sliceBetween(editorSource, '  markRejectAll(): number {', '\n  /**\n   * Delete a mark by ID\n   */');
   assert(
@@ -158,26 +162,31 @@ function run(): void {
       && markRejectAllBlock.includes('const snapshot = this.buildShareBatchSuggestionSnapshot();')
       && markRejectAllBlock.includes('const result = await shareClient.rejectSuggestion(suggestionId, actor, undefined, snapshot ?? undefined);')
       && markRejectAllBlock.includes('pendingIds = this.getSortedPendingSuggestionIdsFromStoredMarks(serverMarks)')
-      && markRejectAllBlock.includes('const success = await this.applyShareMutationDocumentResult(latestSuccessfulResult);')
+      && markRejectAllBlock.includes('const success = await this.applyShareMutationDocumentResult(latestSuccessfulResult, {')
+      && markRejectAllBlock.includes('lockLocalEditsUntilStable: true,')
       && markRejectAllBlock.includes("tombstoneResolvedMarkIds(rejectedIds, { reason: 'deleted' });")
       && !markRejectAllBlock.includes('await this.markRejectPersisted(suggestionId);'),
     'Expected share-mode markRejectAll to batch persisted rejects server-side and perform a single final authoritative apply/reconnect',
   );
 
   const markAcceptPersistedBlock = sliceBetween(editorSource, '  async markAcceptPersisted(markId: string): Promise<boolean> {', '\n  /**\n   * Reject a suggestion without changing the document\n   */');
+  const markAcceptManyPersistedBlock = sliceBetween(editorSource, '  async markAcceptManyPersisted(markIds: string[]): Promise<boolean> {', '\n  /**\n   * Reject a suggestion without changing the document\n   */');
   assert(
-    markAcceptPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
+    markAcceptPersistedBlock.includes('return this.markAcceptManyPersisted([markId]);')
+      && editorSource.includes('markAcceptManyPersisted(markIds: string[]): Promise<boolean>;')
       && editorSource.includes('private resolveShareReviewMutationRequestMarkId(markId: string, sourceMark: StoredMark | null): string {')
       && editorSource.includes('return this.resolveAuthoritativeShareReviewMarkId(markId, sourceMark);')
-      && markAcceptPersistedBlock.includes('const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);')
-      && markAcceptPersistedBlock.includes('const result = await shareClient.acceptSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);')
-      && markAcceptPersistedBlock.includes('const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));')
-      && markAcceptPersistedBlock.includes("tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });")
-      && editorSource.includes('private getEquivalentPendingShareReviewMarkIds(sourceMark: StoredMark | null): string[] {')
-      && editorSource.includes('this.replaceAuthoritativeServerMarks(incomingMarks);')
-      && markAcceptPersistedBlock.includes('const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;')
-      && markAcceptPersistedBlock.includes('success = await this.ensureShareReviewMutationAppliedLocally('),
-    'Expected persisted single-mark accept to resolve the request id against a dedicated authoritative server mark set, not the merged live mark cache, then tombstone the resolved ids and verify the accepted suggestion is actually gone locally',
+      && markAcceptManyPersistedBlock.includes('const requestedIds = Array.from(new Set(')
+      && markAcceptManyPersistedBlock.includes('this.resolveShareReviewMutationRequestMarkId(markId, this.getCurrentShareReviewStoredMark(markId))')
+      && markAcceptManyPersistedBlock.includes('const result = await shareClient.acceptSuggestions(requestedIds, actor, undefined, snapshot ?? undefined);')
+      && markAcceptManyPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([...uniqueMarkIds, ...requestedIds])), { reason: 'deleted' });")
+      && markAcceptManyPersistedBlock.includes('const success = await this.applyShareMutationDocumentResult(result, {')
+      && markAcceptManyPersistedBlock.includes('skipReconnectTemplateSeed: true,')
+      && markAcceptManyPersistedBlock.includes('preserveEditorStateDuringReconnect: true,')
+      && markAcceptManyPersistedBlock.includes("localReviewAction: 'accept',")
+      && markAcceptManyPersistedBlock.includes('localReviewMarkIds: uniqueMarkIds,')
+      && !markAcceptManyPersistedBlock.includes("this.tryResolveShareReviewMutationLocallyMany(uniqueMarkIds, 'accept', result)"),
+    'Expected persisted accept to route through the batch share mutation path, remap each requested mark id against authoritative pending marks, and pass the local accept ids into applyShareMutationDocumentResult for the history-safe canonical fast path',
   );
 
   const markRejectPersistedBlock = sliceBetween(editorSource, '  async markRejectPersisted(markId: string): Promise<boolean> {', '\n  private getSortedPendingSuggestionIdsForShareReview(): string[] {');
@@ -185,8 +194,13 @@ function run(): void {
     markRejectPersistedBlock.includes('const sourceMark = this.getCurrentShareReviewStoredMark(markId);')
       && markRejectPersistedBlock.includes('const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);')
       && markRejectPersistedBlock.includes('const result = await shareClient.rejectSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);')
-      && markRejectPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });"),
-    'Expected persisted single-mark reject to resolve the request id against the authoritative pending server marks before calling the share mutation route',
+      && markRejectPersistedBlock.includes("tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });")
+      && markRejectPersistedBlock.includes("const success = await this.applyShareMutationDocumentResult(result, {")
+      && markRejectPersistedBlock.includes('skipReconnectTemplateSeed: true,')
+      && markRejectPersistedBlock.includes('preserveEditorStateDuringReconnect: true,')
+      && markRejectPersistedBlock.includes('lockLocalEditsUntilStable: true,')
+      && !markRejectPersistedBlock.includes("this.tryResolveShareReviewMutationLocally(markId, 'reject', result)"),
+    'Expected persisted single-mark reject to resolve the request id against the authoritative pending server marks and then apply the canonical reject result through the full reconnect path',
   );
 
   const handleMarksChangeBlock = sliceBetween(editorSource, '  private handleMarksChange(', '\n  private serializeMarkdown(');
@@ -447,8 +461,11 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('const finalHasSuggestionMark = finalNodes.some((node) =>')
       && setupSuggestionsInterceptorBlock.includes('const settledRepairTr = buildNativeTextInputFollowupWrapTransaction(')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.nativeTextInputSettledRepair]', {")
+      && !editorSource.includes('buildHistorySuggestionMetadataReconciliationTransaction,')
+      && !setupSuggestionsInterceptorBlock.includes('historySuggestionMetadataReconcile')
+      && !setupSuggestionsInterceptorBlock.includes('const historyReconcileTr = buildHistorySuggestionMetadataReconciliationTransaction(')
       && !setupSuggestionsInterceptorBlock.includes('queueMicrotask(() => {'),
-    'Expected the suggestions interceptor to annotate the matched native typed-insert transaction directly, inspect the settled post-dispatch state, and immediately rewrap the exact native insert range if the full dispatch cycle strips the live suggestion mark',
+    'Expected the suggestions interceptor to annotate the matched native typed-insert transaction directly, inspect the settled post-dispatch state, immediately rewrap the exact native insert range if the full dispatch cycle strips the live suggestion mark, and leave history-undo reconciliation to the suggestions appendTransaction path instead of dispatching a second editor-level cleanup transaction',
   );
   const preserveInsertCoalescingBlock = sliceBetween(
     editorSource,
@@ -500,7 +517,6 @@ function run(): void {
       && setupSuggestionsInterceptorBlock.includes('if (isSystemTrackChangesSuppressed) {')
       && setupSuggestionsInterceptorBlock.includes("dispatchWithRevision(tr, 'systemTrackChangesSuppressedPassthrough');")
       && setupSuggestionsInterceptorBlock.includes('if (Boolean(tr?.docChanged) && shouldSuppressHandledTextInputEcho(beforeState, tr)) {')
-      && setupSuggestionsInterceptorBlock.includes('if (isUndoHistoryTransaction(tr)) {')
       && setupSuggestionsInterceptorBlock.includes("console.log('[tc.dispatch.suppressHandledTextInputEcho]', {"),
     'Expected the suggestions interceptor to pass through collab/template system transactions, treat recent raw Yjs plain-text self-echoes as remote for repair, honor the latched desired Track Changes state through share/collab resets, suppress immediate handled-input duplicate echoes, and now instrument the live dispatch/updateState runtime around the native typed-input lane',
   );
@@ -585,8 +601,15 @@ function run(): void {
       && rejectRouteBlock.includes("executeDocumentOperationAsync(slug, 'POST', '/marks/reject', effectivePayload, effectiveMutationContext)")
       && rejectRouteBlock.includes('if (!keepRewriteLockCooldown) {')
       && rejectRouteBlock.includes('releaseRewriteLockImmediately(slug);')
-      && rejectRouteBlock.includes("details: 'suggestion.reject'"),
-    'Expected /marks/reject to remap stale single-mark targets onto the current snapshot before overlaying it, and to hold the rewrite lock long enough to block stale collab writes during share review rejection',
+      && rejectRouteBlock.includes("status: 'pending'")
+      && rejectRouteBlock.includes("source: 'marks.reject'")
+      && rejectRouteBlock.includes('verify: true')
+      && rejectRouteBlock.includes('fallbackBarrier: true')
+      && rejectRouteBlock.includes("details: 'suggestion.reject'")
+      && rejectRouteBlock.includes('storeIdempotentMutationResult(replay, mutationRoute, slug, 202, result.body);')
+      && rejectRouteBlock.includes('sendMutationResponse(res, 202, result.body, { route: mutationRoute, slug });')
+      && rejectRouteBlock.includes('await invalidateLoadedCollabDocumentAndWait(slug);'),
+    'Expected /marks/reject to remap stale single-mark targets onto the current snapshot, return pending collab verification like accept, and hold the rewrite lock until deferred reject verification can invalidate stale live rooms',
   );
 
   const asyncFallbackAcceptBlock = sliceBetween(

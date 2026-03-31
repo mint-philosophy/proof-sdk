@@ -964,6 +964,42 @@ function run(): void {
     assertEqual(wordDeleteMarks.length, 1, 'Option+Delete should become one delete suggestion');
     assertEqual(wordDeleteMarks[0]?.quote, 'beta', 'Option+Delete should preserve the deleted word');
 
+    state = createState({ from: 7, to: 7 });
+    const forwardDeletedChars: string[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const forwardDeleteRange = __debugResolveTrackedDeleteRange(state, 'Delete');
+      assert(forwardDeleteRange, 'Expected Forward Delete to resolve a tracked delete range');
+      forwardDeletedChars.push(state.doc.textBetween(forwardDeleteRange!.from, forwardDeleteRange!.to, '', ''));
+      state = state.apply(
+        wrapTransactionForSuggestions(
+          state.tr.delete(forwardDeleteRange!.from, forwardDeleteRange!.to),
+          state,
+          true,
+        ),
+      );
+    }
+    const repeatedForwardDeleteMarks = getMarks(state).filter((mark) => mark.kind === 'delete');
+    assertEqual(
+      forwardDeletedChars.join(''),
+      'beta',
+      'Repeated Forward Delete should advance across the word instead of re-targeting already deleted suggestion text',
+    );
+    assertEqual(
+      state.doc.textContent,
+      'Alpha beta gamma.',
+      'Repeated Forward Delete should keep the deleted characters visible under delete suggestions instead of removing them from the document',
+    );
+    assertEqual(
+      repeatedForwardDeleteMarks.length,
+      4,
+      'Repeated Forward Delete should create one pending delete suggestion per character when deleting through plain text one char at a time',
+    );
+    assertEqual(
+      repeatedForwardDeleteMarks.map((mark) => mark.quote).join(''),
+      'beta',
+      'Repeated Forward Delete should preserve the original deleted text across the generated delete suggestions',
+    );
+
     state = createState({ from: 11, to: 11 });
     const lineDeleteRange = __debugResolveTrackedDeleteRange(state, 'Backspace', { metaKey: true });
     assertEqual(lineDeleteRange?.from, 1, 'Cmd+Delete should resolve to the start of the textblock');

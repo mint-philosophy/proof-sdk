@@ -24,6 +24,7 @@ import {
   getLoadedCollabFragmentTextHash,
   hasAgentPresenceInLoadedCollab,
   isCanonicalReadMutationReady,
+  isCollabInvalidationActive,
   invalidateLoadedCollabDocument,
   removeAgentPresenceFromLoadedCollab,
   invalidateLoadedCollabDocumentAndWait,
@@ -47,7 +48,17 @@ import {
   type AsyncDocumentMutationContext,
   type EngineExecutionResult,
 } from './document-engine.js';
-import { rewriteMarkMutationPayloadSnapshotTargets } from './mark-mutation-snapshot-targets.js';
+import {
+  resolveEquivalentBatchMutationPayloadMarkIds,
+  rewriteMarkMutationPayloadSnapshotTargets,
+} from './mark-mutation-snapshot-targets.js';
+import { normalizeStoredMarksAgainstMarkdown } from './mark-anchor-normalization.js';
+import {
+  logReviewWhitespace,
+  shouldDebugReviewWhitespace,
+  summarizeReviewWhitespaceMarkdown,
+  summarizeReviewWhitespaceMarks,
+} from './review-whitespace-debug.js';
 import {
   recordAgentMutation,
   recordCollabRouteLatency,
@@ -403,6 +414,60 @@ function normalizeBatchMutationSnapshotMarkdown(markdown: string): string {
   );
 }
 
+function parseBatchMutationContextMarks(value: unknown): Record<string, StoredMark> {
+  if (isRecord(value)) {
+    return canonicalizeStoredMarks(value as Record<string, StoredMark>);
+  }
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isRecord(parsed)
+      ? canonicalizeStoredMarks(parsed as Record<string, StoredMark>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function buildBatchMutationSnapshotBaselineVisible(
+  markdown: string,
+  marks: Record<string, StoredMark>,
+  shouldRemoveMark: (markId: string, mark: StoredMark) => boolean,
+): string | null {
+  const visibleMarkdown = normalizeBatchMutationSnapshotMarkdown(markdown);
+  const normalizedMarks = normalizeStoredMarksAgainstMarkdown(
+    markdown,
+    canonicalizeStoredMarks(marks),
+  );
+  const removals = Object.entries(normalizedMarks)
+    .filter(([markId, mark]) => shouldRemoveMark(markId, mark))
+    .map(([, mark]) => {
+      const from = typeof mark.range?.from === 'number' && Number.isFinite(mark.range.from)
+        ? Math.max(0, Math.trunc(mark.range.from))
+        : -1;
+      const to = typeof mark.range?.to === 'number' && Number.isFinite(mark.range.to)
+        ? Math.max(0, Math.trunc(mark.range.to))
+        : -1;
+      return { from, to };
+    })
+    .filter((range) => range.from >= 0 && range.to > range.from)
+    .sort((left, right) => right.from - left.from);
+  if (removals.length === 0) return null;
+
+  let nextVisibleMarkdown = visibleMarkdown;
+  let removedAny = false;
+  for (const removal of removals) {
+    const from = Math.min(removal.from, nextVisibleMarkdown.length);
+    const to = Math.min(removal.to, nextVisibleMarkdown.length);
+    if (to <= from) continue;
+    nextVisibleMarkdown = `${nextVisibleMarkdown.slice(0, from)}${nextVisibleMarkdown.slice(to)}`;
+    removedAny = true;
+  }
+  return removedAny ? canonicalizeVisibleTextBlockSeparators(nextVisibleMarkdown) : null;
+}
+
 function overlayMarkMutationPayloadSnapshot(
   context: AsyncDocumentMutationContext,
   payload: Record<string, unknown>,
@@ -413,24 +478,119 @@ function overlayMarkMutationPayloadSnapshot(
       ? payload.content
       : null;
   const snapshotMarks = isRecord(payload.marks)
-    ? canonicalizeStoredMarks(payload.marks as Record<string, StoredMark>)
+    ? normalizeStoredMarksAgainstMarkdown(
+      snapshotMarkdown ?? '',
+      canonicalizeStoredMarks(payload.marks as Record<string, StoredMark>),
+      'agent-routes.overlay.snapshot',
+    )
     : null;
-  if (!snapshotMarkdown || !snapshotMarks) return context;
+  const debugEnabled = shouldDebugReviewWhitespace();
+  if (debugEnabled) {
+    logReviewWhitespace('agent-routes.overlay', 'received', {
+      preserveMutationBaseDocument: context.preserveMutationBaseDocument ?? false,
+      payloadMarkIds: Array.isArray(payload.markIds) ? payload.markIds : null,
+      payloadMarkId: typeof payload.markId === 'string' ? payload.markId : null,
+      snapshotMarkdown: summarizeReviewWhitespaceMarkdown(snapshotMarkdown),
+      snapshotMarks: summarizeReviewWhitespaceMarks(snapshotMarks),
+      authoritativeMarkdown: summarizeReviewWhitespaceMarkdown(
+        typeof context.mutationBase?.markdown === 'string' ? context.mutationBase.markdown : context.doc.markdown,
+      ),
+    });
+  }
+  if (!snapshotMarkdown || !snapshotMarks) {
+    if (debugEnabled) {
+      logReviewWhitespace('agent-routes.overlay', 'skipped-missing-snapshot', {
+        hasSnapshotMarkdown: Boolean(snapshotMarkdown),
+        hasSnapshotMarks: Boolean(snapshotMarks),
+      });
+    }
+    return context;
+  }
 
   const requestedIds = Array.isArray(payload.markIds)
     ? payload.markIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim())
     : (typeof payload.markId === 'string' && payload.markId.trim().length > 0
       ? [payload.markId.trim()]
       : []);
-  if (requestedIds.some((markId) => !Object.prototype.hasOwnProperty.call(snapshotMarks, markId))) {
+  const availableRequestedIds = requestedIds.filter((markId) => Object.prototype.hasOwnProperty.call(snapshotMarks, markId));
+  if (requestedIds.length > 0 && availableRequestedIds.length === 0) {
+    if (debugEnabled) {
+      logReviewWhitespace('agent-routes.overlay', 'skipped-missing-requested-mark', {
+        requestedIds,
+        snapshotMarks: summarizeReviewWhitespaceMarks(snapshotMarks),
+      });
+    }
     return context;
   }
 
-  const authoritativeVisible = normalizeBatchMutationSnapshotMarkdown(
-    typeof context.mutationBase?.markdown === 'string' ? context.mutationBase.markdown : context.doc.markdown,
+  const authoritativeMarks = parseBatchMutationContextMarks(
+    context.mutationBase?.marks ?? context.doc.marks,
   );
+  const authoritativeMarkdown = typeof context.mutationBase?.markdown === 'string'
+    ? context.mutationBase.markdown
+    : context.doc.markdown;
+  const authoritativeVisible = normalizeBatchMutationSnapshotMarkdown(authoritativeMarkdown);
   const snapshotVisible = normalizeBatchMutationSnapshotMarkdown(snapshotMarkdown);
-  if (authoritativeVisible !== snapshotVisible) {
+  if (debugEnabled && availableRequestedIds.length !== requestedIds.length) {
+    logReviewWhitespace('agent-routes.overlay', 'ignored-missing-requested-marks', {
+      requestedIds,
+      availableRequestedIds,
+      snapshotMarks: summarizeReviewWhitespaceMarks(snapshotMarks),
+    });
+  }
+
+  const requestedIdSet = new Set(availableRequestedIds);
+  const hasAuthoritativeMark = (markId: string): boolean => Object.prototype.hasOwnProperty.call(authoritativeMarks, markId);
+  const hasSnapshotMark = (markId: string): boolean => Object.prototype.hasOwnProperty.call(snapshotMarks, markId);
+  const snapshotRequestedInsertBaselineVisible = buildBatchMutationSnapshotBaselineVisible(
+    snapshotMarkdown,
+    snapshotMarks,
+    (markId, mark) => mark.kind === 'insert' && requestedIdSet.has(markId) && !hasAuthoritativeMark(markId),
+  );
+  const authoritativeResolvedInsertBaselineVisible = buildBatchMutationSnapshotBaselineVisible(
+    authoritativeMarkdown,
+    authoritativeMarks,
+    (markId, mark) => mark.kind === 'insert' && !requestedIdSet.has(markId) && !hasSnapshotMark(markId),
+  );
+  const authoritativeResolvedDeleteBaselineVisible = buildBatchMutationSnapshotBaselineVisible(
+    authoritativeMarkdown,
+    authoritativeMarks,
+    (markId, mark) => mark.kind === 'delete' && !requestedIdSet.has(markId) && !hasSnapshotMark(markId),
+  );
+  const authoritativeResolvedSuggestionBaselineVisible = buildBatchMutationSnapshotBaselineVisible(
+    authoritativeMarkdown,
+    authoritativeMarks,
+    (markId, mark) => (
+      (mark.kind === 'insert' || mark.kind === 'delete')
+      && !requestedIdSet.has(markId)
+      && !hasSnapshotMark(markId)
+    ),
+  );
+  const snapshotBaselineCandidates = [
+    snapshotVisible,
+    snapshotRequestedInsertBaselineVisible,
+  ].filter((candidate): candidate is string => typeof candidate === 'string');
+  const authoritativeBaselineCandidates = [
+    authoritativeVisible,
+    authoritativeResolvedInsertBaselineVisible,
+    authoritativeResolvedDeleteBaselineVisible,
+    authoritativeResolvedSuggestionBaselineVisible,
+  ].filter((candidate): candidate is string => typeof candidate === 'string');
+  const canApplySnapshotOverlay = snapshotBaselineCandidates.some(
+    (snapshotCandidate) => authoritativeBaselineCandidates.includes(snapshotCandidate),
+  );
+  if (!canApplySnapshotOverlay) {
+    if (debugEnabled) {
+      logReviewWhitespace('agent-routes.overlay', 'skipped-visible-mismatch', {
+        requestedIds,
+        authoritativeVisible: summarizeReviewWhitespaceMarkdown(authoritativeVisible),
+        snapshotVisible: summarizeReviewWhitespaceMarkdown(snapshotVisible),
+        snapshotRequestedInsertBaselineVisible: summarizeReviewWhitespaceMarkdown(snapshotRequestedInsertBaselineVisible),
+        authoritativeResolvedInsertBaselineVisible: summarizeReviewWhitespaceMarkdown(authoritativeResolvedInsertBaselineVisible),
+        authoritativeResolvedDeleteBaselineVisible: summarizeReviewWhitespaceMarkdown(authoritativeResolvedDeleteBaselineVisible),
+        authoritativeResolvedSuggestionBaselineVisible: summarizeReviewWhitespaceMarkdown(authoritativeResolvedSuggestionBaselineVisible),
+      });
+    }
     return context;
   }
 
@@ -441,6 +601,24 @@ function overlayMarkMutationPayloadSnapshot(
         marks: snapshotMarks as Record<string, unknown>,
       }
     : null;
+
+  if (debugEnabled) {
+    logReviewWhitespace(
+      'agent-routes.overlay',
+      authoritativeVisible === snapshotVisible ? 'applied' : 'applied-baseline-fallback',
+      {
+        requestedIds,
+        snapshotMarkdown: summarizeReviewWhitespaceMarkdown(snapshotMarkdown),
+        snapshotMarks: summarizeReviewWhitespaceMarks(snapshotMarks),
+        authoritativeVisible: summarizeReviewWhitespaceMarkdown(authoritativeVisible),
+        snapshotVisible: summarizeReviewWhitespaceMarkdown(snapshotVisible),
+        snapshotRequestedInsertBaselineVisible: summarizeReviewWhitespaceMarkdown(snapshotRequestedInsertBaselineVisible),
+        authoritativeResolvedInsertBaselineVisible: summarizeReviewWhitespaceMarkdown(authoritativeResolvedInsertBaselineVisible),
+        authoritativeResolvedDeleteBaselineVisible: summarizeReviewWhitespaceMarkdown(authoritativeResolvedDeleteBaselineVisible),
+        authoritativeResolvedSuggestionBaselineVisible: summarizeReviewWhitespaceMarkdown(authoritativeResolvedSuggestionBaselineVisible),
+      },
+    );
+  }
 
   return {
     ...context,
@@ -652,13 +830,20 @@ function hasProjectedMarkFallback(
     ? payload.markId.trim()
     : null;
   if (markId) {
-    return Object.prototype.hasOwnProperty.call(mutationBase.marks, markId);
+    if (Object.prototype.hasOwnProperty.call(mutationBase.marks, markId)) return true;
+    const rewrittenPayload = rewriteMarkMutationPayloadSnapshotTargets(payload, mutationBase.marks);
+    const rewrittenMarkId = typeof rewrittenPayload.markId === 'string' && rewrittenPayload.markId.trim().length > 0
+      ? rewrittenPayload.markId.trim()
+      : null;
+    return Boolean(rewrittenMarkId && Object.prototype.hasOwnProperty.call(mutationBase.marks, rewrittenMarkId));
   }
   const markIds = Array.isArray(payload.markIds)
     ? payload.markIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0).map((id) => id.trim())
     : [];
   if (markIds.length === 0) return false;
-  return markIds.every((id) => Object.prototype.hasOwnProperty.call(mutationBase.marks, id));
+  if (markIds.every((id) => Object.prototype.hasOwnProperty.call(mutationBase.marks, id))) return true;
+  const resolvedEquivalentMarkIds = resolveEquivalentBatchMutationPayloadMarkIds(payload, mutationBase.marks);
+  return resolvedEquivalentMarkIds.length === markIds.length;
 }
 
 function deriveAgentNameFromId(id: string): string {
@@ -1364,8 +1549,9 @@ function notifyCollabMutation(
         return { confirmed: false, reason: 'missing_document' };
       }
 
-      const targetMarkdown = typeof doc.markdown === 'string' ? doc.markdown : '';
-      const targetMarks = parseCanonicalMarks(doc.marks);
+	      const targetMarkdown = typeof doc.markdown === 'string' ? doc.markdown : '';
+	      const targetMarks = parseCanonicalMarks(doc.marks);
+	      const targetMarksKey = stableStringify(targetMarks);
 
       let verifiedStatus: CollabMutationStatus = {
         confirmed: true,
@@ -1424,6 +1610,7 @@ function notifyCollabMutation(
           const canonicalConfirmed = authoritative.confirmed;
           const canonicalExpectedHash = authoritative.expectedHash;
           const canonicalObservedHash = authoritative.observedHash;
+          const invalidationExpected = options?.apply === false && isCollabInvalidationActive(slug);
 
           if (confirmed && !canonicalConfirmed) {
             confirmed = false;
@@ -1441,6 +1628,15 @@ function notifyCollabMutation(
             confirmed = true;
           } else if (!canonicalConfirmed && authoritative.reason) {
             reason = authoritative.reason;
+          }
+
+          if (
+            !confirmed
+            && invalidationExpected
+            && canonicalConfirmed
+            && (reason === 'no_live_doc' || reason === 'live_doc_unavailable')
+          ) {
+            reason = 'reconnect_pending';
           }
 
           if (options?.strictLiveDoc && reason === 'no_live_doc') {
@@ -1537,7 +1733,30 @@ function notifyCollabMutation(
           });
         }
 
-        if (!confirmed && options?.fallbackBarrier) {
+	        const latestCanonical = getDocumentBySlug(slug);
+	        const latestCanonicalMarks = latestCanonical ? parseCanonicalMarks(latestCanonical.marks) : null;
+	        const targetSupersededByNewerCanonical = Boolean(
+	          latestCanonical
+	          && (
+	            latestCanonical.markdown !== targetMarkdown
+	            || stableStringify(latestCanonicalMarks ?? {}) !== targetMarksKey
+	          ),
+	        );
+	        if (targetSupersededByNewerCanonical) {
+	          return {
+	            confirmed: false,
+	            reason: 'superseded_by_newer_canonical',
+	            markdownConfirmed,
+	            fragmentConfirmed,
+	            canonicalConfirmed,
+	            canonicalExpectedHash,
+	            canonicalObservedHash,
+	            expectedFragmentTextHash,
+	            liveFragmentTextHash,
+	          };
+	        }
+
+	        if (!confirmed && options?.fallbackBarrier && reason !== 'reconnect_pending') {
           console.warn('[agent-routes] collab verification drift detected; applying rewrite barrier fallback', {
             slug,
             reason,
@@ -3609,12 +3828,18 @@ agentRoutes.post('/:slug/marks/accept', async (req: Request, res: Response) => {
           strictLiveDoc: true,
           apply: false,
         },
-      ).then(async (collabStatus) => {
-        if (collabStatus.confirmed) return;
-        try {
-          await invalidateLoadedCollabDocumentAndWait(slug);
-        } catch (error) {
-          console.warn('[agent-routes] failed to invalidate loaded collab room after deferred accept verification', {
+	      ).then(async (collabStatus) => {
+	        if (
+	          collabStatus.confirmed
+	          || collabStatus.reason === 'reconnect_pending'
+	          || collabStatus.reason === 'superseded_by_newer_canonical'
+	        ) {
+	          return;
+	        }
+	        try {
+	          await invalidateLoadedCollabDocumentAndWait(slug);
+	        } catch (error) {
+	          console.warn('[agent-routes] failed to invalidate loaded collab room after deferred accept verification', {
             slug,
             error,
           });
@@ -3683,12 +3908,18 @@ agentRoutes.post('/:slug/marks/accept-all', async (req: Request, res: Response) 
           strictLiveDoc: true,
           apply: false,
         },
-      ).then(async (collabStatus) => {
-        if (collabStatus.confirmed) return;
-        try {
-          await invalidateLoadedCollabDocumentAndWait(slug);
-        } catch (error) {
-          console.warn('[agent-routes] failed to invalidate loaded collab room after deferred accept-all verification', {
+	      ).then(async (collabStatus) => {
+	        if (
+	          collabStatus.confirmed
+	          || collabStatus.reason === 'reconnect_pending'
+	          || collabStatus.reason === 'superseded_by_newer_canonical'
+	        ) {
+	          return;
+	        }
+	        try {
+	          await invalidateLoadedCollabDocumentAndWait(slug);
+	        } catch (error) {
+	          console.warn('[agent-routes] failed to invalidate loaded collab room after deferred accept-all verification', {
             slug,
             error,
           });
@@ -3733,11 +3964,59 @@ agentRoutes.post('/:slug/marks/reject', async (req: Request, res: Response) => {
   try {
     const result = await executeDocumentOperationAsync(slug, 'POST', '/marks/reject', effectivePayload, effectiveMutationContext);
     maybeLogMarkHydrationMismatch(mutationRoute, slug, effectivePayload, effectiveMutationContext, result);
-    storeIdempotentMutationResult(replay, mutationRoute, slug, result.status, result.body);
     if (result.status >= 200 && result.status < 300) {
       keepRewriteLockCooldown = true;
-      notifyCollabMutation(slug, buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.reject' }), { apply: false });
+      if (isRecord(result.body)) {
+        result.body = {
+          ...result.body,
+          collab: {
+            status: 'pending',
+            reason: 'verification_deferred',
+            markdownConfirmed: null,
+            fragmentConfirmed: null,
+            canonicalConfirmed: null,
+          },
+        };
+      }
+      const participation = buildParticipationFromMutation(req, slug, payload, { details: 'suggestion.reject' });
+      void notifyCollabMutation(
+        slug,
+        participation,
+        {
+          verify: true,
+          source: 'marks.reject',
+          stabilityMs: EDIT_COLLAB_STABILITY_MS,
+          fallbackBarrier: true,
+          strictLiveDoc: true,
+          apply: false,
+        },
+	      ).then(async (collabStatus) => {
+	        if (
+	          collabStatus.confirmed
+	          || collabStatus.reason === 'reconnect_pending'
+	          || collabStatus.reason === 'superseded_by_newer_canonical'
+	        ) {
+	          return;
+	        }
+	        try {
+	          await invalidateLoadedCollabDocumentAndWait(slug);
+	        } catch (error) {
+	          console.warn('[agent-routes] failed to invalidate loaded collab room after deferred reject verification', {
+            slug,
+            error,
+          });
+        }
+      }).catch((error) => {
+        console.warn('[agent-routes] deferred collab verification for reject failed', {
+          slug,
+          error,
+        });
+      });
+      storeIdempotentMutationResult(replay, mutationRoute, slug, 202, result.body);
+      sendMutationResponse(res, 202, result.body, { route: mutationRoute, slug });
+      return;
     }
+    storeIdempotentMutationResult(replay, mutationRoute, slug, result.status, result.body);
     sendMutationResponse(res, result.status, result.body, { route: mutationRoute, slug });
   } finally {
     if (!keepRewriteLockCooldown) {

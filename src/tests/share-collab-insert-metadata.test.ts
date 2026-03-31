@@ -4,6 +4,7 @@ import {
   mergeResyncedPendingInsertServerMarks,
   preservePendingRemoteInsertMetadata,
 } from '../editor/share-collab-insert-metadata.js';
+import { mergePendingServerMarks } from '../editor/plugins/marks.js';
 
 function run(): void {
   const sourceMarks = {
@@ -66,6 +67,50 @@ function run(): void {
       ...syncedMetadata['insert-live'],
     },
     'Expected remote server mark cache to merge updated live insert metadata back onto the authoritative source mark',
+  );
+
+  const staleServerInsertMetadata = mergePendingServerMarks(
+    {
+      'insert-edited': {
+        kind: 'insert' as const,
+        by: 'human:editor',
+        createdAt: '2026-03-30T00:00:00.000Z',
+        status: 'pending' as const,
+        content: 'Inserted paragraph with edited word.',
+        quote: 'Inserted paragraph with edited word.',
+        range: { from: 25, to: 58 },
+        startRel: 'char:24',
+        endRel: 'char:57',
+      },
+    },
+    {
+      'insert-edited': {
+        kind: 'insert' as const,
+        by: 'human:editor',
+        createdAt: '2026-03-30T00:00:00.000Z',
+        status: 'pending' as const,
+        content: 'Inserted paragraph with original word.',
+        quote: 'Inserted paragraph with original word.',
+        range: { from: 25, to: 60 },
+        startRel: 'char:24',
+        endRel: 'char:59',
+      },
+    },
+  );
+  assert.deepEqual(
+    staleServerInsertMetadata['insert-edited'],
+    {
+      kind: 'insert',
+      by: 'human:editor',
+      createdAt: '2026-03-30T00:00:00.000Z',
+      status: 'pending',
+      content: 'Inserted paragraph with edited word.',
+      quote: 'Inserted paragraph with edited word.',
+      range: { from: 25, to: 58 },
+      startRel: 'char:24',
+      endRel: 'char:57',
+    },
+    'Expected live local pending insert metadata to win over stale authoritative cache entries for the same insert id',
   );
 
   console.log('share-collab-insert-metadata.test.ts passed');

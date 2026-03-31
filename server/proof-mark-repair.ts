@@ -7,6 +7,7 @@ import {
 } from './proof-span-strip.js';
 import { rehydrateProofMarksMarkdown } from './proof-mark-rehydration.js';
 import { canonicalizeStoredMarks, type StoredMark } from '../src/formats/marks.js';
+import { normalizeStoredMarksAgainstMarkdown } from './mark-anchor-normalization.js';
 
 type RepairDocRow = {
   slug: string;
@@ -93,7 +94,10 @@ async function repairDocumentRow(
     };
   }
 
-  const repairedMarks = canonicalizeStoredMarks(repaired.marks);
+  const repairedMarks = normalizeStoredMarksAgainstMarkdown(
+    repaired.markdown,
+    canonicalizeStoredMarks(repaired.marks),
+  );
   const markIdentityStable = hasStableMarkIdentity(originalMarks, repairedMarks);
   const originalBaseMarkdown = stripAllProofSpanTagsWithReplacements(
     doc.markdown,

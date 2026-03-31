@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+
 import {
   shouldResetShareCollabYDocBeforeCollabBind,
   shouldResetShareEditorBeforeCollabBind,
@@ -7,7 +10,22 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+function sliceBetween(source: string, startNeedle: string, endNeedle: string): string {
+  const start = source.indexOf(startNeedle);
+  assert(start !== -1, `Missing block start: ${startNeedle}`);
+  const end = source.indexOf(endNeedle, start);
+  assert(end !== -1, `Missing block end after: ${startNeedle}`);
+  return source.slice(start, end);
+}
+
 function run(): void {
+  const editorSource = readFileSync(path.resolve(process.cwd(), 'src/editor/index.ts'), 'utf8');
+  const connectBlock = sliceBetween(
+    editorSource,
+    '  private connectCollabService(resetEditorDoc = false): void {',
+    '\n  private ensureCollabCursorsInstalled(): void {',
+  );
+
   assert(
     shouldResetShareEditorBeforeCollabBind({
       requestedReset: false,
@@ -92,6 +110,17 @@ function run(): void {
       fragmentIsStructurallyEmpty: false,
     }) === true,
     'Expected explicit reconnect/read-only resets to reseed the bound Y.Doc even when the synced fragment is non-empty',
+  );
+
+  assert(
+    editorSource.includes("import { shouldResetShareEditorBeforeCollabBind } from './share-collab-bind-reset';")
+      && connectBlock.includes('const fragmentIsStructurallyEmpty = this.isYjsFragmentStructurallyEmpty(fragment);')
+      && connectBlock.includes('let editorMatchesLiveFragment = false;')
+      && connectBlock.includes('editorMatchesLiveFragment = fragmentText === editorText;')
+      && connectBlock.includes('shouldResetShareEditorBeforeCollabBind({')
+      && connectBlock.includes('allowEquivalentSkip: true,')
+      && connectBlock.includes('if (shouldResetEditorDocBeforeBind) {'),
+    'Expected collab rebinds to consult the shared reset helper and skip reset-before-bind when the live fragment already matches the canonical editor content',
   );
 
   console.log('✓ share collab bind reset distinguishes initial empty-room seeding from explicit reconnect reseeds');

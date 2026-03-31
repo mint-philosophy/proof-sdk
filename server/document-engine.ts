@@ -49,6 +49,13 @@ import {
   type ProofMarkRehydrationFailure,
 } from './proof-mark-rehydration.js';
 import { stripAllProofSpanTags, stripProofSpanTags } from './proof-span-strip.js';
+import { normalizeStoredMarksAgainstMarkdown } from './mark-anchor-normalization.js';
+import {
+  logReviewWhitespace,
+  shouldDebugReviewWhitespace,
+  summarizeReviewWhitespaceMarkdown,
+  summarizeReviewWhitespaceMarks,
+} from './review-whitespace-debug.js';
 import {
   recordEditAnchorAmbiguous,
   recordEditAnchorNotFound,
@@ -240,6 +247,26 @@ function projectionStaleMutationResult(): EngineExecutionResult {
 
 function normalizeVisibleMutationMarkdown(markdown: string): string {
   return normalizeMarkdownForQuote(stripEphemeralCollabSpans(stripAllProofSpanTags(markdown)));
+}
+
+function normalizeStoredMutationMarks(
+  markdown: string,
+  marks: Record<string, StoredMark>,
+  debugScope?: string,
+): Record<string, StoredMark> {
+  return normalizeStoredMarksAgainstMarkdown(markdown, canonicalizeStoredMarks(marks), debugScope);
+}
+
+function summarizeSingleReviewWhitespaceMark(markId: string, mark: StoredMark | undefined): Record<string, unknown> {
+  return summarizeReviewWhitespaceMarks(mark ? { [markId]: mark } : {});
+}
+
+function logAcceptAllReviewWhitespace(
+  event: string,
+  payload: Record<string, unknown>,
+): void {
+  if (!shouldDebugReviewWhitespace()) return;
+  logReviewWhitespace('document-engine.accept-all', event, payload);
 }
 
 async function getAsyncMutationReadyDocumentWithVisibleFallback(
@@ -889,6 +916,7 @@ function findQuoteSpanInMarkdown(markdown: string, quote: string): { start: numb
 
 function canRejectSuggestionWithoutHydration(markdown: string, mark: StoredMark): boolean {
   if (mark.kind !== 'insert' && mark.kind !== 'delete' && mark.kind !== 'replace') return false;
+  if (resolveStoredSuggestionSourceSelectionForFallback(markdown, mark)) return true;
   const quote = normalizeQuote(mark.quote);
   if (!quote) return false;
   const anchor = findQuoteAnchorInMarkdown(markdown, quote);
@@ -935,6 +963,31 @@ function getStoredSuggestionSourceSelection(
   const { stripped, map } = stripMarkdownWithMapping(markdown);
   const canonical = canonicalizeVisibleTextWithMapping(stripped, map);
   return mapVisibleSelectionToSourceRange(markdown, canonical.map, startOffset, endOffset);
+}
+
+function resolveStoredSuggestionSourceSelectionForFallback(
+  markdown: string,
+  suggestion: StoredMark,
+): { sourceStart: number; sourceEnd: number } | null {
+  const sourceSelection = getStoredSuggestionSourceSelection(markdown, suggestion);
+  if (!sourceSelection) return null;
+
+  const normalizedQuote = normalizeQuote(suggestion.quote);
+  if (!normalizedQuote) {
+    return suggestion.kind === 'insert' ? sourceSelection : null;
+  }
+
+  const span = expandMarkdownSpan(markdown, sourceSelection.sourceStart, sourceSelection.sourceEnd);
+  const selectionText = normalizeQuote(stripAllProofSpanTags(markdown.slice(span.start, span.end)));
+  if (!selectionText) return null;
+  if (
+    selectionText === normalizedQuote
+    || selectionText.includes(normalizedQuote)
+    || normalizedQuote.includes(selectionText)
+  ) {
+    return sourceSelection;
+  }
+  return null;
 }
 
 function expandAdjacentNewlineRun(
@@ -1055,6 +1108,13 @@ function replaceFirstOccurrence(source: string, find: string, replace: string): 
 }
 
 function buildAcceptedSuggestionMarkdown(markdown: string, suggestion: StoredMark): string | null {
+  const storedSelection = (suggestion.kind === 'delete' || suggestion.kind === 'replace')
+    ? resolveStoredSuggestionSourceSelectionForFallback(markdown, suggestion)
+    : null;
+  if (storedSelection) {
+    return buildAcceptedSuggestionMarkdownFromSelection(markdown, suggestion, storedSelection);
+  }
+
   const quote = typeof suggestion.quote === 'string' ? suggestion.quote : '';
   if (!quote) return null;
 
@@ -1897,7 +1957,7 @@ function readState(slug: string): EngineExecutionResult {
   const readSource = 'read_source' in doc ? doc.read_source : 'projection';
   const projectionFresh = 'projection_fresh' in doc ? doc.projection_fresh : true;
   const repairPending = 'repair_pending' in doc ? doc.repair_pending : !projectionFresh;
-  const marks = parseMarks(doc.marks);
+  const marks = normalizeStoredMutationMarks(doc.markdown, parseMarks(doc.marks));
   return {
     status: 200,
     body: {
@@ -2972,7 +3032,7 @@ async function updateSuggestionStatusAsync(
   if (!refreshedFromTarget.ok) return refreshedFromTarget.result;
   const rehydrationMark = refreshedFromTarget.mark;
   if (status === 'accepted' && isMaterializedInsertMark(doc.markdown, rehydrationMark)) {
-    const nextMarks = { ...marks };
+    const nextMarks = normalizeStoredMutationMarks(doc.markdown, { ...marks });
     delete nextMarks[markId];
     const mutation = await mutateCanonicalDocument({
       slug,
@@ -3041,7 +3101,7 @@ async function updateSuggestionStatusAsync(
       const acceptedMarkdown = buildAcceptedSuggestionMarkdown(doc.markdown, fallbackMark);
       if (acceptedMarkdown !== null) {
         const deleteCleanupOffsets = getDeleteSuggestionCleanupOffsets(doc.markdown, fallbackMark);
-        const nextMarks = { ...marks };
+        const nextMarks = normalizeStoredMutationMarks(doc.markdown, { ...marks });
         delete nextMarks[markId];
         const mutation = await mutateCanonicalDocument({
           slug,
@@ -3093,7 +3153,7 @@ async function updateSuggestionStatusAsync(
       && structuredResult.code === 'MARK_NOT_HYDRATED'
       && canRejectSuggestionWithoutHydration(doc.markdown, stabilizedExisting)
     ) {
-      const nextMarks = { ...marks };
+      const nextMarks = normalizeStoredMutationMarks(doc.markdown, { ...marks });
       delete nextMarks[markId];
       const rejectedMarkdown = buildRejectedSuggestionMarkdown(doc.markdown, stabilizedExisting) ?? doc.markdown;
       const mutation = await mutateCanonicalDocument({
@@ -3181,6 +3241,7 @@ async function updateSuggestionStatusAsync(
   } else if (status === 'accepted' && directAcceptMark.kind === 'delete') {
     nextMarkdown = applyMutationCleanup('POST /marks/accept', nextMarkdown, deleteCleanupOffsets);
   }
+  nextMarks = normalizeStoredMutationMarks(nextMarkdown, nextMarks as Record<string, StoredMark>) as unknown as Record<string, unknown>;
 
   const mutation = await mutateCanonicalDocument({
     slug,
@@ -3258,7 +3319,7 @@ async function computeSuggestionStatusTransition(
 
   const stabilizedExisting = stabilizeCollapsedMaterializedInsertMark(markdown, existing);
   if (status === 'accepted' && isMaterializedInsertMark(markdown, stabilizedExisting)) {
-    const nextMarks = { ...marks };
+    const nextMarks = normalizeStoredMutationMarks(markdown, { ...marks });
     delete nextMarks[markId];
     return {
       ok: true,
@@ -3316,7 +3377,7 @@ async function computeSuggestionStatusTransition(
       const acceptedMarkdown = buildAcceptedSuggestionMarkdown(markdown, fallbackMark);
       if (acceptedMarkdown !== null) {
         const deleteCleanupOffsets = getDeleteSuggestionCleanupOffsets(markdown, fallbackMark);
-        const nextMarks = { ...marks };
+        const nextMarks = normalizeStoredMutationMarks(markdown, { ...marks });
         delete nextMarks[markId];
         return {
           ok: true,
@@ -3330,7 +3391,7 @@ async function computeSuggestionStatusTransition(
       && structuredResult.code === 'MARK_NOT_HYDRATED'
       && canRejectSuggestionWithoutHydration(markdown, stabilizedExisting)
     ) {
-      const nextMarks = { ...marks };
+      const nextMarks = normalizeStoredMutationMarks(markdown, { ...marks });
       delete nextMarks[markId];
       return {
         ok: true,
@@ -3383,6 +3444,7 @@ async function computeSuggestionStatusTransition(
   } else if (status === 'accepted' && directAcceptMark.kind === 'delete') {
     nextMarkdown = applyMutationCleanup('POST /marks/accept', nextMarkdown, deleteCleanupOffsets);
   }
+  nextMarks = normalizeStoredMutationMarks(nextMarkdown, nextMarks);
 
   return {
     ok: true,
@@ -3403,12 +3465,30 @@ async function acceptAllSuggestionsAsync(
   const baseMarkdown = typeof context?.mutationBase?.markdown === 'string'
     ? context.mutationBase.markdown
     : doc.markdown;
-  const marks = context?.mutationBase
-    ? canonicalizeStoredMarks(context.mutationBase.marks as Record<string, StoredMark>)
-    : parseMarks(doc.marks);
+  const marks = normalizeStoredMutationMarks(
+    baseMarkdown,
+    context?.mutationBase
+      ? canonicalizeStoredMarks(context.mutationBase.marks as Record<string, StoredMark>)
+      : parseMarks(doc.marks),
+    'document-engine.accept-all.base',
+  );
   const requestedMarkIds = Array.isArray(body.markIds)
     ? body.markIds.filter((markId): markId is string => typeof markId === 'string' && markId.trim().length > 0).map((markId) => markId.trim())
     : [];
+  logAcceptAllReviewWhitespace('start', {
+    slug,
+    actor,
+    preserveMutationBaseDocument: context?.preserveMutationBaseDocument ?? false,
+    requestedMarkIds,
+    payloadMarkdown: summarizeReviewWhitespaceMarkdown(typeof body.markdown === 'string' ? body.markdown : null),
+    payloadMarks: summarizeReviewWhitespaceMarks(
+      isRecord(body.marks) ? body.marks as Record<string, unknown> : null,
+    ),
+    docMarkdown: summarizeReviewWhitespaceMarkdown(doc.markdown),
+    mutationBaseMarkdown: summarizeReviewWhitespaceMarkdown(context?.mutationBase?.markdown ?? null),
+    baseMarkdown: summarizeReviewWhitespaceMarkdown(baseMarkdown),
+    baseMarks: summarizeReviewWhitespaceMarks(marks),
+  });
   const requestedIdSet = new Set((requestedMarkIds.length > 0 ? requestedMarkIds : Object.keys(marks))
     .filter((markId, index, ids) => ids.indexOf(markId) === index));
   const getPendingIds = (markdown: string, currentMarks: Record<string, StoredMark>): string[] => (
@@ -3426,6 +3506,12 @@ async function acceptAllSuggestionsAsync(
   );
   const pendingIds = getPendingIds(baseMarkdown, marks);
   if (pendingIds.length === 0) {
+    logAcceptAllReviewWhitespace('no-pending-marks', {
+      slug,
+      requestedIds: [...requestedIdSet],
+      marks: summarizeReviewWhitespaceMarks(marks),
+      baseMarkdown: summarizeReviewWhitespaceMarkdown(baseMarkdown),
+    });
     return {
       status: 200,
       body: {
@@ -3448,7 +3534,17 @@ async function acceptAllSuggestionsAsync(
     const currentPendingIds = getPendingIds(nextMarkdown, nextMarks);
     const markId = currentPendingIds[0];
     if (!markId) break;
+    const step = acceptedIds.length + 1;
     const currentMark = nextMarks[markId];
+    logAcceptAllReviewWhitespace('step-start', {
+      slug,
+      step,
+      markId,
+      currentPendingIds,
+      currentMark: summarizeSingleReviewWhitespaceMark(markId, currentMark),
+      currentMarkdown: summarizeReviewWhitespaceMarkdown(nextMarkdown),
+      currentMarks: summarizeReviewWhitespaceMarks(nextMarks),
+    });
     const currentDeleteCleanupOffsets = currentMark?.kind === 'delete'
       ? getDeleteSuggestionCleanupOffsets(nextMarkdown, currentMark)
       : [];
@@ -3463,18 +3559,46 @@ async function acceptAllSuggestionsAsync(
       stabilizedOriginalMark?.kind === 'insert'
       && isMaterializedInsertMark(baseMarkdown, stabilizedOriginalMark)
     ) {
-      const currentMarks = { ...nextMarks };
+      const currentMarks = normalizeStoredMutationMarks(
+        nextMarkdown,
+        { ...nextMarks },
+        `document-engine.accept-all.step-${step}.materialized`,
+      );
       delete currentMarks[markId];
       nextMarkdown = applyMutationCleanup('POST /marks/accept', stripAllProofSpanTags(nextMarkdown));
       nextMarks = currentMarks;
       acceptedIds.push(markId);
+      logAcceptAllReviewWhitespace('step-materialized-insert', {
+        slug,
+        step,
+        markId,
+        remainingPendingIds: getPendingIds(nextMarkdown, nextMarks),
+        nextMarkdown: summarizeReviewWhitespaceMarkdown(nextMarkdown),
+        nextMarks: summarizeReviewWhitespaceMarks(nextMarks),
+      });
       continue;
     }
 
     const computed = await computeSuggestionStatusTransition(nextMarkdown, nextMarks, markId, 'accepted', {
       rebasePendingInserts: false,
     });
-    if (!computed.ok) return computed.result;
+    if (!computed.ok) {
+      logAcceptAllReviewWhitespace('step-failed', {
+        slug,
+        step,
+        markId,
+        resultStatus: computed.result.status,
+        resultBody: isRecord(computed.result.body) ? computed.result.body : null,
+      });
+      return computed.result;
+    }
+    logAcceptAllReviewWhitespace('step-transition', {
+      slug,
+      step,
+      markId,
+      computedMarkdown: summarizeReviewWhitespaceMarkdown(computed.nextMarkdown),
+      computedMarks: summarizeReviewWhitespaceMarks(computed.nextMarks),
+    });
     nextMarkdown = stripAllProofSpanTags(computed.nextMarkdown);
     if (currentDeleteCleanupOffsets.length > 0) {
       const lengthDelta = Math.max(0, beforeStepMarkdown.length - nextMarkdown.length);
@@ -3486,13 +3610,46 @@ async function acceptAllSuggestionsAsync(
       }
       acceptedDeleteCleanupOffsets.push(...currentDeleteCleanupOffsets);
     }
-    nextMarks = computed.nextMarks;
+    nextMarks = normalizeStoredMutationMarks(
+      nextMarkdown,
+      computed.nextMarks,
+      `document-engine.accept-all.step-${step}.normalized`,
+    );
     acceptedIds.push(markId);
+    logAcceptAllReviewWhitespace('step-complete', {
+      slug,
+      step,
+      markId,
+      markPresentAfterStep: Object.prototype.hasOwnProperty.call(nextMarks, markId),
+      markStatusAfterStep: nextMarks[markId]?.status ?? null,
+      remainingPendingIds: getPendingIds(nextMarkdown, nextMarks),
+      nextMarkdown: summarizeReviewWhitespaceMarkdown(nextMarkdown),
+      nextMarks: summarizeReviewWhitespaceMarks(nextMarks),
+      acceptedIds: [...acceptedIds],
+    });
   }
 
   if (acceptedDeleteCleanupOffsets.length > 0) {
     nextMarkdown = applyMutationCleanup('POST /marks/accept', nextMarkdown, acceptedDeleteCleanupOffsets);
+    nextMarks = normalizeStoredMutationMarks(
+      nextMarkdown,
+      nextMarks,
+      'document-engine.accept-all.final-cleanup',
+    );
+    logAcceptAllReviewWhitespace('post-delete-cleanup', {
+      slug,
+      cleanupOffsets: acceptedDeleteCleanupOffsets,
+      nextMarkdown: summarizeReviewWhitespaceMarkdown(nextMarkdown),
+      nextMarks: summarizeReviewWhitespaceMarks(nextMarks),
+    });
   }
+
+  logAcceptAllReviewWhitespace('before-mutate', {
+    slug,
+    acceptedIds,
+    nextMarkdown: summarizeReviewWhitespaceMarkdown(nextMarkdown),
+    nextMarks: summarizeReviewWhitespaceMarks(nextMarks),
+  });
 
   const mutation = await mutateCanonicalDocument({
     slug,
@@ -3504,6 +3661,12 @@ async function acceptAllSuggestionsAsync(
     guardPathologicalGrowth: true,
   });
   if (!mutation.ok) {
+    logAcceptAllReviewWhitespace('mutate-failed', {
+      slug,
+      status: mutation.status,
+      code: mutation.code,
+      error: mutation.error,
+    });
     return {
       status: mutation.status,
       body: {
@@ -3514,6 +3677,12 @@ async function acceptAllSuggestionsAsync(
       },
     };
   }
+  logAcceptAllReviewWhitespace('mutate-succeeded', {
+    slug,
+    acceptedIds,
+    markdown: summarizeReviewWhitespaceMarkdown(mutation.document.markdown),
+    marks: summarizeReviewWhitespaceMarks(parseMarks(mutation.document.marks)),
+  });
 
   const eventIds = acceptedIds.map((markId) => addDocumentEvent(
     slug,

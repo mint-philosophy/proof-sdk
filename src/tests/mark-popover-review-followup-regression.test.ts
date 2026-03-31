@@ -22,43 +22,52 @@ function run(): void {
       && source.includes('private getLiveAdjacentSuggestionTarget(')
       && source.includes('export function resolveSuggestionActionTarget(')
       && source.includes('export function resolveAdjacentSuggestionActionTarget(')
+      && source.includes('export function buildSuggestionActionTargetPreferredMarkIds(')
       && source.includes('const stateActiveMarkId = getActiveMarkId(this.view.state);')
       && source.includes('const suggestions = this.getPendingSuggestionReviewItems();')
-      && source.includes('const preferredMarkIds: Array<string | null | undefined> = [')
-      && source.includes('fallbackMarkId ?? null,')
-      && source.includes('stateActiveMarkId,')
-      && source.includes('this.activeMarkId,')
-      && source.includes('return resolveSuggestionActionTarget(suggestions, preferredMarkIds);')
+      && source.includes('const preferredMarkIds = buildSuggestionActionTargetPreferredMarkIds(')
+      && source.includes("options?.preference ?? 'fallback-first'")
+      && source.includes('return resolveSuggestionActionTarget(suggestions, preferredMarkIds, this.view.state.doc);')
       && source.includes("const getActiveSuggestionActionTarget = (): {")
-      && source.includes('} | null => this.getLiveSuggestionActionTarget(mark.id);')
+      && source.includes("} | null => this.getLiveSuggestionActionTarget(mark.id, { preference: 'active-first' });")
       && source.includes("const getPreviousSuggestionNavigationTarget = (): {")
-      && source.includes("} | null => this.getLiveAdjacentSuggestionTarget('prev', mark.id);")
+      && source.includes("} | null => this.getLiveAdjacentSuggestionTarget('prev', mark.id, { preference: 'active-first' });")
       && source.includes("const getNextSuggestionNavigationTarget = (): {")
-      && source.includes("} | null => this.getLiveAdjacentSuggestionTarget('next', mark.id);")
+      && source.includes("} | null => this.getLiveAdjacentSuggestionTarget('next', mark.id, { preference: 'active-first' });")
       && source.includes("this.runSuggestionReviewAction(target.markId, 'reject', target.nextMarkId, target.kind, {")
       && source.includes("this.runSuggestionReviewAction(target.markId, 'accept', target.nextMarkId, target.kind, {"),
-    'Expected review actions to resolve the live active suggestion target from editor state at click time so an auto-advanced popover cannot keep firing a stale mark id after navigation',
+    'Expected review actions to prefer the live active suggestion target from editor state at click time so an auto-advanced popover cannot keep firing a stale rendered mark id after navigation, while still routing through the shared resolver helpers',
   );
 
   assert(
-    source.includes('const currentTarget = resolveSuggestionActionTarget(suggestions, preferredMarkIds);')
-      && source.includes('const adjacentMarkId = getAdjacentSuggestionReviewMarkId(suggestions, currentTarget.markId, direction);')
-      && source.includes('const adjacentReviewItem = suggestions.find((item) => item.memberMarkIds.includes(adjacentMarkId)) ?? null;')
+    source.includes('const orderedSuggestions = orderSuggestionReviewItemsByDocumentPosition(suggestions, doc);')
+      && source.includes('const currentTarget = resolveSuggestionActionTarget(orderedSuggestions, preferredMarkIds);')
+      && source.includes('const adjacentMarkId = getAdjacentSuggestionReviewMarkId(orderedSuggestions, currentTarget.markId, direction);')
+      && source.includes('const adjacentReviewItem = orderedSuggestions.find((item) => item.memberMarkIds.includes(adjacentMarkId)) ?? null;')
       && source.includes("kind: adjacentReviewItem.kind,")
       && source.includes('return resolveAdjacentSuggestionActionTarget(')
       && !source.includes('if (!target && this.reopenFirstPendingSuggestion()) {'),
-    'Expected suggestion navigation to resolve the live adjacent review target from the current active suggestion instead of relying on stale render-time previous/next ids',
+    'Expected suggestion navigation to resolve adjacent review targets from live document-position ordering instead of relying on stale stored mark ranges',
   );
 
   assert(
     source.includes("const stateActiveMarkId = getActiveMarkId(this.view.state);")
       && source.includes('const followupActive = stateActiveMarkId === followupMarkId;')
+      && source.includes('const followupDeadlineAt = Date.now() + (')
+      && source.includes('this.suggestionReviewPreferredFollowupMarkId = preferredMarkId;')
+      && source.includes('this.suggestionReviewPreferredFollowupMarkId = null;')
+      && source.includes('const collabPending = isSuggestionReviewFollowupCollabPending(')
+      && source.includes('followupRemainingMs')
+      && source.includes('if (collabPending && followupRemainingMs > 0) {')
       && source.includes("this.openForMark(followupMarkId, undefined, { source: 'direct' });")
       && source.includes('if (followupPanelOpen && collabStable) {')
       && source.includes('this.suggestionReviewTransitionPending = false;')
       && source.includes('const fallbackMarkId = this.getFirstPendingSuggestionMarkId();')
+      && source.includes('const remainingSuggestions = orderSuggestionReviewItemsByDocumentPosition(')
+      && source.includes('this.view.state.doc,')
+      && !source.includes('REVIEW_FOLLOWUP_MAX_RETRIES_WITH_TARGET')
       && source.includes("this.openForMark(fallbackMarkId, undefined, { source: 'direct' });"),
-    'Expected review follow-up to clear its transition guard as soon as the next suggestion is visibly open and collab-stable, and to force-open the remaining pending suggestion if the timed follow-up never stabilizes',
+    'Expected review follow-up to use live document-position ordering and to keep waiting while an accept-triggered collab reconnect is still repopulating marks, instead of exhausting a fixed retry count and closing early',
   );
 
   assert(
@@ -67,21 +76,26 @@ function run(): void {
       && source.includes('const fallbackMarkId = this.getFirstPendingSuggestionMarkId();')
       && source.includes("this.openForMark(fallbackMarkId, undefined, {")
       && source.includes("preserveReviewTransition: options?.preserveReviewTransition,"),
-    'Expected successful persisted review actions to re-enable the current action row before follow-up, and expected suggestion updates to immediately reopen the remaining pending suggestion if the active mark disappears mid-transition',
+    'Expected successful persisted review actions to re-enable the current action row before follow-up, while still keeping a generic first-pending reopen path available for non-transition suggestion refreshes',
   );
 
   assert(
-    source.includes('if (this.reopenFirstPendingSuggestion({')
-      && source.includes('preserveReviewTransition: this.suggestionReviewTransitionPending,')
-      && source.includes('if (this.suggestionReviewTransitionPending) {')
+    source.includes('if (this.suggestionReviewTransitionPending) {')
+      && source.includes("console.log('[mark-popover.update.waitingForFollowup]');")
+      && source.includes('if (this.reopenFirstPendingSuggestion()) {')
+      && source.includes("console.log('[mark-popover.update.deferNonPreferredFollowupOpen]', {")
+      && source.includes('preferredFollowupMarkId: this.suggestionReviewPreferredFollowupMarkId,')
       && !source.includes('const reboundMarkId = getActiveMarkId(this.view.state) ?? this.activeMarkId;'),
-    'Expected stale suggestion popovers to rebind to the first remaining pending suggestion after collab reseeds, and to keep the review transition alive instead of closing during transient mixed-mark gaps',
+    'Expected stale suggestion popovers to keep waiting for the targeted review follow-up while a review transition is pending, and only fall back to reopening the first remaining pending suggestion once no targeted transition is in flight',
   );
 
   assert(
     source.includes('private reviewActionInFlight: boolean = false;')
+      && source.includes('const expectedFollowupMarkId = this.suggestionReviewPreferredFollowupMarkId;')
       && source.includes('if (this.reviewActionInFlight) {')
       && source.includes("const followupTarget = this.mode === 'suggestion' && this.popover.style.display !== 'none'")
+      && source.includes('? this.getLiveSuggestionActionTarget(expectedFollowupMarkId ?? markId)')
+      && source.includes('if (expectedFollowupMarkId && followupTarget.markId !== expectedFollowupMarkId) {')
       && source.includes('markId = followupTarget.markId;')
       && source.includes('nextMarkId = followupTarget.nextMarkId;')
       && source.includes('suggestionKind = followupTarget.kind;')

@@ -66,9 +66,9 @@ import {
   hasRecentSuggestionsInsertCoalescingState,
   transactionCarriesInsertedSuggestionMarks,
   wrapTransactionForSuggestions,
+  getBlockedTrackChangesMarkMutation,
   buildNativeTextInputFollowupWrapTransaction,
   buildTextPreservingInsertPersistenceTransaction,
-  buildHistorySuggestionMetadataReconciliationTransaction,
   isUndoHistoryTransaction,
   shouldSuppressHandledTextInputEcho,
   consumePendingNativeTextInputTransactionMatch,
@@ -113,6 +113,7 @@ import {
   normalizeShareCollabHydrationText,
   shouldTreatShareCollabAsHydrated,
 } from './share-collab-hydration';
+import { shouldResetShareEditorBeforeCollabBind } from './share-collab-bind-reset';
 import {
   mergeResyncedPendingInsertServerMarks,
   preservePendingRemoteInsertMetadata,
@@ -164,6 +165,7 @@ import {
   type CommentData,
   type StoredMark,
   buildCanonicalShareMarkMetadata,
+  buildReviewMutationSnapshotMarks,
   mergePendingServerMarks,
   pruneLocallyRemovedPendingSuggestionServerMarks,
   tombstoneResolvedMarkIds,
@@ -223,6 +225,14 @@ import {
   shouldSkipShareDocumentRefreshDuringReviewCooldown,
   shouldUseLocalKeepaliveBaseToken,
 } from './share-refresh-persist';
+import {
+  summarizeReviewWhitespaceMarkdown,
+  summarizeReviewWhitespaceMarks,
+} from '../shared/review-whitespace-debug';
+import {
+  canonicalizeVisibleTextBlockSeparators,
+  stripMarkdownVisibleText,
+} from '../shared/anchor-target-text';
 import { keybindingsPlugin, setShowAgentInputCallback, type AgentInputContext } from './plugins/keybindings';
 import { tableKeyboardPlugin } from './plugins/table-keyboard';
 import { showAgentInputDialog } from '../ui/agent-input-dialog';
@@ -870,6 +880,7 @@ export interface ProofEditor {
   markAccept(markId: string): boolean;
   markReject(markId: string): boolean;
   markAcceptPersisted(markId: string): Promise<boolean>;
+  markAcceptManyPersisted(markIds: string[]): Promise<boolean>;
   markRejectPersisted(markId: string): Promise<boolean>;
   markAcceptAll(): number;
   markRejectAll(): number;
@@ -1264,6 +1275,9 @@ class ProofEditorImpl implements ProofEditor {
   private suppressMarksSync: boolean = false;
   private suppressTrackChangesSystemTransactionsDepth: number = 0;
   private suppressTrackChangesDuringCollabReconnect: boolean = false;
+  private shareReviewReconnectEditLock: boolean = false;
+  private shareReviewReconnectEditLockSetAtMs: number = 0;
+  private shareReviewReconnectEditLockReleaseTimer: ReturnType<typeof setTimeout> | null = null;
   private collabEnabled: boolean = false;
   private collabCanComment: boolean = false;
   private collabCanEdit: boolean = false;
@@ -1271,6 +1285,9 @@ class ProofEditorImpl implements ProofEditor {
   private activeCollabSession: CollabSessionInfo | null = null;
   private collabRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private collabSessionRefreshInFlight: boolean = false;
+  private pendingCollabSessionRefreshRetry: boolean = false;
+  private pendingCollabSessionRefreshPreserveLocalState: boolean = false;
+  private collabAuthFailureRefreshSuppressionUntilMs: number = 0;
   private shareOtherViewerCount: number = 0;
   private collabConnectionStatus: 'connecting' | 'connected' | 'disconnected' = 'disconnected';
   private collabIsSynced: boolean = false;
@@ -1294,6 +1311,8 @@ class ProofEditorImpl implements ProofEditor {
   private hasLocalContentEditSinceHydration: boolean = false;
   private lastContentChangeSource: 'local' | 'remote' | 'system' | null = null;
   private pendingProjectionPublish: boolean = false;
+  private readonly shareReviewReconnectEditLockMinHoldMs: number = 6_000;
+  private readonly collabAuthFailureRefreshGraceMs: number = 4_000;
   private initialMarksSynced: boolean = false;
   private lastReceivedServerMarks: Record<string, StoredMark> = {};
   private lastAuthoritativeServerMarks: Record<string, StoredMark> = {};
@@ -1846,16 +1865,19 @@ class ProofEditorImpl implements ProofEditor {
           });
           this.updateShareEditGate();
           const authFailed = collabClient.lastAuthenticationFailureReason !== null;
+          const authFailureRefreshSuppressed = this.collabAuthFailureRefreshSuppressionUntilMs > Date.now();
           if (
             status.connectionStatus === 'disconnected'
             && (
               collabClient.terminalCloseReason === 'permission-denied'
               || authFailed
             )
+            && !authFailureRefreshSuppressed
           ) {
             void this.refreshCollabSessionAndReconnect(this.shouldPreservePendingLocalCollabState());
           }
           if (status.connectionStatus === 'connected' && status.isSynced) {
+            this.collabAuthFailureRefreshSuppressionUntilMs = 0;
             if (this.pendingCollabRebindOnSync) {
               const shouldResetDoc = this.pendingCollabRebindResetDoc;
               this.pendingCollabRebindOnSync = false;
@@ -2041,6 +2063,10 @@ class ProofEditorImpl implements ProofEditor {
     this.collabUnhealthySinceMs = null;
     this.collabLastRecoveryAttemptMs = 0;
     this.collabSessionRefreshInFlight = false;
+    this.pendingCollabSessionRefreshRetry = false;
+    this.pendingCollabSessionRefreshPreserveLocalState = false;
+    this.collabAuthFailureRefreshSuppressionUntilMs = 0;
+    this.setShareReviewReconnectEditLock(false);
     this.skipNextCollabTemplateSeed = false;
     this.preserveEditorStateOnNextCollabReconnect = false;
     this.resetPendingCollabTemplateState(true);
@@ -2235,6 +2261,26 @@ class ProofEditorImpl implements ProofEditor {
     };
   }
 
+  private shouldDebugReviewWhitespace(): boolean {
+    try {
+      const runtime = globalThis as typeof globalThis & {
+        __PROOF_DEBUG_REVIEW_WHITESPACE__?: unknown;
+        localStorage?: Storage;
+      };
+      const globalFlag = runtime.__PROOF_DEBUG_REVIEW_WHITESPACE__;
+      if (globalFlag === true || globalFlag === '1' || globalFlag === 'true') return true;
+      const stored = runtime.localStorage?.getItem('proof:debug:review-whitespace')?.trim().toLowerCase();
+      return stored === '1' || stored === 'true' || stored === 'yes' || stored === 'on';
+    } catch {
+      return false;
+    }
+  }
+
+  private logReviewWhitespaceDebug(event: string, data: Record<string, unknown>): void {
+    if (!this.shouldDebugReviewWhitespace()) return;
+    console.info(`[review-whitespace][editor] ${event}`, data);
+  }
+
   private traceShareReview(
     event: string,
     data: Record<string, unknown> = {},
@@ -2260,6 +2306,7 @@ class ProofEditorImpl implements ProofEditor {
         pendingCollabRebindOnSync: this.pendingCollabRebindOnSync,
         pendingCollabRebindResetDoc: this.pendingCollabRebindResetDoc,
         suppressTrackChangesDuringCollabReconnect: this.suppressTrackChangesDuringCollabReconnect,
+        shareReviewReconnectEditLock: this.shareReviewReconnectEditLock,
         pendingCollabTemplateMarkdown: this.summarizeTraceMarkdown(this.pendingCollabTemplateMarkdown),
         pendingCollabReconnectTemplateOverride: this.summarizeTraceMarkdown(this.pendingCollabReconnectTemplateOverride),
         lastReceivedHasMarkId: activeMarkId ? Object.prototype.hasOwnProperty.call(this.lastReceivedServerMarks, activeMarkId) : null,
@@ -2286,6 +2333,7 @@ class ProofEditorImpl implements ProofEditor {
         shareAllowLocalEdits: this.shareAllowLocalEdits,
         shareContentFilterEnabled: this.shareContentFilterEnabled,
         suppressTrackChangesDuringCollabReconnect: this.suppressTrackChangesDuringCollabReconnect,
+        shareReviewReconnectEditLock: this.shareReviewReconnectEditLock,
         pendingCollabRebindOnSync: this.pendingCollabRebindOnSync,
         pendingCollabRebindResetDoc: this.pendingCollabRebindResetDoc,
         collabConnectionStatus: this.collabConnectionStatus,
@@ -2588,6 +2636,35 @@ class ProofEditorImpl implements ProofEditor {
           return;
         }
         const view = ctx.get(editorViewCtx);
+        let shouldResetEditorDocBeforeBind = resetEditorDoc;
+        if (resetEditorDoc) {
+          try {
+            const fragment = (ydoc as any).getXmlFragment?.('prosemirror');
+            const fragmentIsStructurallyEmpty = this.isYjsFragmentStructurallyEmpty(fragment);
+            let editorMatchesLiveFragment = false;
+            if (!fragmentIsStructurallyEmpty && fragment) {
+              const root = yXmlFragmentToProseMirrorRootNode(
+                fragment as any,
+                view.state.schema as any,
+              ) as ProseMirrorNode;
+              const fragmentText = normalizeShareCollabHydrationText(
+                root.textBetween(0, root.content.size, '\n', '\n'),
+              );
+              const editorText = normalizeShareCollabHydrationText(
+                view.state.doc.textBetween(0, view.state.doc.content.size, '\n', '\n'),
+              );
+              editorMatchesLiveFragment = fragmentText === editorText;
+            }
+            shouldResetEditorDocBeforeBind = shouldResetShareEditorBeforeCollabBind({
+              requestedReset: resetEditorDoc,
+              allowEquivalentSkip: true,
+              fragmentIsStructurallyEmpty,
+              editorMatchesLiveFragment,
+            });
+          } catch {
+            shouldResetEditorDocBeforeBind = resetEditorDoc;
+          }
+        }
         collabService.mergeOptions({
           yCursorOpts: {
             cursorBuilder: collabCursorBuilder,
@@ -2603,7 +2680,7 @@ class ProofEditorImpl implements ProofEditor {
         } catch {
           // ignore
         }
-        if (resetEditorDoc) {
+        if (shouldResetEditorDocBeforeBind) {
           try {
             const parser = ctx.get(parserCtx);
             const emptyDoc = parser('');
@@ -2827,6 +2904,7 @@ class ProofEditorImpl implements ProofEditor {
     }
     this.collabRefreshTimer = setInterval(async () => {
       if (!this.collabEnabled || !this.activeCollabSession) return;
+      this.maybeFinalizePendingCollabReconnect();
       await this.maybeRecoverStalledCollab();
       const expiresAt = this.activeCollabSession.expiresAt;
       if (!expiresAt) return;
@@ -2885,6 +2963,10 @@ class ProofEditorImpl implements ProofEditor {
 
   private teardownCollabRuntimeAfterTerminalRefreshFailure(): void {
     this.clearPendingCommentDraftRestore();
+    this.setShareReviewReconnectEditLock(false);
+    this.pendingCollabSessionRefreshRetry = false;
+    this.pendingCollabSessionRefreshPreserveLocalState = false;
+    this.collabAuthFailureRefreshSuppressionUntilMs = 0;
     if (this.collabRefreshTimer) {
       clearInterval(this.collabRefreshTimer);
       this.collabRefreshTimer = null;
@@ -2966,9 +3048,39 @@ class ProofEditorImpl implements ProofEditor {
     });
   }
 
+  private maybeFinalizePendingCollabReconnect(): void {
+    if (!this.pendingCollabRebindOnSync) return;
+    if (!this.editor || !this.collabEnabled || !this.collabCanEdit) return;
+    if (!(this.collabConnectionStatus === 'connected' || collabClient.isConnected())) return;
+    if (!this.isCollabHydratedForEditing()) return;
+
+    const shouldResetDoc = this.pendingCollabRebindResetDoc;
+    this.pendingCollabRebindOnSync = false;
+    this.pendingCollabRebindResetDoc = false;
+    this.collabConnectionStatus = 'connected';
+    this.markInitialCollabHydrationComplete();
+
+    if (shouldResetDoc) {
+      this.connectCollabService(true);
+    } else {
+      this.connectCollabService();
+    }
+    this.ensureCollabCursorsInstalled();
+    this.applyPendingCollabTemplate();
+    this.applyLatestCollabMarksToEditor();
+    if (!this.pendingCollabTemplateMarkdown && !this.pendingCollabRebindOnSync) {
+      this.suppressTrackChangesDuringCollabReconnect = false;
+      this.releaseDeferredShareMarksFlush();
+    }
+  }
+
   private async refreshCollabSessionAndReconnect(preserveLocalState: boolean): Promise<void> {
     if (!this.collabEnabled || !this.activeCollabSession) return;
-    if (this.collabSessionRefreshInFlight) return;
+    if (this.collabSessionRefreshInFlight) {
+      this.pendingCollabSessionRefreshRetry = true;
+      this.pendingCollabSessionRefreshPreserveLocalState = this.pendingCollabSessionRefreshPreserveLocalState || preserveLocalState;
+      return;
+    }
     this.collabSessionRefreshInFlight = true;
     this.pendingCollabRebindOnSync = false;
     const previousAccessEpoch = this.activeCollabSession?.accessEpoch ?? null;
@@ -3004,6 +3116,8 @@ class ProofEditorImpl implements ProofEditor {
             this.showReadOnlyBanner();
           }
         }
+        this.setShareReviewReconnectEditLock(false);
+        this.updateShareEditGate();
         return;
       }
       if (refreshed && 'collabAvailable' in refreshed && refreshed.collabAvailable === false) {
@@ -3022,9 +3136,15 @@ class ProofEditorImpl implements ProofEditor {
         this.resetProjectionPublishState();
         this.updateShareEditGate();
         this.showReadOnlyBanner();
+        this.setShareReviewReconnectEditLock(false);
+        this.updateShareEditGate();
         return;
       }
-      if (!refreshed || !('session' in refreshed) || !refreshed.session) return;
+      if (!refreshed || !('session' in refreshed) || !refreshed.session) {
+        this.setShareReviewReconnectEditLock(false);
+        this.updateShareEditGate();
+        return;
+      }
       const canEditBefore = this.collabCanEdit;
       this.activeCollabSession = refreshed.session;
       this.collabCanComment = Boolean(refreshed.capabilities.canComment);
@@ -3034,8 +3154,10 @@ class ProofEditorImpl implements ProofEditor {
       this.preserveEditorStateOnNextCollabReconnect = false;
       const forceResetEditorDoc = this.resetEditorDocOnNextCollabReconnect;
       this.resetEditorDocOnNextCollabReconnect = false;
-      const shouldPreserveLocalState = forcePreserveEditorState
-        || (preserveLocalState && this.shouldPreservePendingLocalCollabState());
+      const shouldPreserveBufferedLocalState = !forcePreserveEditorState
+        && preserveLocalState
+        && this.shouldPreservePendingLocalCollabState();
+      const shouldPreserveLocalState = forcePreserveEditorState || shouldPreserveBufferedLocalState;
       let reconnectTemplate: string | null = null;
       if (shouldPreserveLocalState) {
         if (this.lastMarkdown.trim().length > 0) {
@@ -3063,15 +3185,24 @@ class ProofEditorImpl implements ProofEditor {
       if (!this.shouldAllowCollabTemplateSeed(refreshed.session)) {
         reconnectTemplate = null;
       }
-      const canUseSoftRefresh = shouldPreserveLocalState && !collabClient.requiresHardReconnect(refreshed.session);
+      const forceHardReconnect = forcePreserveEditorState
+        || forceResetEditorDoc
+        || this.shareReviewReconnectEditLock
+        || this.suppressTrackChangesDuringCollabReconnect
+        || Boolean(this.pendingCollabReconnectTemplateOverride && this.pendingCollabReconnectTemplateOverride.trim().length > 0);
+      const canUseSoftRefresh = shouldPreserveLocalState
+        && !forceHardReconnect
+        && !collabClient.requiresHardReconnect(refreshed.session);
       this.traceShareReview('collab.refresh.ready', {
         preserveLocalState,
         forcePreserveEditorState,
         forceResetEditorDoc,
+        forceHardReconnect,
         previousAccessEpoch,
         nextAccessEpoch: refreshed.session.accessEpoch ?? null,
         reconnectTemplate: this.summarizeTraceMarkdown(reconnectTemplate),
         shouldPreserveLocalState,
+        shouldPreserveBufferedLocalState,
         canUseSoftRefresh,
       });
       if (canUseSoftRefresh) {
@@ -3091,7 +3222,11 @@ class ProofEditorImpl implements ProofEditor {
           this.markInitialCollabHydrationComplete();
         }
       }
-      collabClient.reconnectWithSession(refreshed.session, { preserveLocalState: shouldPreserveLocalState });
+      this.collabAuthFailureRefreshSuppressionUntilMs = Date.now() + this.collabAuthFailureRefreshGraceMs;
+      collabClient.reconnectWithSession(refreshed.session, {
+        preserveLocalState: shouldPreserveLocalState,
+        preserveBufferedLocalState: shouldPreserveBufferedLocalState,
+      });
       if (!canUseSoftRefresh) {
         this.resetPendingCollabTemplateState(false);
         this.pendingCollabTemplateMarkdown = this.shouldAllowCollabTemplateSeed(refreshed.session)
@@ -3105,14 +3240,39 @@ class ProofEditorImpl implements ProofEditor {
     } catch (error) {
       this.pendingCollabRebindOnSync = false;
       this.pendingCollabRebindResetDoc = false;
+      this.setShareReviewReconnectEditLock(false);
       this.traceShareReview('collab.refresh.exception', {
         preserveLocalState,
         previousAccessEpoch,
         error: this.getErrorMessage(error),
       }, 'error');
       console.warn('[share] failed to refresh collab session', error);
+      this.updateShareEditGate();
     } finally {
       this.collabSessionRefreshInFlight = false;
+      this.updateShareEditGate();
+      const retryQueued = this.pendingCollabSessionRefreshRetry;
+      const retryPreserveLocalState = this.pendingCollabSessionRefreshPreserveLocalState;
+      this.pendingCollabSessionRefreshRetry = false;
+      this.pendingCollabSessionRefreshPreserveLocalState = false;
+      const authFailureStillPending = this.collabEnabled
+        && Boolean(this.activeCollabSession)
+        && this.collabConnectionStatus === 'disconnected'
+        && (
+          collabClient.lastAuthenticationFailureReason !== null
+          || collabClient.terminalCloseReason === 'permission-denied'
+        );
+      const retryStillNeeded = retryQueued
+        && (
+          this.collabConnectionStatus !== 'connected'
+          || !this.collabIsSynced
+          || authFailureStillPending
+        );
+      if (retryStillNeeded || authFailureStillPending) {
+        const nextPreserveLocalState = retryPreserveLocalState
+          || (authFailureStillPending && this.shouldPreservePendingLocalCollabState());
+        void Promise.resolve().then(() => this.refreshCollabSessionAndReconnect(nextPreserveLocalState));
+      }
     }
   }
 
@@ -3147,8 +3307,71 @@ class ProofEditorImpl implements ProofEditor {
     this.uninstallShareContentFilter();
   }
 
+  private clearShareReviewReconnectEditLockReleaseTimer(): void {
+    if (this.shareReviewReconnectEditLockReleaseTimer) {
+      clearTimeout(this.shareReviewReconnectEditLockReleaseTimer);
+      this.shareReviewReconnectEditLockReleaseTimer = null;
+    }
+  }
+
+  private scheduleShareReviewReconnectEditLockReleaseCheck(): void {
+    this.clearShareReviewReconnectEditLockReleaseTimer();
+    if (!this.shareReviewReconnectEditLock) return;
+    const elapsedMs = Date.now() - this.shareReviewReconnectEditLockSetAtMs;
+    const remainingMs = this.shareReviewReconnectEditLockMinHoldMs - elapsedMs;
+    if (remainingMs <= 0) return;
+    this.shareReviewReconnectEditLockReleaseTimer = setTimeout(() => {
+      this.shareReviewReconnectEditLockReleaseTimer = null;
+      this.updateShareEditGate();
+    }, remainingMs);
+  }
+
+  private setShareReviewReconnectEditLock(locked: boolean): void {
+    if (locked) {
+      this.shareReviewReconnectEditLock = true;
+      this.shareReviewReconnectEditLockSetAtMs = Date.now();
+      this.scheduleShareReviewReconnectEditLockReleaseCheck();
+      return;
+    }
+    this.shareReviewReconnectEditLock = false;
+    this.shareReviewReconnectEditLockSetAtMs = 0;
+    this.clearShareReviewReconnectEditLockReleaseTimer();
+  }
+
+  private canReleaseShareReviewReconnectEditLock(): boolean {
+    if (!this.shareReviewReconnectEditLock) return true;
+    const heldForMs = Date.now() - this.shareReviewReconnectEditLockSetAtMs;
+    if (heldForMs < this.shareReviewReconnectEditLockMinHoldMs) {
+      this.scheduleShareReviewReconnectEditLockReleaseCheck();
+      return false;
+    }
+    if (!this.isShareMode || !this.collabEnabled || !this.collabCanEdit) return true;
+
+    const awaitingTemplateSeed = Boolean(
+      this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0,
+    );
+    const collabReconnectStable = !this.pendingCollabRebindOnSync
+      && !this.suppressTrackChangesDuringCollabReconnect
+      && !this.collabSessionRefreshInFlight;
+    const hydrated = this.hasCompletedInitialCollabHydration
+      && (this.collabHydrationSatisfiedByPreservedState || this.isCollabHydratedForEditing());
+    const synced = this.collabConnectionStatus === 'connected'
+      && this.collabIsSynced
+      && this.collabUnsyncedChanges === 0
+      && this.collabPendingLocalUpdates === 0;
+    return !awaitingTemplateSeed && collabReconnectStable && hydrated && synced;
+  }
+
+  private maybeReleaseShareReviewReconnectEditLock(): void {
+    if (!this.shareReviewReconnectEditLock) return;
+    if (!this.canReleaseShareReviewReconnectEditLock()) return;
+    this.setShareReviewReconnectEditLock(false);
+  }
+
   private updateShareEditGate(): void {
     if (!this.isShareMode) return;
+    this.maybeFinalizePendingCollabReconnect();
+    this.maybeReleaseShareReviewReconnectEditLock();
     const awaitingTemplateSeed = Boolean(this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0);
     const hydratedForEditing = this.hasCompletedInitialCollabHydration
       && (this.collabHydrationSatisfiedByPreservedState || this.isCollabHydratedForEditing());
@@ -3166,7 +3389,8 @@ class ProofEditorImpl implements ProofEditor {
       && (this.collabConnectionStatus === 'connected' || allowTransientRecoveryEdits)
       && !awaitingTemplateSeed;
     const collabReconnectStable = !this.pendingCollabRebindOnSync
-      && !this.suppressTrackChangesDuringCollabReconnect;
+      && !this.suppressTrackChangesDuringCollabReconnect
+      && !this.shareReviewReconnectEditLock;
     const hydrated = !baseAllowLocalEdits
       ? true
       : hydratedForEditing;
@@ -6612,6 +6836,33 @@ class ProofEditorImpl implements ProofEditor {
           });
         }
 
+        const blockedTrackChangesMarkMutation = suggestionsEnabled
+          && !isSuggestionMetaChange
+          && !isHistoryChange
+          && !isDocumentLoad
+          && !isRemoteContentChange
+          && !isSystemTrackChangesSuppressed
+          && marksMeta === undefined
+          ? getBlockedTrackChangesMarkMutation(tr, beforeState)
+          : null;
+        if (blockedTrackChangesMarkMutation) {
+          this.pendingDomSuggestionSelection = null;
+          console.log('[tc.dispatch.blockUnsupportedMarkMutation]', {
+            reason: blockedTrackChangesMarkMutation.reason,
+            markNames: blockedTrackChangesMarkMutation.markNames,
+            stepTypes: blockedTrackChangesMarkMutation.stepTypes,
+            storedMarksSet: tr?.storedMarksSet === true,
+            docChanged: tr?.docChanged === true,
+          });
+          this.recordTrackChangesDebugEvent('dispatch-unsupported-mark-mutation-blocked', {
+            reason: blockedTrackChangesMarkMutation.reason,
+            markNames: blockedTrackChangesMarkMutation.markNames,
+            stepTypes: blockedTrackChangesMarkMutation.stepTypes,
+            meta: summarizeTransactionMeta(tr),
+          }, view);
+          return;
+        }
+
         if (Boolean(tr?.docChanged) && shouldSuppressHandledTextInputEcho(beforeState, tr)) {
           this.pendingDomSuggestionSelection = null;
           console.log('[tc.dispatch.suppressHandledTextInputEcho]', {
@@ -6724,15 +6975,6 @@ class ProofEditorImpl implements ProofEditor {
               undo: isUndoHistoryTransaction(tr),
             }, view);
             dispatchWithRevision(tr, 'historyPassthrough');
-            if (isUndoHistoryTransaction(tr)) {
-              const historyReconcileTr = buildHistorySuggestionMetadataReconciliationTransaction(
-                beforeState,
-                view.state,
-              );
-              if (historyReconcileTr) {
-                dispatchWithRevision(historyReconcileTr, 'historySuggestionMetadataReconcile');
-              }
-            }
             return;
           }
 
@@ -10333,8 +10575,20 @@ class ProofEditorImpl implements ProofEditor {
       skipReconnectTemplateSeed?: boolean;
       preserveEditorStateDuringReconnect?: boolean;
       resetEditorDocOnReconnect?: boolean;
+      lockLocalEditsUntilStable?: boolean;
+      localReviewAction?: 'accept' | 'reject';
+      localReviewMarkIds?: string[];
     },
   ): Promise<boolean> {
+    console.log('[applyShareMutationDocumentResult] incoming result', JSON.parse(JSON.stringify({
+      markdown: typeof result?.markdown === 'string' ? result.markdown : null,
+      marks: result?.marks && typeof result.marks === 'object' && !Array.isArray(result.marks)
+        ? result.marks
+        : null,
+      collab: result?.collab && typeof result.collab === 'object' && !Array.isArray(result.collab)
+        ? result.collab
+        : null,
+    })));
     const markdown = typeof result?.markdown === 'string' ? result.markdown : null;
     const marks = (result?.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
       ? result.marks as Record<string, StoredMark>
@@ -10343,6 +10597,11 @@ class ProofEditorImpl implements ProofEditor {
     const skipReconnectTemplateSeed = options?.skipReconnectTemplateSeed === true;
     const preserveEditorStateDuringReconnect = options?.preserveEditorStateDuringReconnect === true;
     const resetEditorDocOnReconnect = options?.resetEditorDocOnReconnect === true;
+    const lockLocalEditsUntilStable = options?.lockLocalEditsUntilStable === true;
+    const localReviewAction = options?.localReviewAction ?? null;
+    const localReviewMarkIds = Array.from(new Set(
+      (options?.localReviewMarkIds ?? []).filter((markId) => typeof markId === 'string' && markId.length > 0),
+    ));
     this.traceShareReview('mutation.apply-result', {
       collabStatus,
       markdown: this.summarizeTraceMarkdown(markdown),
@@ -10350,15 +10609,35 @@ class ProofEditorImpl implements ProofEditor {
       skipReconnectTemplateSeed,
       preserveEditorStateDuringReconnect,
       resetEditorDocOnReconnect,
+      lockLocalEditsUntilStable,
+      localReviewAction,
+      localReviewMarkIds,
     });
     resetSuggestionsInsertCoalescing();
     if (markdown !== null && collabStatus === 'pending' && preserveEditorStateDuringReconnect) {
       this.armShareReviewRefreshCooldown();
+      if (localReviewAction && localReviewMarkIds.length > 0) {
+        const locallyResolved = this.tryResolveShareReviewMutationLocallyMany(
+          localReviewMarkIds,
+          localReviewAction,
+          result,
+        );
+        if (locallyResolved) {
+          return true;
+        }
+      }
       this.pendingCollabReconnectTemplateOverride = null;
       this.skipNextCollabTemplateSeed = true;
       this.preserveEditorStateOnNextCollabReconnect = true;
       this.resetEditorDocOnNextCollabReconnect = resetEditorDocOnReconnect;
+      this.setShareReviewReconnectEditLock(
+        lockLocalEditsUntilStable
+          && this.collabEnabled
+          && Boolean(this.activeCollabSession),
+      );
       if (this.collabEnabled) {
+        this.collabConnectionStatus = 'connecting';
+        this.collabIsSynced = false;
         this.disconnectCollabService();
       }
       this.loadCanonicalShareDocument(markdown, marks);
@@ -10395,6 +10674,7 @@ class ProofEditorImpl implements ProofEditor {
       this.preserveEditorStateOnNextCollabReconnect = false;
       this.resetEditorDocOnNextCollabReconnect = false;
       this.suppressTrackChangesDuringCollabReconnect = false;
+      this.setShareReviewReconnectEditLock(false);
       this.updateShareEditGate();
       this.releaseDeferredShareMarksFlush();
     }
@@ -10510,6 +10790,118 @@ class ProofEditorImpl implements ProofEditor {
         this.pendingCollabReconnectTemplateOverride = null;
         this.skipNextCollabTemplateSeed = true;
         this.preserveEditorStateOnNextCollabReconnect = true;
+        this.resetEditorDocOnNextCollabReconnect = false;
+      }
+      if (this.collabEnabled && this.activeCollabSession) {
+        void this.refreshCollabSessionAndReconnect(false);
+      }
+    }
+
+    return matchedServerResult;
+  }
+
+  private tryResolveShareReviewMutationLocallyMany(
+    markIds: string[],
+    action: 'accept' | 'reject',
+    result: {
+      markdown?: string;
+      marks?: Record<string, unknown> | null;
+      collab?: { status?: string; reason?: string };
+    },
+  ): boolean {
+    const uniqueMarkIds = Array.from(new Set(markIds.filter((markId) => typeof markId === 'string' && markId.length > 0)));
+    if (uniqueMarkIds.length === 0) return false;
+    if (uniqueMarkIds.length === 1) {
+      return this.tryResolveShareReviewMutationLocally(uniqueMarkIds[0]!, action, result);
+    }
+    if (!this.editor || !this.collabEnabled || !this.collabCanEdit) return false;
+
+    const markdown = typeof result?.markdown === 'string' ? result.markdown : null;
+    const collabStatus = typeof result?.collab?.status === 'string' ? result.collab.status : '';
+    if (markdown === null || collabStatus !== 'pending') return false;
+
+    const serverMarks = (result?.marks && typeof result.marks === 'object' && !Array.isArray(result.marks))
+      ? result.marks as Record<string, StoredMark>
+      : {};
+    const expectedMarkdown = this.normalizeMarkdownForCollab(markdown);
+    this.traceShareReview('mutation.local-resolve-many.start', {
+      action,
+      markIds: uniqueMarkIds,
+      expectedMarkdown: this.summarizeTraceMarkdown(expectedMarkdown),
+      serverMarkCount: Object.keys(serverMarks).length,
+      serverMarkIds: uniqueMarkIds.filter((markId) => Object.prototype.hasOwnProperty.call(serverMarks, markId)),
+    });
+
+    resetSuggestionsInsertCoalescing();
+    this.pendingCollabReconnectTemplateOverride = expectedMarkdown;
+    this.resetEditorDocOnNextCollabReconnect = true;
+    this.suppressTrackChangesDuringCollabReconnect = true;
+    this.traceShareReview('mutation.local-resolve-many.disconnect-old-room', {
+      action,
+      markIds: uniqueMarkIds,
+      expectedMarkdown: this.summarizeTraceMarkdown(expectedMarkdown),
+    }, 'warn');
+    if (this.collabEnabled) {
+      this.collabConnectionStatus = 'connecting';
+      this.collabIsSynced = false;
+      this.updateShareEditGate();
+      this.disconnectCollabService();
+      collabClient.disconnect();
+    }
+
+    let matchedServerResult = false;
+    this.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      const parser = ctx.get(parserCtx);
+      const serializer = ctx.get(serializerCtx);
+
+      let resolvedAll = true;
+      const previousSuppressMarksSync = this.suppressMarksSync;
+      this.suppressMarksSync = true;
+      try {
+        for (const markId of uniqueMarkIds) {
+          const resolved = action === 'accept'
+            ? acceptMark(view, markId, parser)
+            : rejectMark(view, markId);
+          if (!resolved) {
+            resolvedAll = false;
+            break;
+          }
+        }
+      } finally {
+        this.suppressMarksSync = previousSuppressMarksSync;
+      }
+      if (!resolvedAll) {
+        this.traceShareReview('mutation.local-resolve-many.failed', {
+          action,
+          markIds: uniqueMarkIds,
+        }, 'warn');
+        return;
+      }
+
+      const liveMarkdown = this.normalizeMarkdownForCollab(serializer(view.state.doc));
+      const liveMetadata = getMarkMetadataWithQuotes(view.state);
+      matchedServerResult = liveMarkdown === expectedMarkdown
+        && uniqueMarkIds.every((markId) => !Object.prototype.hasOwnProperty.call(liveMetadata, markId));
+      this.traceShareReview('mutation.local-resolve-many.result', {
+        action,
+        markIds: uniqueMarkIds,
+        matchedServerResult,
+        liveMarkdown: this.summarizeTraceMarkdown(liveMarkdown),
+        remainingMarkIds: uniqueMarkIds.filter((markId) => Object.prototype.hasOwnProperty.call(liveMetadata, markId)),
+      }, matchedServerResult ? 'info' : 'warn');
+      if (!matchedServerResult) return;
+    });
+
+    const shouldPreserveMatchedResultAcrossReconnect = action === 'accept'
+      || (action === 'reject' && this.hasActiveRemoteCollabPeer());
+    if (matchedServerResult) {
+      this.applyAuthoritativeShareMarks(serverMarks);
+      if (shouldPreserveMatchedResultAcrossReconnect) {
+        this.pendingCollabReconnectTemplateOverride = null;
+        this.skipNextCollabTemplateSeed = true;
+        this.preserveEditorStateOnNextCollabReconnect = true;
+        this.resetEditorDocOnNextCollabReconnect = false;
       }
       if (this.collabEnabled && this.activeCollabSession) {
         void this.refreshCollabSessionAndReconnect(false);
@@ -10547,6 +10939,7 @@ class ProofEditorImpl implements ProofEditor {
       || !this.collabIsSynced
       || this.collabUnsyncedChanges !== 0
       || this.collabPendingLocalUpdates !== 0
+      || this.shareReviewReconnectEditLock
       || this.pendingCollabRebindOnSync
       || this.suppressTrackChangesDuringCollabReconnect
       || this.collabSessionRefreshInFlight
@@ -10562,7 +10955,8 @@ class ProofEditorImpl implements ProofEditor {
       const awaitingTemplateSeed = Boolean(this.pendingCollabTemplateMarkdown && this.pendingCollabTemplateMarkdown.length > 0);
       const collabReconnectStable = !this.pendingCollabRebindOnSync
         && !this.suppressTrackChangesDuringCollabReconnect
-        && !this.collabSessionRefreshInFlight;
+        && !this.collabSessionRefreshInFlight
+        && !this.shareReviewReconnectEditLock;
       const hydrated = this.hasCompletedInitialCollabHydration && this.isCollabHydratedForEditing();
       const synced = this.collabConnectionStatus === 'connected'
         && this.collabIsSynced
@@ -10583,6 +10977,7 @@ class ProofEditorImpl implements ProofEditor {
       collabPendingLocalUpdates: this.collabPendingLocalUpdates,
       pendingCollabRebindOnSync: this.pendingCollabRebindOnSync,
       suppressTrackChangesDuringCollabReconnect: this.suppressTrackChangesDuringCollabReconnect,
+      shareReviewReconnectEditLock: this.shareReviewReconnectEditLock,
       pendingCollabTemplateMarkdown: this.summarizeTraceMarkdown(this.pendingCollabTemplateMarkdown),
       hasCompletedInitialCollabHydration: this.hasCompletedInitialCollabHydration,
     }, 'warn');
@@ -10631,10 +11026,7 @@ class ProofEditorImpl implements ProofEditor {
     if (Object.keys(authoritativeServerMarks).length === 0) {
       return localCanonical;
     }
-    return canonicalizeStoredMarks({
-      ...localCanonical,
-      ...authoritativeServerMarks,
-    });
+    return buildReviewMutationSnapshotMarks(localCanonical, authoritativeServerMarks);
   }
 
   private buildAuthoritativeShareReviewMutationMarks(
@@ -10648,16 +11040,48 @@ class ProofEditorImpl implements ProofEditor {
     return buildCanonicalShareMarkMetadata(view.state, localMetadata);
   }
 
-  private storedMarksContainPendingIds(marks: Record<string, unknown> | null | undefined, expectedIds: string[]): boolean {
+  private storedMarksContainPendingIds(
+    marks: Record<string, unknown> | null | undefined,
+    expectedIds: string[],
+    expectedMarks?: Record<string, StoredMark> | null,
+  ): boolean {
     if (expectedIds.length === 0) return true;
     if (!marks || typeof marks !== 'object' || Array.isArray(marks)) return false;
-    return expectedIds.every((markId) => {
-      const candidate = marks[markId];
-      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
-      const record = candidate as Partial<StoredMark>;
-      const kind = record.kind;
-      return (kind === 'insert' || kind === 'delete' || kind === 'replace') && record.status === 'pending';
-    });
+    const pendingServerMarks = Object.entries(marks)
+      .filter(([, candidate]) => candidate && typeof candidate === 'object' && !Array.isArray(candidate))
+      .map(([markId, candidate]) => [markId, candidate as StoredMark] as const);
+    const matchedServerIds = new Set<string>();
+
+    for (const markId of expectedIds) {
+      const exactCandidate = marks[markId];
+      if (exactCandidate && typeof exactCandidate === 'object' && !Array.isArray(exactCandidate)) {
+        const record = exactCandidate as Partial<StoredMark>;
+        const kind = record.kind;
+        if ((kind === 'insert' || kind === 'delete' || kind === 'replace') && record.status === 'pending') {
+          matchedServerIds.add(markId);
+          continue;
+        }
+      }
+
+      const expectedMark = expectedMarks?.[markId];
+      if (!expectedMark) return false;
+
+      let bestCandidateId: string | null = null;
+      let bestScore = Number.NEGATIVE_INFINITY;
+      for (const [candidateId, candidateMark] of pendingServerMarks) {
+        if (matchedServerIds.has(candidateId)) continue;
+        const score = this.scoreEquivalentShareReviewMark(expectedMark, candidateMark);
+        if (score > bestScore) {
+          bestScore = score;
+          bestCandidateId = candidateId;
+        }
+      }
+
+      if (!bestCandidateId || bestScore < 180) return false;
+      matchedServerIds.add(bestCandidateId);
+    }
+
+    return true;
   }
 
   private doShareReviewMutationMarkdownsMatch(
@@ -10666,12 +11090,31 @@ class ProofEditorImpl implements ProofEditor {
   ): boolean {
     if (typeof expectedMarkdown !== 'string') return true;
     if (typeof actualMarkdown !== 'string') return false;
-    return this.normalizeMarkdownForCollab(actualMarkdown) === this.normalizeMarkdownForCollab(expectedMarkdown);
+    const normalizedActual = normalizeMarkdownForComparison(this.normalizeMarkdownForCollab(actualMarkdown));
+    const normalizedExpected = normalizeMarkdownForComparison(this.normalizeMarkdownForCollab(expectedMarkdown));
+    if (normalizedActual === normalizedExpected) return true;
+
+    const normalizedActualVisible = canonicalizeVisibleTextBlockSeparators(
+      stripMarkdownVisibleText(normalizedActual),
+    );
+    const normalizedExpectedVisible = canonicalizeVisibleTextBlockSeparators(
+      stripMarkdownVisibleText(normalizedExpected),
+    );
+    const visibleMatch = normalizedActualVisible === normalizedExpectedVisible;
+    if (visibleMatch) {
+      this.logReviewWhitespaceDebug('preflush.markdown-match-visible-fallback', {
+        actualMarkdown: summarizeReviewWhitespaceMarkdown(actualMarkdown),
+        expectedMarkdown: summarizeReviewWhitespaceMarkdown(expectedMarkdown),
+        normalizedActualVisible,
+        normalizedExpectedVisible,
+      });
+    }
+    return visibleMatch;
   }
 
   private async waitForAuthoritativeShareReviewMarks(
     expectedIds: string[],
-    options?: { expectedMarkdown?: string | null },
+    options?: { expectedMarkdown?: string | null; expectedMarks?: Record<string, StoredMark> | null },
   ): Promise<boolean> {
     if (!this.isShareMode || expectedIds.length === 0) return true;
 
@@ -10686,7 +11129,7 @@ class ProofEditorImpl implements ProofEditor {
           typeof context.doc?.markdown === 'string' ? context.doc.markdown : null,
           options?.expectedMarkdown ?? null,
         );
-        if (this.storedMarksContainPendingIds(serverMarks, expectedIds) && markdownMatches) {
+        if (this.storedMarksContainPendingIds(serverMarks, expectedIds, options?.expectedMarks) && markdownMatches) {
           this.lastReceivedServerMarks = serverMarks
             ? { ...(serverMarks as Record<string, StoredMark>) }
             : {};
@@ -10706,11 +11149,29 @@ class ProofEditorImpl implements ProofEditor {
   private async forcePersistCurrentShareReviewState(expectedIds: string[]): Promise<boolean> {
     const snapshot = this.getCurrentShareReviewPersistSnapshot();
     if (!snapshot) return false;
-    const persisted = await shareClient.pushUpdate(snapshot.markdown, snapshot.marks, getCurrentActor());
+    const shouldPersistMarksOnly = snapshot.markdown.trim().length === 0;
+    console.log('[forcePersistCurrentShareReviewState] persist request', {
+      mode: shouldPersistMarksOnly ? 'marks-only' : 'full-update',
+      expectedIds: [...expectedIds],
+      snapshotPendingIds: [...snapshot.pendingIds],
+      snapshotMarkdown: summarizeReviewWhitespaceMarkdown(snapshot.markdown),
+      snapshotMarks: summarizeReviewWhitespaceMarks(snapshot.marks),
+    });
+    const persisted = shouldPersistMarksOnly
+      ? await shareClient.pushMarks(snapshot.marks, getCurrentActor())
+      : await shareClient.pushUpdate(snapshot.markdown, snapshot.marks, getCurrentActor());
     if (!persisted) return false;
+    console.log('[forcePersistCurrentShareReviewState] persist succeeded', {
+      mode: shouldPersistMarksOnly ? 'marks-only' : 'full-update',
+      expectedIds: [...expectedIds],
+      snapshotPendingIds: [...snapshot.pendingIds],
+    });
     return this.waitForAuthoritativeShareReviewMarks(
       expectedIds.length > 0 ? expectedIds : snapshot.pendingIds,
-      { expectedMarkdown: snapshot.markdown },
+      {
+        expectedMarkdown: shouldPersistMarksOnly ? null : snapshot.markdown,
+        expectedMarks: snapshot.marks,
+      },
     );
   }
 
@@ -10735,6 +11196,7 @@ class ProofEditorImpl implements ProofEditor {
       const authoritativeMarksReady = pendingPersistSucceeded
         ? await this.waitForAuthoritativeShareReviewMarks(expectedPendingIds, {
             expectedMarkdown,
+            expectedMarks: currentSnapshot?.marks ?? null,
           })
         : false;
       if (!authoritativeMarksReady) {
@@ -10865,77 +11327,78 @@ class ProofEditorImpl implements ProofEditor {
       console.warn('[markAcceptPersisted] Editor not initialized');
       return false;
     }
+    return this.markAcceptManyPersisted([markId]);
+  }
+
+  async markAcceptManyPersisted(markIds: string[]): Promise<boolean> {
+    if (!this.editor) {
+      console.warn('[markAcceptManyPersisted] Editor not initialized');
+      return false;
+    }
+
+    const uniqueMarkIds = Array.from(new Set(markIds.filter((markId) => typeof markId === 'string' && markId.length > 0)));
+    if (uniqueMarkIds.length === 0) return false;
     if (!this.isShareMode) {
-      return this.markAccept(markId);
+      let acceptedAll = true;
+      for (const markId of uniqueMarkIds) {
+        if (!this.markAccept(markId)) {
+          acceptedAll = false;
+        }
+      }
+      return acceptedAll;
     }
 
     return this.runSerializedShareReviewMutation(async () => {
-      const sourceMark = this.getCurrentShareReviewStoredMark(markId);
-      const ready = await this.flushShareReviewMutationState([markId]);
+      const ready = await this.flushShareReviewMutationState(uniqueMarkIds);
       if (!ready) return false;
+
       const actor = getCurrentActor();
       const snapshot = this.buildShareBatchSuggestionSnapshot();
-      const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);
-      const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;
-      const pendingCountBefore = this.hasActiveRemoteCollabPeer()
-        ? null
-        : this.getLocalPendingShareReviewMarkCount();
-      this.beginShareReviewTrace('accept', markId);
-      const result = await shareClient.acceptSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);
+      const requestedIds = Array.from(new Set(
+        uniqueMarkIds.map((markId) =>
+          this.resolveShareReviewMutationRequestMarkId(markId, this.getCurrentShareReviewStoredMark(markId))),
+      ));
+      if (requestedIds.length === 0) return false;
+
+      console.log('[markAcceptManyPersisted] acceptSuggestions request', {
+        markIds: [...uniqueMarkIds],
+        requestedIds: [...requestedIds],
+        snapshotMarks: snapshot?.marks ? JSON.parse(JSON.stringify(snapshot.marks)) as Record<string, unknown> : null,
+      });
+      const result = await shareClient.acceptSuggestions(requestedIds, actor, undefined, snapshot ?? undefined);
       if (!result || 'error' in result || result.success !== true) {
         this.traceShareReview('mutation.api-failed', {
-          action: 'accept',
-          markId,
+          action: 'accept-many',
+          markIds: uniqueMarkIds,
+          requestedIds,
           result,
         }, 'error');
-        console.error('[markAcceptPersisted] Failed to persist suggestion acceptance via share mutation:', result);
+        console.error('[markAcceptManyPersisted] Failed to persist suggestion acceptance via share mutation:', result);
         return false;
       }
-      this.beginShareReviewTrace('accept', markId, typeof result.markdown === 'string' ? result.markdown : null);
+
       this.traceShareReview('mutation.api-succeeded', {
-        action: 'accept',
-        markId,
+        action: 'accept-many',
+        markIds: uniqueMarkIds,
+        requestedIds,
         collabStatus: result.collab?.status ?? null,
         serverMarkCount: result.marks && typeof result.marks === 'object' && !Array.isArray(result.marks)
           ? Object.keys(result.marks).length
           : null,
       });
 
-      const resolvedMarkIds = Array.from(new Set([markId, effectiveMarkId]));
-      tombstoneResolvedMarkIds(resolvedMarkIds, { reason: 'deleted' });
-      const shouldPreferCanonicalDeleteResult = resolvedSourceMark?.kind === 'delete';
-      let success = !shouldPreferCanonicalDeleteResult
-        && this.tryResolveShareReviewMutationLocally(markId, 'accept', result);
-      if (!success) {
-        success = await this.applyShareMutationDocumentResult(result, {
-          skipReconnectTemplateSeed: true,
-          preserveEditorStateDuringReconnect: true,
-          resetEditorDocOnReconnect: true,
-        });
-      }
-      if (success) {
-        success = await this.ensureShareReviewMutationAppliedLocally(
-          result,
-          resolvedMarkIds,
-          resolvedSourceMark,
-          pendingCountBefore,
-        );
-      }
+      tombstoneResolvedMarkIds(Array.from(new Set([...uniqueMarkIds, ...requestedIds])), { reason: 'deleted' });
+      const success = await this.applyShareMutationDocumentResult(result, {
+        skipReconnectTemplateSeed: true,
+        preserveEditorStateDuringReconnect: true,
+        localReviewAction: 'accept',
+        localReviewMarkIds: uniqueMarkIds,
+      });
       if (success && this.editor) {
-        const shouldAwaitStableState = this.shouldAwaitShareReviewMutationSettle();
-        if (shouldAwaitStableState) {
+        if (this.hasActiveRemoteCollabPeer()) {
           await this.waitForStableShareReviewMutationState();
-          success = await this.ensureShareReviewMutationAppliedLocally(
-            result,
-            resolvedMarkIds,
-            resolvedSourceMark,
-            pendingCountBefore,
-          );
         }
-        if (!success) {
-          return false;
-        }
-        captureEvent('suggestion_accepted', { count: 1 });
+        captureEvent('suggestion_accepted', { count: requestedIds.length });
         this.editor.action((ctx) => {
           const view = ctx.get(editorViewCtx);
           const stats = getAuthorshipStats(view);
@@ -11009,7 +11472,6 @@ class ProofEditorImpl implements ProofEditor {
       const actor = getCurrentActor();
       const snapshot = this.buildShareBatchSuggestionSnapshot();
       const effectiveMarkId = this.resolveShareReviewMutationRequestMarkId(markId, sourceMark);
-      const resolvedSourceMark = this.getAuthoritativeServerMarksForReview()[effectiveMarkId] ?? sourceMark;
       this.beginShareReviewTrace('reject', markId);
       const result = await shareClient.rejectSuggestion(effectiveMarkId, actor, undefined, snapshot ?? undefined);
       if (!result || 'error' in result || result.success !== true) {
@@ -11032,21 +11494,11 @@ class ProofEditorImpl implements ProofEditor {
       });
 
       tombstoneResolvedMarkIds(Array.from(new Set([markId, effectiveMarkId])), { reason: 'deleted' });
-      const preserveRejectResultAcrossReconnect = this.hasActiveRemoteCollabPeer();
-      const shouldPreferCanonicalDeleteResult = resolvedSourceMark?.kind === 'delete';
-      const success = (
-        !shouldPreferCanonicalDeleteResult
-        && this.tryResolveShareReviewMutationLocally(markId, 'reject', result)
-      )
-        || await this.applyShareMutationDocumentResult(
-          result,
-          preserveRejectResultAcrossReconnect
-            ? {
-                skipReconnectTemplateSeed: true,
-                preserveEditorStateDuringReconnect: true,
-              }
-            : undefined,
-        );
+      const success = await this.applyShareMutationDocumentResult(result, {
+        skipReconnectTemplateSeed: true,
+        preserveEditorStateDuringReconnect: true,
+        lockLocalEditsUntilStable: true,
+      });
       if (success && this.editor) {
         if (this.hasActiveRemoteCollabPeer()) {
           await this.waitForStableShareReviewMutationState();
@@ -11340,6 +11792,12 @@ class ProofEditorImpl implements ProofEditor {
       if (!serialized) return;
       const markdown = this.normalizeMarkdownForCollab(serialized);
       const metadata = this.buildPersistableShareReviewSnapshotMarks(view);
+      this.logReviewWhitespaceDebug('buildShareBatchSuggestionSnapshot', {
+        serializedEqualsSnapshot: serialized === markdown,
+        serializedMarkdown: summarizeReviewWhitespaceMarkdown(serialized),
+        snapshotMarkdown: summarizeReviewWhitespaceMarkdown(markdown),
+        snapshotMarks: summarizeReviewWhitespaceMarks(metadata as Record<string, unknown>),
+      });
       snapshot = {
         markdown,
         marks: metadata as Record<string, unknown>,
@@ -11371,7 +11829,27 @@ class ProofEditorImpl implements ProofEditor {
         const actor = getCurrentActor();
         const snapshot = this.buildShareBatchSuggestionSnapshot();
         const authoritativeIds = this.getAuthoritativePendingSuggestionIdsForShareReview();
-        const requestedIds = this.getRequestedShareReviewBatchMarkIds(initialIds, authoritativeIds);
+        const snapshotPendingIds = snapshot
+          ? this.getSortedPendingSuggestionIdsFromStoredMarks(snapshot.marks as Record<string, StoredMark>)
+          : [];
+        const requestedIds = snapshotPendingIds.length > 0
+          ? snapshotPendingIds
+          : this.getRequestedShareReviewBatchMarkIds(initialIds, authoritativeIds);
+        this.logReviewWhitespaceDebug('markAcceptAll.request', {
+          initialIds,
+          authoritativeIds,
+          snapshotPendingIds,
+          requestedIds,
+          snapshotMarkdown: summarizeReviewWhitespaceMarkdown(snapshot?.markdown ?? null),
+          snapshotMarks: summarizeReviewWhitespaceMarks(snapshot?.marks ?? null),
+        });
+        console.log('[markAcceptAll] acceptSuggestions request', {
+          initialIds: [...initialIds],
+          authoritativeIds: [...authoritativeIds],
+          snapshotPendingIds: [...snapshotPendingIds],
+          requestedIds: [...requestedIds],
+          snapshotMarks: snapshot?.marks ? JSON.parse(JSON.stringify(snapshot.marks)) as Record<string, unknown> : null,
+        });
         const result = await shareClient.acceptSuggestions(requestedIds, actor, undefined, snapshot ?? undefined);
         if (!result || 'error' in result || result.success !== true) {
           console.error('[markAcceptAll] Failed to persist suggestion acceptance via share mutation:', result);
@@ -11382,6 +11860,8 @@ class ProofEditorImpl implements ProofEditor {
         const success = await this.applyShareMutationDocumentResult(result, {
           skipReconnectTemplateSeed: true,
           preserveEditorStateDuringReconnect: true,
+          localReviewAction: 'accept',
+          localReviewMarkIds: initialIds,
         });
         if (success && this.editor) {
           await this.waitForStableShareReviewMutationState();
@@ -11467,7 +11947,9 @@ class ProofEditorImpl implements ProofEditor {
         if (!latestSuccessfulResult || rejectedIds.length === 0) return;
 
         tombstoneResolvedMarkIds(rejectedIds, { reason: 'deleted' });
-        const success = await this.applyShareMutationDocumentResult(latestSuccessfulResult);
+        const success = await this.applyShareMutationDocumentResult(latestSuccessfulResult, {
+          lockLocalEditsUntilStable: true,
+        });
         if (success && this.editor) {
           await this.waitForStableShareReviewMutationState();
           captureEvent('suggestion_rejected', { count: rejectedIds.length });

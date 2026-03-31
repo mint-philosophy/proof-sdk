@@ -4,7 +4,8 @@ export function canonicalizeVisibleTextBlockSeparators(text: string): string {
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n[ \t]+/g, '\n')
     .replace(/\n{2,}/g, '\n')
-    .replace(/^\n+|\n+$/g, '');
+    .replace(/^\n+|\n+$/g, '')
+    .replace(/[ \t]+$/gm, '');
 }
 
 export function stripMarkdownVisibleText(markdown: string): string {

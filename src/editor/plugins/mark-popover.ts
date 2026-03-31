@@ -1,4 +1,5 @@
 import { $prose } from '@milkdown/kit/utils';
+import type { Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 
@@ -71,8 +72,8 @@ const SUGGESTION_HOVER_CLOSE_DELAY_MS = 180;
 const REVIEW_ACTION_RETRY_DELAY_MS = 100;
 const REVIEW_ACTION_MAX_RETRIES = 12;
 const REVIEW_FOLLOWUP_RETRY_DELAY_MS = 50;
-const REVIEW_FOLLOWUP_MAX_RETRIES = 12;
-const REVIEW_FOLLOWUP_MAX_RETRIES_WITH_TARGET = 32;
+const REVIEW_FOLLOWUP_MAX_WAIT_MS = 2_000;
+const REVIEW_FOLLOWUP_MAX_WAIT_WITH_TARGET_MS = 10_000;
 const TRACK_CHANGES_EDITOR_CLICK_SUPPRESSION_MS = 500;
 const DESKTOP_REVIEW_GUTTER_WIDTH_PX = 360;
 const REPLACEMENT_PAIR_MAX_TIMESTAMP_DRIFT_MS = 2_000;
@@ -121,6 +122,21 @@ type TouchSafeButtonOptions = {
   onMouseDown?: (event: MouseEvent) => void;
 };
 
+type SuggestionReviewFollowupCollabState = {
+  collabEnabled?: boolean;
+  activeCollabSession?: unknown;
+  collabConnectionStatus?: string;
+  collabIsSynced?: boolean;
+  collabUnsyncedChanges?: number;
+  collabPendingLocalUpdates?: number;
+  pendingCollabRebindOnSync?: boolean;
+  suppressTrackChangesDuringCollabReconnect?: boolean;
+  collabSessionRefreshInFlight?: boolean;
+  pendingCollabTemplateMarkdown?: string | null;
+  hasCompletedInitialCollabHydration?: boolean;
+  isCollabHydratedForEditing?: boolean | (() => boolean);
+};
+
 function formatTimestamp(iso: string | undefined): string {
   if (!iso) return '';
   const date = new Date(iso);
@@ -166,6 +182,31 @@ function resolveAnchorRange(view: EditorView, mark: Mark, pos?: number | null): 
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(value, max));
+}
+
+export function isSuggestionReviewFollowupCollabPending(
+  proof: SuggestionReviewFollowupCollabState | null | undefined,
+): boolean {
+  if (!proof?.collabEnabled || !proof?.activeCollabSession) return false;
+
+  const hydratedForEditing = typeof proof.isCollabHydratedForEditing === 'function'
+    ? proof.isCollabHydratedForEditing()
+    : proof.isCollabHydratedForEditing;
+  const awaitingTemplateSeed = Boolean(
+    typeof proof.pendingCollabTemplateMarkdown === 'string'
+    && proof.pendingCollabTemplateMarkdown.length > 0,
+  );
+
+  return proof.collabConnectionStatus !== 'connected'
+    || proof.collabIsSynced !== true
+    || (proof.collabUnsyncedChanges ?? 0) !== 0
+    || (proof.collabPendingLocalUpdates ?? 0) !== 0
+    || proof.pendingCollabRebindOnSync === true
+    || proof.suppressTrackChangesDuringCollabReconnect === true
+    || proof.collabSessionRefreshInFlight === true
+    || awaitingTemplateSeed
+    || proof.hasCompletedInitialCollabHydration === false
+    || hydratedForEditing === false;
 }
 
 function hasNonEmptyCommentText(value: string): boolean {
@@ -480,6 +521,52 @@ function getSuggestionSortEnd(mark: Mark): number {
   return mark.range?.to ?? mark.range?.from ?? Number.MAX_SAFE_INTEGER;
 }
 
+function getSuggestionReviewItemSortRange(
+  reviewItem: SuggestionReviewItem,
+  doc: ProseMirrorNode | null = null,
+): MarkRange | null {
+  const memberMarks = [reviewItem.deleteMark, reviewItem.insertMark]
+    .filter((mark): mark is Mark => Boolean(mark));
+
+  const ranges = doc
+    ? resolveMarks(doc, memberMarks)
+      .flatMap((mark) => mark.resolvedRanges ?? (mark.resolvedRange ? [mark.resolvedRange] : []))
+    : [];
+  const effectiveRanges = ranges.length > 0
+    ? ranges
+    : memberMarks.flatMap((mark) => (mark.range ? [mark.range] : []));
+  if (effectiveRanges.length === 0) return null;
+
+  return {
+    from: Math.min(...effectiveRanges.map((range) => range.from)),
+    to: Math.max(...effectiveRanges.map((range) => range.to)),
+  };
+}
+
+function orderSuggestionReviewItemsByDocumentPosition(
+  suggestions: SuggestionReviewItem[],
+  doc: ProseMirrorNode | null = null,
+): SuggestionReviewItem[] {
+  return suggestions
+    .map((item, index) => ({
+      item,
+      index,
+      range: getSuggestionReviewItemSortRange(item, doc),
+    }))
+    .sort((left, right) => {
+      const startDiff = (left.range?.from ?? Number.MAX_SAFE_INTEGER)
+        - (right.range?.from ?? Number.MAX_SAFE_INTEGER);
+      if (startDiff !== 0) return startDiff;
+
+      const endDiff = (left.range?.to ?? Number.MAX_SAFE_INTEGER)
+        - (right.range?.to ?? Number.MAX_SAFE_INTEGER);
+      if (endDiff !== 0) return endDiff;
+
+      return left.index - right.index;
+    })
+    .map(({ item }) => item);
+}
+
 function rangesTouch(left: MarkRange | undefined, right: MarkRange | undefined): boolean {
   if (!left || !right) return false;
   return left.to === right.from
@@ -487,7 +574,27 @@ function rangesTouch(left: MarkRange | undefined, right: MarkRange | undefined):
     || (left.from <= right.to && right.from <= left.to);
 }
 
-function isReplacementPair(insertMark: Mark, deleteMark: Mark): boolean {
+const REPLACEMENT_PAIR_MAX_STRUCTURAL_GAP_CHARS = 4;
+
+function hasOnlyWhitespaceStructuralGapBetweenRanges(
+  left: MarkRange | undefined,
+  right: MarkRange | undefined,
+  doc: InlineTextAccessor | null,
+): boolean {
+  if (!left || !right || !doc) return false;
+  const first = left.from <= right.from ? left : right;
+  const second = first === left ? right : left;
+  if (second.from < first.to) return false;
+  const gapText = doc.textBetween(first.to, second.from, '\n', '\n');
+  if (gapText.length > REPLACEMENT_PAIR_MAX_STRUCTURAL_GAP_CHARS) return false;
+  return gapText.replace(/\u2060/g, '').trim().length === 0;
+}
+
+function isReplacementPair(
+  insertMark: Mark,
+  deleteMark: Mark,
+  doc: InlineTextAccessor | null = null,
+): boolean {
   if (insertMark.kind !== 'insert' || deleteMark.kind !== 'delete') return false;
   if (insertMark.by !== deleteMark.by) return false;
   if (!insertMark.at || !deleteMark.at) return false;
@@ -500,7 +607,8 @@ function isReplacementPair(insertMark: Mark, deleteMark: Mark): boolean {
   const insertedText = (insertMark.data as InsertData | undefined)?.content ?? '';
   const deletedText = deleteMark.quote ?? '';
   if (!insertedText || !deletedText) return false;
-  return rangesTouch(insertMark.range, deleteMark.range);
+  return rangesTouch(insertMark.range, deleteMark.range)
+    || hasOnlyWhitespaceStructuralGapBetweenRanges(insertMark.range, deleteMark.range, doc);
 }
 
 function parseMarkTimestamp(mark: Mark): number | null {
@@ -557,12 +665,13 @@ function buildMergedInsertReviewMark(fragments: Mark[], doc: InlineTextAccessor)
 function getAdjacentReplacementPair(
   mark: Mark,
   nextMark: Mark | null,
+  doc: InlineTextAccessor | null = null,
 ): { insertMark: Mark; deleteMark: Mark } | null {
   if (!nextMark) return null;
-  if (mark.kind === 'insert' && nextMark.kind === 'delete' && isReplacementPair(mark, nextMark)) {
+  if (mark.kind === 'insert' && nextMark.kind === 'delete' && isReplacementPair(mark, nextMark, doc)) {
     return { insertMark: mark, deleteMark: nextMark };
   }
-  if (mark.kind === 'delete' && nextMark.kind === 'insert' && isReplacementPair(nextMark, mark)) {
+  if (mark.kind === 'delete' && nextMark.kind === 'insert' && isReplacementPair(nextMark, mark, doc)) {
     return { insertMark: nextMark, deleteMark: mark };
   }
   return null;
@@ -585,7 +694,7 @@ export function buildSuggestionReviewItems(
   for (let index = 0; index < sorted.length; index += 1) {
     const mark = sorted[index];
     const nextMark = sorted[index + 1] ?? null;
-    const replacementPair = getAdjacentReplacementPair(mark, nextMark);
+    const replacementPair = getAdjacentReplacementPair(mark, nextMark, doc);
 
     if (replacementPair) {
       items.push({
@@ -667,44 +776,99 @@ export function getAdjacentSuggestionReviewMarkId(
 export function resolveSuggestionActionTarget(
   suggestions: SuggestionReviewItem[],
   preferredMarkIds: Array<string | null | undefined>,
+  doc: ProseMirrorNode | null = null,
 ): SuggestionActionTarget | null {
-  if (suggestions.length === 0) return null;
+  const orderedSuggestions = orderSuggestionReviewItemsByDocumentPosition(suggestions, doc);
+  if (orderedSuggestions.length === 0) return null;
 
   const preferredId = preferredMarkIds.find((value) =>
     typeof value === 'string'
     && value.length > 0
-    && suggestions.some((item) => item.memberMarkIds.includes(value)),
+    && orderedSuggestions.some((item) => item.memberMarkIds.includes(value)),
   ) ?? null;
   const reviewItem = preferredId
-    ? (suggestions.find((item) => item.memberMarkIds.includes(preferredId)) ?? null)
-    : (suggestions[0] ?? null);
+    ? (orderedSuggestions.find((item) => item.memberMarkIds.includes(preferredId)) ?? null)
+    : (orderedSuggestions[0] ?? null);
   if (!reviewItem) return null;
 
   return {
     markId: reviewItem.primaryMarkId,
-    nextMarkId: getAdjacentSuggestionReviewMarkId(suggestions, reviewItem.primaryMarkId, 'next'),
+    nextMarkId: getAdjacentSuggestionReviewMarkId(orderedSuggestions, reviewItem.primaryMarkId, 'next'),
     kind: reviewItem.kind,
   };
+}
+
+type SuggestionActionTargetPreference = 'fallback-first' | 'active-first';
+
+export function buildSuggestionActionTargetPreferredMarkIds(
+  fallbackMarkId: string | null | undefined,
+  stateActiveMarkId: string | null | undefined,
+  controllerActiveMarkId: string | null | undefined,
+  preference: SuggestionActionTargetPreference = 'fallback-first',
+): Array<string | null | undefined> {
+  if (preference === 'active-first') {
+    return [
+      stateActiveMarkId,
+      controllerActiveMarkId,
+      fallbackMarkId,
+    ];
+  }
+  return [
+    fallbackMarkId,
+    stateActiveMarkId,
+    controllerActiveMarkId,
+  ];
 }
 
 export function resolveAdjacentSuggestionActionTarget(
   suggestions: SuggestionReviewItem[],
   preferredMarkIds: Array<string | null | undefined>,
   direction: 'next' | 'prev',
+  doc: ProseMirrorNode | null = null,
 ): SuggestionActionTarget | null {
-  const currentTarget = resolveSuggestionActionTarget(suggestions, preferredMarkIds);
+  const orderedSuggestions = orderSuggestionReviewItemsByDocumentPosition(suggestions, doc);
+  const currentTarget = resolveSuggestionActionTarget(orderedSuggestions, preferredMarkIds);
   if (!currentTarget) return null;
 
-  const adjacentMarkId = getAdjacentSuggestionReviewMarkId(suggestions, currentTarget.markId, direction);
+  const adjacentMarkId = getAdjacentSuggestionReviewMarkId(orderedSuggestions, currentTarget.markId, direction);
   if (!adjacentMarkId) return null;
 
-  const adjacentReviewItem = suggestions.find((item) => item.memberMarkIds.includes(adjacentMarkId)) ?? null;
+  const adjacentReviewItem = orderedSuggestions.find((item) => item.memberMarkIds.includes(adjacentMarkId)) ?? null;
   if (!adjacentReviewItem) return null;
 
   return {
     markId: adjacentReviewItem.primaryMarkId,
-    nextMarkId: getAdjacentSuggestionReviewMarkId(suggestions, adjacentReviewItem.primaryMarkId, 'next'),
+    nextMarkId: getAdjacentSuggestionReviewMarkId(orderedSuggestions, adjacentReviewItem.primaryMarkId, 'next'),
     kind: adjacentReviewItem.kind,
+  };
+}
+
+export function resolveSuggestionReviewFollowupTarget(
+  suggestions: SuggestionReviewItem[],
+  preferredMarkId: string | null,
+  reviewedMarkIds: string[],
+  doc: ProseMirrorNode | null = null,
+): { markId: string | null; waitingForPreferred: boolean } {
+  const reviewedIdSet = new Set(reviewedMarkIds);
+  const remainingSuggestions = orderSuggestionReviewItemsByDocumentPosition(
+    suggestions.filter((item) => !item.memberMarkIds.some((id) => reviewedIdSet.has(id))),
+    doc,
+  );
+  if (remainingSuggestions.length === 0) {
+    return { markId: null, waitingForPreferred: false };
+  }
+
+  if (preferredMarkId && !reviewedIdSet.has(preferredMarkId)) {
+    const preferredItem = remainingSuggestions.find((item) => item.memberMarkIds.includes(preferredMarkId));
+    if (preferredItem) {
+      return { markId: preferredItem.primaryMarkId, waitingForPreferred: false };
+    }
+    return { markId: null, waitingForPreferred: true };
+  }
+
+  return {
+    markId: remainingSuggestions[0]?.primaryMarkId ?? null,
+    waitingForPreferred: false,
   };
 }
 
@@ -757,6 +921,7 @@ class MarkPopoverController {
   private reviewActionRetryTimer: number | null = null;
   private suggestionReviewFollowupTimer: number | null = null;
   private suggestionReviewTransitionPending: boolean = false;
+  private suggestionReviewPreferredFollowupMarkId: string | null = null;
   private suggestionRailSignature: string = '';
   private reviewActionSequence: number = 0;
   private reviewActionInFlight: boolean = false;
@@ -786,26 +951,26 @@ class MarkPopoverController {
   }
 
   private getAdjacentSuggestionMarkId(currentMarkId: string, direction: 'next' | 'prev'): string | null {
-    return getAdjacentSuggestionReviewMarkId(this.getPendingSuggestionReviewItems(), currentMarkId, direction);
+    return getAdjacentSuggestionReviewMarkId(
+      orderSuggestionReviewItemsByDocumentPosition(
+        this.getPendingSuggestionReviewItems(),
+        this.view.state.doc,
+      ),
+      currentMarkId,
+      direction,
+    );
   }
 
-  private getSuggestionReviewFollowupMarkId(
+  private getSuggestionReviewFollowupTarget(
     preferredMarkId: string | null,
     reviewedMarkIds: string[],
-  ): string | null {
-    const reviewedIdSet = new Set(reviewedMarkIds);
-    const remainingSuggestions = this.getPendingSuggestionReviewItems()
-      .filter((item) => !item.memberMarkIds.some((id) => reviewedIdSet.has(id)));
-    if (remainingSuggestions.length === 0) return null;
-
-    if (preferredMarkId) {
-      const preferredItem = remainingSuggestions.find((item) => item.memberMarkIds.includes(preferredMarkId));
-      if (preferredItem) {
-        return preferredItem.primaryMarkId;
-      }
-    }
-
-    return remainingSuggestions[0]?.primaryMarkId ?? null;
+  ): { markId: string | null; waitingForPreferred: boolean } {
+    return resolveSuggestionReviewFollowupTarget(
+      this.getPendingSuggestionReviewItems(),
+      preferredMarkId,
+      reviewedMarkIds,
+      this.view.state.doc,
+    );
   }
 
   private openSuggestionAfterReview(
@@ -826,30 +991,40 @@ class MarkPopoverController {
       this.suggestionReviewFollowupTimer = null;
     }
     this.suggestionReviewTransitionPending = true;
+    this.suggestionReviewPreferredFollowupMarkId = preferredMarkId;
     const reviewedIdSet = new Set(reviewedMarkIds);
+    const followupDeadlineAt = Date.now() + (
+      preferredMarkId ? REVIEW_FOLLOWUP_MAX_WAIT_WITH_TARGET_MS : REVIEW_FOLLOWUP_MAX_WAIT_MS
+    );
 
-    const attempt = (remainingAttempts: number): void => {
-      const followupMarkId = this.getSuggestionReviewFollowupMarkId(preferredMarkId, reviewedMarkIds);
+    const attempt = (): void => {
+      const proof = getProofEditorApi();
+      const collabPending = isSuggestionReviewFollowupCollabPending(
+        proof as SuggestionReviewFollowupCollabState | null | undefined,
+      );
+      const followupRemainingMs = Math.max(0, followupDeadlineAt - Date.now());
+      const followupTarget = this.getSuggestionReviewFollowupTarget(preferredMarkId, reviewedMarkIds);
+      const followupMarkId = followupTarget.markId;
+      const waitingForPreferredFollowup = followupTarget.waitingForPreferred;
       console.log('[mark-popover.followup.attempt]', {
         preferredMarkId,
         reviewedMarkIds,
-        remainingAttempts,
         followupMarkId,
+        waitingForPreferredFollowup,
+        followupRemainingMs,
+        collabPending,
         controllerActiveMarkId: this.activeMarkId,
         stateActiveMarkId: getActiveMarkId(this.view.state),
         mode: this.mode,
         popoverVisible: this.popover.style.display !== 'none',
       });
       if (followupMarkId) {
-        const proof = getProofEditorApi();
         const stateActiveMarkId = getActiveMarkId(this.view.state);
         const followupActive = stateActiveMarkId === followupMarkId;
         const followupPanelOpen = this.mode === 'suggestion'
           && followupActive
           && this.popover.style.display !== 'none';
-        const collabStable = !proof?.collabEnabled
-          || !proof?.activeCollabSession
-          || (proof.collabConnectionStatus === 'connected' && proof.collabIsSynced === true);
+        const collabStable = !collabPending;
 
         if (!followupPanelOpen) {
           console.log('[mark-popover.followup.navigate]', {
@@ -865,22 +1040,38 @@ class MarkPopoverController {
             collabStable,
           });
           this.suggestionReviewTransitionPending = false;
+          this.suggestionReviewPreferredFollowupMarkId = null;
           this.suggestionReviewFollowupTimer = null;
           return;
         }
 
-        if (remainingAttempts > 0) {
+        if (followupRemainingMs > 0) {
           this.suggestionReviewFollowupTimer = window.setTimeout(() => {
             this.suggestionReviewFollowupTimer = null;
-            attempt(remainingAttempts - 1);
+            attempt();
           }, REVIEW_FOLLOWUP_RETRY_DELAY_MS);
           return;
         }
 
         this.suggestionReviewTransitionPending = false;
+        this.suggestionReviewPreferredFollowupMarkId = null;
         this.suggestionReviewFollowupTimer = null;
         console.log('[mark-popover.followup.forceOpen]', { followupMarkId });
         this.openForMark(followupMarkId, undefined, { source: 'direct' });
+        return;
+      }
+      if (waitingForPreferredFollowup && followupRemainingMs > 0) {
+        this.suggestionReviewFollowupTimer = window.setTimeout(() => {
+          this.suggestionReviewFollowupTimer = null;
+          attempt();
+        }, REVIEW_FOLLOWUP_RETRY_DELAY_MS);
+        return;
+      }
+      if (collabPending && followupRemainingMs > 0) {
+        this.suggestionReviewFollowupTimer = window.setTimeout(() => {
+          this.suggestionReviewFollowupTimer = null;
+          attempt();
+        }, REVIEW_FOLLOWUP_RETRY_DELAY_MS);
         return;
       }
       if (preferredMarkId && !reviewedIdSet.has(preferredMarkId)) {
@@ -888,6 +1079,7 @@ class MarkPopoverController {
           .some((mark) => mark.id === preferredMarkId);
         if (preferredMarkStillPending) {
           this.suggestionReviewTransitionPending = false;
+          this.suggestionReviewPreferredFollowupMarkId = null;
           this.suggestionReviewFollowupTimer = null;
           console.log('[mark-popover.followup.preferredStillPending]', { preferredMarkId });
           this.openForMark(preferredMarkId, undefined, { source: 'direct' });
@@ -897,24 +1089,27 @@ class MarkPopoverController {
       const fallbackMarkId = this.getFirstPendingSuggestionMarkId();
       if (fallbackMarkId) {
         this.suggestionReviewTransitionPending = false;
+        this.suggestionReviewPreferredFollowupMarkId = null;
         console.log('[mark-popover.followup.fallbackOpen]', { fallbackMarkId });
         this.openForMark(fallbackMarkId, undefined, { source: 'direct' });
         return;
       }
       if (!preferredMarkId) {
         this.suggestionReviewTransitionPending = false;
+        this.suggestionReviewPreferredFollowupMarkId = null;
         console.log('[mark-popover.followup.close.noPreferred]');
         this.close();
         return;
       }
-      if (remainingAttempts > 0) {
+      if (followupRemainingMs > 0) {
         this.suggestionReviewFollowupTimer = window.setTimeout(() => {
           this.suggestionReviewFollowupTimer = null;
-          attempt(remainingAttempts - 1);
+          attempt();
         }, REVIEW_FOLLOWUP_RETRY_DELAY_MS);
         return;
       }
       this.suggestionReviewTransitionPending = false;
+      this.suggestionReviewPreferredFollowupMarkId = null;
       console.log('[mark-popover.followup.close.exhausted]', {
         preferredMarkId,
         reviewedMarkIds,
@@ -924,7 +1119,7 @@ class MarkPopoverController {
 
     this.suggestionReviewFollowupTimer = window.setTimeout(() => {
       this.suggestionReviewFollowupTimer = null;
-      attempt(preferredMarkId ? REVIEW_FOLLOWUP_MAX_RETRIES_WITH_TARGET : REVIEW_FOLLOWUP_MAX_RETRIES);
+      attempt();
     }, 0);
   }
 
@@ -1463,7 +1658,10 @@ class MarkPopoverController {
   }
 
   private getFirstPendingSuggestionMarkId(): string | null {
-    return this.getPendingSuggestionReviewItems()[0]?.primaryMarkId ?? null;
+    return orderSuggestionReviewItemsByDocumentPosition(
+      this.getPendingSuggestionReviewItems(),
+      this.view.state.doc,
+    )[0]?.primaryMarkId ?? null;
   }
 
   private reopenFirstPendingSuggestion(
@@ -1480,29 +1678,34 @@ class MarkPopoverController {
 
   private getLiveSuggestionActionTarget(
     fallbackMarkId?: string | null,
+    options?: { preference?: SuggestionActionTargetPreference },
   ): SuggestionActionTarget | null {
     const suggestions = this.getPendingSuggestionReviewItems();
     const stateActiveMarkId = getActiveMarkId(this.view.state);
-    const preferredMarkIds: Array<string | null | undefined> = [
+    const preferredMarkIds = buildSuggestionActionTargetPreferredMarkIds(
       fallbackMarkId ?? null,
       stateActiveMarkId,
       this.activeMarkId,
-    ];
-    return resolveSuggestionActionTarget(suggestions, preferredMarkIds);
+      options?.preference ?? 'fallback-first',
+    );
+    return resolveSuggestionActionTarget(suggestions, preferredMarkIds, this.view.state.doc);
   }
 
   private getLiveAdjacentSuggestionTarget(
     direction: 'next' | 'prev',
     fallbackMarkId?: string | null,
+    options?: { preference?: SuggestionActionTargetPreference },
   ): SuggestionActionTarget | null {
     return resolveAdjacentSuggestionActionTarget(
       this.getPendingSuggestionReviewItems(),
-      [
+      buildSuggestionActionTargetPreferredMarkIds(
         fallbackMarkId ?? null,
         getActiveMarkId(this.view.state),
         this.activeMarkId,
-      ],
+        options?.preference ?? 'fallback-first',
+      ),
       direction,
+      this.view.state.doc,
     );
   }
 
@@ -1524,16 +1727,21 @@ class MarkPopoverController {
       return;
     }
     if (this.suggestionReviewTransitionPending) {
+      const expectedFollowupMarkId = this.suggestionReviewPreferredFollowupMarkId;
       const followupTarget = this.mode === 'suggestion' && this.popover.style.display !== 'none'
-        ? this.getLiveSuggestionActionTarget(markId)
+        ? this.getLiveSuggestionActionTarget(expectedFollowupMarkId ?? markId)
         : null;
       if (!followupTarget) {
+        return;
+      }
+      if (expectedFollowupMarkId && followupTarget.markId !== expectedFollowupMarkId) {
         return;
       }
       markId = followupTarget.markId;
       nextMarkId = followupTarget.nextMarkId;
       suggestionKind = followupTarget.kind;
       this.suggestionReviewTransitionPending = false;
+      this.suggestionReviewPreferredFollowupMarkId = null;
       if (this.suggestionReviewFollowupTimer !== null) {
         window.clearTimeout(this.suggestionReviewFollowupTimer);
         this.suggestionReviewFollowupTimer = null;
@@ -1604,6 +1812,11 @@ class MarkPopoverController {
     };
 
     const proof = getProofEditorApi();
+    const persistedAcceptManyForMarks = action === 'accept'
+      ? (typeof proof?.markAcceptManyPersisted === 'function'
+        ? (targetMarkIds: string[]) => proof.markAcceptManyPersisted(targetMarkIds)
+        : null)
+      : null;
     const persistedActionForMark = action === 'accept'
       ? (typeof proof?.markAcceptPersisted === 'function'
         ? (targetMarkId: string) => proof.markAcceptPersisted(targetMarkId)
@@ -1628,6 +1841,12 @@ class MarkPopoverController {
         setReviewButtonsBusy(true);
       }
       const runPersistedSequence = async (): Promise<boolean> => {
+        if (persistedAcceptManyForMarks) {
+          const orderedIds = this.getSortedPendingReviewActionIds(reviewedMarkIds);
+          if (orderedIds.length > 1) {
+            return persistedAcceptManyForMarks(orderedIds);
+          }
+        }
         const orderedIds = this.getSortedPendingReviewActionIds(reviewedMarkIds);
         if (orderedIds.length === 0) return true;
 
@@ -2258,6 +2477,17 @@ class MarkPopoverController {
         if (this.shouldSuppressEditorSuggestionAutoOpen(activeMark)) {
           return;
         }
+        if (
+          this.suggestionReviewTransitionPending
+          && this.suggestionReviewPreferredFollowupMarkId
+          && stateActiveMarkId !== this.suggestionReviewPreferredFollowupMarkId
+        ) {
+          console.log('[mark-popover.update.deferNonPreferredFollowupOpen]', {
+            stateActiveMarkId,
+            preferredFollowupMarkId: this.suggestionReviewPreferredFollowupMarkId,
+          });
+          return;
+        }
         console.log('[mark-popover.update.openStateActive]', {
           stateActiveMarkId,
           controllerActiveMarkId: this.activeMarkId,
@@ -2293,14 +2523,12 @@ class MarkPopoverController {
             transitionPending: this.suggestionReviewTransitionPending,
             firstPendingSuggestionMarkId: this.getFirstPendingSuggestionMarkId(),
           });
-          if (this.reopenFirstPendingSuggestion({
-            preserveReviewTransition: this.suggestionReviewTransitionPending,
-          })) {
-            console.log('[mark-popover.update.reopenedFirstPending]');
-            return;
-          }
           if (this.suggestionReviewTransitionPending) {
             console.log('[mark-popover.update.waitingForFollowup]');
+            return;
+          }
+          if (this.reopenFirstPendingSuggestion()) {
+            console.log('[mark-popover.update.reopenedFirstPending]');
             return;
           }
           console.log('[mark-popover.update.close.activeMissing]');
@@ -2386,6 +2614,7 @@ class MarkPopoverController {
     }
     if (!options?.preserveReviewTransition) {
       this.suggestionReviewTransitionPending = false;
+      this.suggestionReviewPreferredFollowupMarkId = null;
     }
     this.hideReviewContextMenu();
     const marks = getMarks(this.view.state);
@@ -2436,6 +2665,7 @@ class MarkPopoverController {
       this.suggestionReviewFollowupTimer = null;
     }
     this.suggestionReviewTransitionPending = false;
+    this.suggestionReviewPreferredFollowupMarkId = null;
     this.hideReviewContextMenu();
     if (this.mode === null) {
       this.hideOverlayChrome();
@@ -3016,17 +3246,17 @@ class MarkPopoverController {
       markId: string;
       nextMarkId: string | null;
       kind: 'insert' | 'delete' | 'replace';
-    } | null => this.getLiveSuggestionActionTarget(mark.id);
+    } | null => this.getLiveSuggestionActionTarget(mark.id, { preference: 'active-first' });
     const getPreviousSuggestionNavigationTarget = (): {
       markId: string;
       nextMarkId: string | null;
       kind: 'insert' | 'delete' | 'replace';
-    } | null => this.getLiveAdjacentSuggestionTarget('prev', mark.id);
+    } | null => this.getLiveAdjacentSuggestionTarget('prev', mark.id, { preference: 'active-first' });
     const getNextSuggestionNavigationTarget = (): {
       markId: string;
       nextMarkId: string | null;
       kind: 'insert' | 'delete' | 'replace';
-    } | null => this.getLiveAdjacentSuggestionTarget('next', mark.id);
+    } | null => this.getLiveAdjacentSuggestionTarget('next', mark.id, { preference: 'active-first' });
     const previousMarkId = getPreviousSuggestionNavigationTarget()?.markId ?? null;
     const nextMarkId = getNextSuggestionNavigationTarget()?.markId ?? null;
 

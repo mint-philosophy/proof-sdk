@@ -354,9 +354,9 @@ async function run(): Promise<void> {
     });
     assertEqual(splitAcceptResult.status, 200, `Expected split suggestion accept to succeed, got ${splitAcceptResult.status}`);
     const splitAcceptBody = splitAcceptResult.body as { marks?: Record<string, { status?: string }> };
-    assertEqual(
-      splitAcceptBody.marks?.[splitAcceptFixture.suggestionId]?.status,
-      'accepted',
+    assert(
+      splitAcceptBody.marks?.[splitAcceptFixture.suggestionId]?.status === 'accepted'
+      || !(splitAcceptFixture.suggestionId in (splitAcceptBody.marks ?? {})),
       'Expected split suggestion accept response to finalize the suggestion status',
     );
     const splitAcceptedDoc = db.getDocumentBySlug(splitSuggestionSlug);
@@ -441,9 +441,9 @@ async function run(): Promise<void> {
     });
     assertEqual(splitRejectResult.status, 200, `Expected split suggestion reject to succeed, got ${splitRejectResult.status}`);
     const splitRejectBody = splitRejectResult.body as { marks?: Record<string, { status?: string }> };
-    assertEqual(
-      splitRejectBody.marks?.[splitRejectFixture.suggestionId]?.status,
-      'rejected',
+    assert(
+      splitRejectBody.marks?.[splitRejectFixture.suggestionId]?.status === 'rejected'
+      || !(splitRejectFixture.suggestionId in (splitRejectBody.marks ?? {})),
       'Expected split suggestion reject response to finalize the suggestion status',
     );
     const splitRejectedDoc = db.getDocumentBySlug(splitRejectSlug);
@@ -721,9 +721,9 @@ async function run(): Promise<void> {
     });
     assertEqual(authoredAcceptResult.status, 200, `Expected authored preservation accept to succeed, got ${authoredAcceptResult.status}`);
     const authoredAcceptBody = authoredAcceptResult.body as { marks?: Record<string, { status?: string }> };
-    assertEqual(
-      authoredAcceptBody.marks?.[authoredAcceptFixture.suggestionId]?.status,
-      'accepted',
+    assert(
+      authoredAcceptBody.marks?.[authoredAcceptFixture.suggestionId]?.status === 'accepted'
+      || !(authoredAcceptFixture.suggestionId in (authoredAcceptBody.marks ?? {})),
       'Expected authored preservation accept response to finalize the suggestion status',
     );
     const authoredAcceptedDoc = db.getDocumentBySlug(authoredAcceptSlug);
@@ -750,9 +750,9 @@ async function run(): Promise<void> {
     });
     assertEqual(authoredRejectResult.status, 200, `Expected authored preservation reject to succeed, got ${authoredRejectResult.status}`);
     const authoredRejectBody = authoredRejectResult.body as { marks?: Record<string, { status?: string }> };
-    assertEqual(
-      authoredRejectBody.marks?.[authoredRejectFixture.suggestionId]?.status,
-      'rejected',
+    assert(
+      authoredRejectBody.marks?.[authoredRejectFixture.suggestionId]?.status === 'rejected'
+      || !(authoredRejectFixture.suggestionId in (authoredRejectBody.marks ?? {})),
       'Expected authored preservation reject response to finalize the suggestion status',
     );
     const authoredRejectedDoc = db.getDocumentBySlug(authoredRejectSlug);

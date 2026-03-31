@@ -558,6 +558,9 @@ export class CollabClient {
 
   requiresHardReconnect(session: CollabSessionInfo): boolean {
     if (!this.provider || !this.ydoc) return true;
+    if (this.lastAuthenticationFailureReason !== null || this.terminalCloseReason === 'permission-denied') {
+      return true;
+    }
     return !this.usesSameLiveSession(session);
   }
 
@@ -752,18 +755,25 @@ export class CollabClient {
     return true;
   }
 
-  reconnectWithSession(session: CollabSessionInfo, options?: { preserveLocalState?: boolean }): void {
+  reconnectWithSession(
+    session: CollabSessionInfo,
+    options?: { preserveLocalState?: boolean; preserveBufferedLocalState?: boolean },
+  ): void {
     const preserveLocalState = options?.preserveLocalState !== false;
+    const preserveBufferedLocalState = preserveLocalState && options?.preserveBufferedLocalState !== false;
     if (preserveLocalState && this.softRefreshSession(session)) {
       this.pendingMarksSnapshot = null;
       this.pendingReconnectReplayUpdates = [];
+      if (!preserveBufferedLocalState) {
+        this.recentReconnectReplayUpdates = [];
+      }
       return;
     }
-    const recentReconnectReplayUpdates = preserveLocalState
+    const recentReconnectReplayUpdates = preserveBufferedLocalState
       && this.canPersistDurableUpdates(session.role)
       ? this.getRecentReconnectReplayUpdates()
       : [];
-    const canPreserveBufferedLocalState = preserveLocalState
+    const canPreserveBufferedLocalState = preserveBufferedLocalState
       && this.canPersistDurableUpdates(session.role)
       && (this.hasPendingLocalStateForReconnect() || recentReconnectReplayUpdates.length > 0);
     if (canPreserveBufferedLocalState && this.marksMap) {
@@ -778,6 +788,7 @@ export class CollabClient {
     }
     this.debugLog('reconnect', {
       preserveLocalState,
+      preserveBufferedLocalState,
       canPreserveBufferedLocalState,
       recentReconnectReplayUpdates: recentReconnectReplayUpdates.length,
       nextRole: session.role,

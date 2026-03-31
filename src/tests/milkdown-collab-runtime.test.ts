@@ -13,7 +13,9 @@ function run(): void {
   );
 
   assert(
-    source.includes('reconnectWithSession(session: CollabSessionInfo, options?: { preserveLocalState?: boolean }): void'),
+    source.includes('reconnectWithSession(')
+      && source.includes('options?: { preserveLocalState?: boolean; preserveBufferedLocalState?: boolean }')
+      && source.includes('const preserveBufferedLocalState = preserveLocalState && options?.preserveBufferedLocalState !== false;'),
     'Expected collab runtime to expose reconnectWithSession',
   );
   assert(
@@ -89,19 +91,23 @@ function run(): void {
   );
   assert(
     source.includes('const preserveLocalState = options?.preserveLocalState !== false;')
+      && source.includes('const preserveBufferedLocalState = preserveLocalState && options?.preserveBufferedLocalState !== false;')
+      && source.includes('if (preserveLocalState && this.softRefreshSession(session)) {')
       && source.includes('private hasPendingLocalStateForReconnect(): boolean {')
       && source.includes('return this.unsyncedChanges > 0 || this.durablePendingUpdates.length > 0;')
       && source.includes('private pendingReconnectReplayUpdates: string[] = [];')
       && source.includes('private recentReconnectReplayUpdates: Array<{ encoded: string; at: number }> = [];')
       && source.includes('private static readonly RECENT_RECONNECT_REPLAY_GRACE_MS = 5_000;')
-      && source.includes('const recentReconnectReplayUpdates = preserveLocalState')
-      && source.includes('const canPreserveBufferedLocalState = preserveLocalState')
+      && source.includes('if (!preserveBufferedLocalState) {')
+      && source.includes('const recentReconnectReplayUpdates = preserveBufferedLocalState')
+      && source.includes('const canPreserveBufferedLocalState = preserveBufferedLocalState')
       && source.includes('&& this.canPersistDurableUpdates(session.role)')
       && source.includes('&& (this.hasPendingLocalStateForReconnect() || recentReconnectReplayUpdates.length > 0);')
       && source.includes('this.pendingReconnectReplayUpdates = canPreserveBufferedLocalState')
       && source.includes('if (!canPreserveBufferedLocalState) {')
       && source.includes('this.pendingMarksSnapshot = null;')
       && source.includes('this.recentReconnectReplayUpdates = [];')
+      && source.includes('preserveBufferedLocalState,')
       && source.includes('this.connect(session, { replayDurableBuffer: canPreserveBufferedLocalState });')
       && source.includes('Buffered local updates')
       && source.includes('safe unit of preservation across that boundary.')
@@ -119,8 +125,9 @@ function run(): void {
   assert(
     source.includes('this.activeSession.shareState === session.shareState')
       && source.includes('this.activeSession.snapshotVersion === session.snapshotVersion;')
+      && source.includes("if (this.lastAuthenticationFailureReason !== null || this.terminalCloseReason === 'permission-denied') {")
       && !source.includes('this.activeSession.accessEpoch === session.accessEpoch;'),
-    'Expected soft session refresh to treat accessEpoch-only token rotations as the same live room identity while forcing a hard reconnect when the server snapshot version changes',
+    'Expected soft session refresh to treat accessEpoch-only token rotations as the same live room identity while still forcing a hard reconnect after auth failures or when the server snapshot version changes',
   );
   assert(
     source.includes('private sessionRole: ShareRole | null = null;')

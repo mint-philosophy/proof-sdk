@@ -9,6 +9,22 @@ function parseMarksPayload(raw: unknown): Record<string, StoredMark> {
   return canonicalizeStoredMarks(raw as Record<string, StoredMark>);
 }
 
+function parseRequestedMarkIds(payload: Record<string, unknown>): string[] {
+  const requestedMarkIds = Array.isArray(payload.markIds)
+    ? payload.markIds
+      .filter((markId): markId is string => typeof markId === 'string' && markId.trim().length > 0)
+      .map((markId) => markId.trim())
+    : [];
+  const uniqueMarkIds: string[] = [];
+  const seen = new Set<string>();
+  for (const markId of requestedMarkIds) {
+    if (seen.has(markId)) continue;
+    seen.add(markId);
+    uniqueMarkIds.push(markId);
+  }
+  return uniqueMarkIds;
+}
+
 function isPendingSuggestionMark(mark: StoredMark | undefined): boolean {
   if (!mark) return false;
   if (mark.kind !== 'insert' && mark.kind !== 'delete' && mark.kind !== 'replace') return false;
@@ -125,6 +141,48 @@ export function rewriteMarkMutationPayloadSnapshotTargets(
   };
 }
 
+export function resolveEquivalentBatchMutationPayloadMarkIds(
+  payload: Record<string, unknown>,
+  contextMarksInput: unknown,
+): string[] {
+  const requestedMarkIds = parseRequestedMarkIds(payload);
+  if (requestedMarkIds.length === 0) return [];
+
+  const snapshotMarks = parseMarksPayload(payload.marks);
+  const contextMarks = parseMarksPayload(contextMarksInput);
+  const resolvedMarkIds: string[] = [];
+  const usedContextMarkIds = new Set<string>();
+
+  for (const requestedMarkId of requestedMarkIds) {
+    if (Object.prototype.hasOwnProperty.call(contextMarks, requestedMarkId)) {
+      resolvedMarkIds.push(requestedMarkId);
+      usedContextMarkIds.add(requestedMarkId);
+      continue;
+    }
+
+    const sourceMark = snapshotMarks[requestedMarkId];
+    if (!isPendingSuggestionMark(sourceMark)) continue;
+
+    let bestCandidateId: string | null = null;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (const [candidateId, candidateMark] of Object.entries(contextMarks)) {
+      if (usedContextMarkIds.has(candidateId)) continue;
+      const score = scoreEquivalentSnapshotMark(sourceMark, candidateMark);
+      if (score > bestScore) {
+        bestScore = score;
+        bestCandidateId = candidateId;
+      }
+    }
+
+    if (!bestCandidateId || bestScore < 180) continue;
+    resolvedMarkIds.push(bestCandidateId);
+    usedContextMarkIds.add(bestCandidateId);
+  }
+
+  return resolvedMarkIds;
+}
+
 export const __markMutationSnapshotTargetsForTests = {
+  resolveEquivalentBatchMutationPayloadMarkIds,
   rewriteMarkMutationPayloadSnapshotTargets,
 };

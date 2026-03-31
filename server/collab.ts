@@ -12502,3 +12502,7 @@ export function invalidateLoadedCollabDocument(slug: string): void {
 export async function invalidateLoadedCollabDocumentAndWait(slug: string): Promise<void> {
   await invalidateCollabDocumentInner(slug, { clearPersistedState: false });
 }
+
+export function isCollabInvalidationActive(slug: string): boolean {
+  return collabInvalidations.has(slug);
+}

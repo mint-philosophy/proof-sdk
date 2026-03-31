@@ -70,7 +70,9 @@ function run(): void {
       && applyResultBlock.includes('&& this.collabEnabled')
       && applyResultBlock.includes('&& Boolean(this.activeCollabSession),')
       && applyResultBlock.includes('this.loadCanonicalShareDocument(markdown, marks);')
+      && applyResultBlock.includes('if (this.desiredSuggestionsEnabled) {')
       && applyResultBlock.includes("this.setSuggestionsEnabled(true, { updateDesiredState: false });")
+      && !applyResultBlock.includes("if (this.desiredSuggestionsEnabled || Object.keys(marks).length > 0) {")
       && applyResultBlock.includes('this.suppressTrackChangesDuringCollabReconnect = false;')
       && applyResultBlock.includes('this.releaseDeferredShareMarksFlush();')
       && applyResultBlock.includes('void this.refreshCollabSessionAndReconnect(false);')
@@ -286,14 +288,14 @@ function run(): void {
     '\n  private runWithTrackChangesSystemTransactionsSuppressed<T>(run: () => T): T {',
   );
   assert(
-    rehydrateMarksBlock.includes('const shouldRestoreTrackChanges = hasPendingSuggestions || this.desiredSuggestionsEnabled;')
+    rehydrateMarksBlock.includes("const shouldRestoreTrackChanges = this.desiredSuggestionsEnabled;")
       && rehydrateMarksBlock.includes('this.suppressTrackChangesDuringCollabReconnect = false;')
       && rehydrateMarksBlock.includes('this.updateShareEditGate();')
       && rehydrateMarksBlock.indexOf('this.suppressTrackChangesDuringCollabReconnect = false;')
-        < rehydrateMarksBlock.indexOf('const shouldRestoreTrackChanges = hasPendingSuggestions || this.desiredSuggestionsEnabled;')
-      && rehydrateMarksBlock.includes("this.setSuggestionsEnabled(true, { updateDesiredState: hasPendingSuggestions });")
-      && !rehydrateMarksBlock.includes("this.setSuggestionsEnabled(true, { updateDesiredState: hasPendingSuggestions });\n      this.suppressTrackChangesDuringCollabReconnect = false;"),
-    'Expected collab rehydration to restore track changes after the final persisted reject removes every pending mark, so the next edit still creates fresh suggestions when TC was already enabled',
+        < rehydrateMarksBlock.indexOf("const shouldRestoreTrackChanges = this.desiredSuggestionsEnabled;")
+      && rehydrateMarksBlock.includes("this.setSuggestionsEnabled(true, { updateDesiredState: false });")
+      && !rehydrateMarksBlock.includes("this.setSuggestionsEnabled(true, { updateDesiredState: false });\n      this.suppressTrackChangesDuringCollabReconnect = false;"),
+    'Expected collab rehydration to preserve the user\'s explicit Track Changes choice instead of forcing TC back on just because pending suggestions still exist',
   );
 
   const localResolveEditGateBlock = sliceBetween(

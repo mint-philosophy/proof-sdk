@@ -5863,10 +5863,6 @@ class ProofEditorImpl implements ProofEditor {
     // before hydration completes.
     const serverMarks = this.pendingHydrationMarks ?? this.lastReceivedServerMarks;
     this.pendingHydrationMarks = null;
-    const hasPendingSuggestions = Object.values(serverMarks).some(
-      (m) => (m.kind === 'insert' || m.kind === 'delete' || m.kind === 'replace')
-        && m.status !== 'accepted' && m.status !== 'rejected'
-    );
 
     // Apply marks with syncToYjs — omits ySyncPluginKey.isChangeOrigin so
     // y-prosemirror writes the marks into the Y.js document rather than
@@ -5889,12 +5885,12 @@ class ProofEditorImpl implements ProofEditor {
     this.updateShareEditGate();
     this.releaseDeferredShareMarksFlush();
 
-    // Re-enable track changes after the hydration doc reload when either
-    // authoritative pending suggestions still exist or the user explicitly
-    // left track changes on before the reconnect completed.
-    const shouldRestoreTrackChanges = hasPendingSuggestions || this.desiredSuggestionsEnabled;
+    // Preserve the user's explicit mode choice across collab hydration.
+    // Pending suggestions must stay reviewable in Edit mode without forcing
+    // the editor back into Track Changes.
+    const shouldRestoreTrackChanges = this.desiredSuggestionsEnabled;
     if (shouldRestoreTrackChanges) {
-      this.setSuggestionsEnabled(true, { updateDesiredState: hasPendingSuggestions });
+      this.setSuggestionsEnabled(true, { updateDesiredState: false });
     }
   }
 
@@ -10641,7 +10637,7 @@ class ProofEditorImpl implements ProofEditor {
         this.disconnectCollabService();
       }
       this.loadCanonicalShareDocument(markdown, marks);
-      if (this.desiredSuggestionsEnabled || Object.keys(marks).length > 0) {
+      if (this.desiredSuggestionsEnabled) {
         this.setSuggestionsEnabled(true, { updateDesiredState: false });
       }
       this.suppressTrackChangesDuringCollabReconnect = false;

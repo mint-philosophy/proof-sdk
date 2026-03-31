@@ -3194,8 +3194,17 @@ function resolveContainingTextblockRange(
 }
 
 function shouldSuppressStructuralParagraphSplit(state: EditorState): boolean {
-  const { $from } = state.selection;
-  return $from.parent.type.name !== 'code_block';
+  const { selection } = state;
+  const { $from } = selection;
+  if ($from.parent.type.name === 'code_block') return false;
+  if (!selection.empty) return true;
+
+  // Allow Enter at the end of a non-empty textblock so authors can continue
+  // on the next line without having to toggle out of TC. Mid-paragraph splits
+  // still stay blocked because they remain structurally unsafe to represent as
+  // tracked suggestions.
+  if ($from.parent.content.size === 0) return true;
+  return selection.from !== $from.end();
 }
 
 export function __debugShouldSuppressStructuralParagraphSplit(state: EditorState): boolean {

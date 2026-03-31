@@ -35,8 +35,8 @@ function run(): void {
   const paragraphEndState = createState(paragraphDoc, paragraphDoc.child(0).nodeSize - 1);
   assert.equal(
     __debugShouldSuppressStructuralParagraphSplit(paragraphEndState),
-    true,
-    'Expected TC to suppress end-of-paragraph Enter so it cannot create untracked empty paragraphs',
+    false,
+    'Expected TC to allow end-of-paragraph Enter so authors can continue in a new paragraph without leaving Track Changes',
   );
 
   const selectionState = createState(paragraphDoc, 1, 6);
@@ -54,6 +54,16 @@ function run(): void {
     __debugShouldSuppressStructuralParagraphSplit(codeBlockState),
     false,
     'Expected code block Enter not to be blocked by the paragraph-split guard',
+  );
+
+  const emptyParagraphDoc = schema.node('doc', null, [
+    schema.node('paragraph', null),
+  ]);
+  const emptyParagraphState = createState(emptyParagraphDoc, 1);
+  assert.equal(
+    __debugShouldSuppressStructuralParagraphSplit(emptyParagraphState),
+    true,
+    'Expected TC to keep blocking Enter inside an empty paragraph so repeated returns do not generate untracked blank blocks',
   );
 
   console.log('track-changes-enter-block-regression.test.ts passed');

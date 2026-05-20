@@ -5264,8 +5264,44 @@ class ProofEditorImpl implements ProofEditor {
           }
 
           // Wrap the transaction to convert edits to suggestions
+          const sizeBeforeDispatch = view.state.doc.content.size;
           const wrappedTr = wrapTransactionForSuggestions(tr, view.state, true);
-          dispatchWithRevision(wrappedTr);
+          try {
+            (window as any).__suggestionTrace = (window as any).__suggestionTrace || [];
+            (window as any).__suggestionTrace.push({
+              t: Date.now(),
+              args: ['preDispatch.wrappedTrSummary', {
+                wrappedDocSize: wrappedTr.doc.content.size,
+                wrappedDocChanged: wrappedTr.docChanged,
+                wrappedSteps: wrappedTr.steps.length,
+                wrappedSelFrom: wrappedTr.selection.from,
+                wrappedSelTo: wrappedTr.selection.to,
+                wrappedStepsJson: wrappedTr.steps.map(s => (s.toJSON() as any)).slice(0, 5),
+              }],
+            });
+          } catch {}
+          let dispatchError: any = null;
+          try {
+            dispatchWithRevision(wrappedTr);
+          } catch (e: any) {
+            dispatchError = e?.message || String(e);
+          }
+          try {
+            (window as any).__suggestionTrace.push({
+              t: Date.now(),
+              args: [
+                'after.dispatch.sync',
+                {
+                  sizeBeforeDispatch,
+                  sizeAfterDispatch: view.state.doc.content.size,
+                  selAfterDispatch: { from: view.state.selection.from, to: view.state.selection.to },
+                  pmDomTextLen: (document.querySelector('.ProseMirror') as HTMLElement | null)?.innerText?.length ?? -1,
+                  isFocused: document.activeElement?.classList?.contains?.('ProseMirror') ?? false,
+                  dispatchError,
+                },
+              ],
+            });
+          } catch {}
         } else {
           dispatchWithRevision(tr);
         }

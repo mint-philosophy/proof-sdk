@@ -22,6 +22,7 @@ import {
 } from '../../formats/marks';
 import { getCurrentActor } from '../actor';
 import { getTextForRange } from '../utils/text-range';
+import { toggleSuggestions } from './suggestions';
 
 // ============================================================================
 // Types
@@ -210,6 +211,21 @@ function navigatePrevComment(
 }
 
 /**
+ * Toggle Track Changes / Suggestions mode (Mod-Shift-e)
+ * Flips the suggestions plugin enabled flag so that subsequent edits are
+ * captured as reviewable suggestions instead of committed edits.
+ */
+function toggleTrackChangesCommand(
+  _state: EditorState,
+  _dispatch: ((tr: unknown) => void) | undefined,
+  view: EditorView | undefined
+): boolean {
+  if (!view) return false;
+  toggleSuggestions(view);
+  return true;
+}
+
+/**
  * Resolve the active comment (Mod-Shift-r)
  * If there's an active comment popover, resolves the entire thread.
  * Silent no-op if no active comment.
@@ -280,6 +296,7 @@ export function executeQuickAction(view: EditorView, action: QuickAction): void 
 const agentKeymap = keymap({
   'Mod-Shift-p': invokeAgentCommand,
   'Mod-Shift-k': addProofCommentCommand,
+  'Mod-Shift-e': toggleTrackChangesCommand,
   'Mod-]': navigateNextComment,
   'Mod-[': navigatePrevComment,
   'Mod-Shift-r': resolveActiveComment,

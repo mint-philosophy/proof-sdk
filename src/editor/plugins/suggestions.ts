@@ -142,10 +142,74 @@ export function wrapTransactionForSuggestions(
   state: EditorState,
   enabled: boolean
 ): Transaction {
+  const __dbg = (window as any).__suggestionDebug !== false;
+  const __log = (...args: any[]) => {
+    if (__dbg) {
+      try {
+        (window as any).__suggestionTrace = (window as any).__suggestionTrace || [];
+        (window as any).__suggestionTrace.push({ t: Date.now(), args: args.map(a => {
+          if (typeof a === 'object') {
+            try { return JSON.parse(JSON.stringify(a)); } catch { return String(a); }
+          }
+          return a;
+        }) });
+        if ((window as any).__suggestionTrace.length > 200) (window as any).__suggestionTrace.shift();
+      } catch {}
+    }
+  };
+  __log('wrap.enter', {
+    enabled,
+    docChanged: tr.docChanged,
+    selBefore: { from: state.selection.from, to: state.selection.to },
+    selAfter: { from: tr.selection.from, to: tr.selection.to },
+    stepsCount: tr.steps.length,
+    stepTypes: tr.steps.map(s => (s.toJSON() as any).stepType),
+  });
   if (!enabled || !tr.docChanged) {
     return tr;
   }
   if (tr.getMeta('y-sync$')) {
+    return tr;
+  }
+
+  // SANITY DEBUG: pass through to confirm the wrap mechanism itself is the problem.
+  if ((window as any).__suggestionsPassthrough) {
+    __log('wrap.passthrough', { reason: 'window.__suggestionsPassthrough is set' });
+    return tr;
+  }
+
+  // Pure-insert and structural-change paths are now handled by passing the
+  // user's original transaction through unchanged. The plugin's view.update
+  // (below) detects text inserts and adds a suggestion mark in a deferred
+  // dispatch, which keeps ProseMirror's caret/focus bookkeeping intact.
+  // Rebuilding the input transaction via `state.tr.step(...)` causes PM to
+  // silently drop the dispatch (focus loss verified against
+  // window.__suggestionsPassthrough), so we only rebuild for transactions we
+  // truly need to transform (delete/replace tracking, handled further down).
+  const isSimpleUserInput = (() => {
+    if (state.selection.from !== state.selection.to) return false;
+    if (tr.selection.from !== tr.selection.to) return false;
+    // Every step must be either a structural replace (paragraph split,
+    // join, etc.) or a pure-insert replace at a collapsed cursor.
+    for (const step of tr.steps) {
+      const sj = step.toJSON() as { stepType?: string; from?: number; to?: number; slice?: { content?: SliceNode[] } };
+      if (sj.stepType === 'replace') {
+        if (sj.from !== sj.to) return false; // any selection-replace is not "simple"
+        // collapsed cursor — pure insert. Text or structural is both OK.
+        continue;
+      }
+      if (sj.stepType === 'replaceAround') {
+        // paragraph splits, list wraps, etc. — let PM apply them as-is.
+        continue;
+      }
+      return false;
+    }
+    return true;
+  })();
+  if (isSimpleUserInput) {
+    __log('wrap.passthrough.simpleInput', {
+      stepTypes: tr.steps.map(s => (s.toJSON() as any).stepType),
+    });
     return tr;
   }
 
@@ -155,6 +219,9 @@ export function wrapTransactionForSuggestions(
     console.warn('[suggestions] Missing proofSuggestion mark type');
     return tr;
   }
+
+  // (Insert fast-path was removed; pure inserts are now handled by the
+  // plugin's appendTransaction so PM keeps owning the caret.)
 
   // Check for structural changes (paragraph splits, etc). Pass through unchanged.
   for (const step of tr.steps) {
@@ -463,6 +530,32 @@ export function wrapTransactionForSuggestions(
   // Mark this transaction so authorship tracking skips it
   newTr.setMeta('suggestions-wrapped', true);
 
+  // Carry over the post-edit selection from the original transaction. Without
+  // this the editor's DOM caret (advanced by the browser's beforeinput) and
+  // ProseMirror's model selection can disagree on the first keystroke under
+  // Track Changes, which causes the editor to drop focus and silently swallow
+  // every subsequent character. The original transaction already places the
+  // selection in the right spot after its own steps; the wrapped transaction
+  // produces an equivalent doc, so the positions line up.
+  try {
+    const desired = tr.selection;
+    const docSize = newTr.doc.content.size;
+    const from = Math.max(0, Math.min(desired.from, docSize));
+    const to = Math.max(from, Math.min(desired.to, docSize));
+    newTr.setSelection(TextSelection.create(newTr.doc, from, to));
+  } catch (e) {
+    // Selection no longer valid in the wrapped doc (rare): fall back to default.
+    console.warn('[suggestions] could not carry selection to wrapped transaction', e);
+  }
+
+  __log('wrap.exit', {
+    newDocSize: newTr.doc.content.size,
+    oldDocSize: state.doc.content.size,
+    newSel: { from: newTr.selection.from, to: newTr.selection.to },
+    writeOffset,
+    metadataChanged,
+    newStepsCount: newTr.steps.length,
+  });
   return newTr;
 }
 
@@ -528,12 +621,145 @@ export const suggestionsPlugin = $prose(() => {
       const wasEnabled = suggestionsPluginKey.getState(oldState)?.enabled ?? false;
       const isEnabled = suggestionsPluginKey.getState(newState)?.enabled ?? false;
       if (wasEnabled !== isEnabled) {
-        // Emit bridge message on next microtask to avoid dispatch-in-dispatch
         queueMicrotask(() => {
           (window as any).proof?.bridge?.sendMessage('suggestionsChanged', { enabled: isEnabled });
         });
       }
       return null;
+    },
+
+    view(view) {
+      // Track-changes mark application is performed OUTSIDE the input dispatch
+      // cycle. Folding an addMark step into the user's input transaction (or
+      // appending one in appendTransaction) makes ProseMirror's view drop
+      // keyboard focus mid-keystroke under the embedded collab runtime, so we
+      // schedule the mark on the next macrotask, after PM has finished its
+      // input bookkeeping for the just-typed character.
+      const pendingInserts: Array<{ from: number; to: number; text: string }> = [];
+      let scheduled = false;
+
+      const flush = () => {
+        scheduled = false;
+        if (pendingInserts.length === 0) return;
+        const items = pendingInserts.splice(0, pendingInserts.length);
+        const state = view.state;
+        const enabled = suggestionsPluginKey.getState(state)?.enabled ?? false;
+        if (!enabled) return;
+        const suggestionType = state.schema.marks.proofSuggestion;
+        if (!suggestionType) return;
+        const actor = getCurrentActor();
+        const tr = state.tr;
+        let metadata = getMarkMetadata(state);
+        const now = Date.now();
+        let touched = false;
+        for (const item of items) {
+          const docSize = tr.doc.content.size;
+          const from = Math.max(0, Math.min(item.from, docSize));
+          const to = Math.max(from, Math.min(item.to, docSize));
+          if (to <= from) continue;
+          const candidate = getCoalescableInsertCandidate(state, from, actor, now);
+          if (candidate) {
+            tr.addMark(
+              from,
+              to,
+              suggestionType.create({ id: candidate.id, kind: 'insert', by: actor }),
+            );
+            const existingMeta = metadata[candidate.id];
+            const existingContent = typeof existingMeta?.content === 'string' ? existingMeta.content : '';
+            const updatedContent = candidate.direction === 'append'
+              ? `${existingContent}${item.text}`
+              : `${item.text}${existingContent}`;
+            metadata = {
+              ...metadata,
+              [candidate.id]: {
+                ...existingMeta,
+                kind: 'insert' as const,
+                by: actor,
+                content: updatedContent,
+                status: existingMeta?.status ?? 'pending',
+                createdAt: existingMeta?.createdAt ?? new Date().toISOString(),
+              },
+            };
+            lastInsertByActor.set(actor, {
+              id: candidate.id,
+              from: candidate.range.from,
+              to: candidate.range.to + item.text.length,
+              by: actor,
+              updatedAt: now,
+            });
+          } else {
+            const suggestionId = generateMarkId();
+            const createdAt = new Date().toISOString();
+            tr.addMark(
+              from,
+              to,
+              suggestionType.create({ id: suggestionId, kind: 'insert', by: actor }),
+            );
+            metadata = {
+              ...metadata,
+              [suggestionId]: buildSuggestionMetadata('insert', actor, item.text, createdAt),
+            };
+            lastInsertByActor.set(actor, {
+              id: suggestionId,
+              from,
+              to,
+              by: actor,
+              updatedAt: now,
+            });
+          }
+          touched = true;
+        }
+        if (!touched) return;
+        tr.setMeta(marksPluginKey, { type: 'SET_METADATA', metadata });
+        tr.setMeta('suggestions-follow-up', true);
+        tr.setMeta('addToHistory', false);
+        view.dispatch(tr);
+      };
+
+      return {
+        update(newView, prevState) {
+          if (!(suggestionsPluginKey.getState(newView.state)?.enabled ?? false)) return;
+          const prevSize = prevState.doc.content.size;
+          const newSize = newView.state.doc.content.size;
+          if (newSize <= prevSize) return; // no insert
+          // Use the cursor positions to bound the inserted range. The browser's
+          // input handling advances the selection past the inserted text, so
+          // the inserted range is [prevSel.from, newSel.from).
+          const prevFrom = prevState.selection.from;
+          const newFrom = newView.state.selection.from;
+          const growth = newSize - prevSize;
+          // The new caret should be growth-positions past the previous one
+          // when the insert happened at the cursor.
+          if (newFrom !== prevFrom + growth) {
+            try {
+              (window as any).__suggestionTrace = (window as any).__suggestionTrace || [];
+              (window as any).__suggestionTrace.push({
+                t: Date.now(),
+                args: ['view.update.skip', { prevFrom, newFrom, growth, reason: 'cursor delta != growth' }],
+              });
+            } catch {}
+            return;
+          }
+          const from = prevFrom;
+          const to = newFrom;
+          const text = newView.state.doc.textBetween(from, to, '\n', '\n');
+          try {
+            (window as any).__suggestionTrace = (window as any).__suggestionTrace || [];
+            (window as any).__suggestionTrace.push({
+              t: Date.now(),
+              args: ['view.update.queueInsert', { from, to, text, prevSize, newSize }],
+            });
+          } catch {}
+          pendingInserts.push({ from, to, text });
+          if (!scheduled) {
+            scheduled = true;
+            setTimeout(flush, 0);
+          }
+        },
+        destroy() {
+          pendingInserts.length = 0;
+        },
+      };
     },
   });
 });

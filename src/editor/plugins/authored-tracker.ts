@@ -1,9 +1,15 @@
 import { $prose } from '@milkdown/kit/utils';
-import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
+import { Plugin, PluginKey, type EditorState } from '@milkdown/kit/prose/state';
 import type { MarkType, Slice, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 
 import { marksPluginKey } from './marks';
+import { suggestionsPluginKey } from './suggestions';
 import { getCurrentActor } from '../actor';
+
+function suggestionsAreEnabled(state: EditorState): boolean {
+  const sug = suggestionsPluginKey.getState(state);
+  return Boolean(sug?.enabled);
+}
 
 type PendingRange = { from: number; to: number; by: string };
 
@@ -61,6 +67,13 @@ export const authoredTrackerPlugin = $prose(() => {
         const markType = getAuthoredMarkType(view.state);
         if (!markType || !text) return false;
 
+        // When Track Changes is on, the suggestions wrapper owns the marks for
+        // user input. Adding a competing "authored" mark on the same range
+        // forces ProseMirror to emit a second mark step right after the
+        // wrapped insertion, which mutates the DOM around the just-inserted
+        // text and drops keyboard focus mid-keystroke.
+        if (suggestionsAreEnabled(view.state)) return false;
+
         const actor = getCurrentActor();
         pendingHumanRanges.push({ from, to: from + text.length, by: actor });
         return false;
@@ -100,7 +113,11 @@ export const authoredTrackerPlugin = $prose(() => {
       }
 
       const docChanged = transactions.some(tr => tr.docChanged);
-      const skipAuthored = transactions.some(tr => tr.getMeta('ai-authored') || tr.getMeta('document-load'));
+      const skipAuthored = transactions.some(
+        tr => tr.getMeta('ai-authored')
+          || tr.getMeta('document-load')
+          || tr.getMeta('suggestions-wrapped'),
+      );
 
       if (!docChanged || skipAuthored) {
         pendingHumanRanges = [];

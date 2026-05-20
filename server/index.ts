@@ -46,6 +46,13 @@ async function main(): Promise<void> {
   const allowedCorsOrigins = parseAllowedCorsOrigins();
 
   app.use(express.json({ limit: '10mb' }));
+  // Serve built editor bundle (dist/assets/*). The build pipeline writes
+  // the JS bundle there but does not copy it into public/, so we layer
+  // a static handler for /assets that falls through to public/assets.
+  app.use(
+    '/assets',
+    express.static(path.join(__dirname, '..', 'dist', 'assets'), { fallthrough: true }),
+  );
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
   app.use((req, res, next) => {

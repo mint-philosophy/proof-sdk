@@ -659,16 +659,29 @@ export const suggestionsPlugin = $prose(() => {
           if (to <= from) continue;
           const candidate = getCoalescableInsertCandidate(state, from, actor, now);
           if (candidate) {
-            tr.addMark(
-              from,
-              to,
-              suggestionType.create({ id: candidate.id, kind: 'insert', by: actor }),
-            );
             const existingMeta = metadata[candidate.id];
             const existingContent = typeof existingMeta?.content === 'string' ? existingMeta.content : '';
             const updatedContent = candidate.direction === 'append'
               ? `${existingContent}${item.text}`
               : `${item.text}${existingContent}`;
+            // Store the coalesced content directly on the mark attrs so that
+            // buildMetadataFromMark (the marks plugin's read-back path) sees
+            // the up-to-date content. The mark attrs are the canonical source
+            // for inline-mark data; the plugin's metadata entry is a derived
+            // view. Re-issuing the mark with refreshed attrs over the full
+            // covered range is what keeps the projection in sync.
+            tr.addMark(
+              candidate.range.from,
+              to,
+              suggestionType.create({
+                id: candidate.id,
+                kind: 'insert',
+                by: actor,
+                content: updatedContent,
+                status: existingMeta?.status ?? 'pending',
+                createdAt: existingMeta?.createdAt ?? new Date().toISOString(),
+              }),
+            );
             metadata = {
               ...metadata,
               [candidate.id]: {
@@ -693,7 +706,14 @@ export const suggestionsPlugin = $prose(() => {
             tr.addMark(
               from,
               to,
-              suggestionType.create({ id: suggestionId, kind: 'insert', by: actor }),
+              suggestionType.create({
+                id: suggestionId,
+                kind: 'insert',
+                by: actor,
+                content: item.text,
+                status: 'pending',
+                createdAt,
+              }),
             );
             metadata = {
               ...metadata,

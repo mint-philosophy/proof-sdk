@@ -220,3 +220,20 @@ Expected: each paragraph appears in the visible editor as a green
 suggestion span; review-rail still shows the marks.
 
 Not yet expected to pass: clicking Apply or Reject on a suggestion.
+
+## Browser QA invariants for follow-up work
+
+- Enter tracked text with real macOS CGEvents (`cgtype` or `cliclick`). CDP
+  key events, `execCommand`, and synthetic DOM events can produce false passes.
+- Before typing, focus `.ProseMirror` in the renderer, call
+  `Page.bringToFront`, and close the CDP WebSocket. Leaving the socket open can
+  cause native keystrokes to be dropped.
+- Send Return with
+  `osascript -e 'tell application "System Events" to key code 36'`; the local
+  `cgtype --return` implementation is known to be broken. CDP clicks remain
+  suitable for ordinary UI controls.
+- The final Accept/Reject test must use two real user tokens in separate tabs,
+  click the visible controls, and check both the rendered UI and authenticated
+  state after refresh. An HTTP 202 response alone is not a pass.
+- A settled result has `marks: {}`, `projectionFresh: true`,
+  `repairPending: false`, and the expected markdown.
